@@ -1,7 +1,14 @@
 [versions]
-agp = "8.7.3"
-kotlin = "2.0.21"
-ksp = "2.0.21-1.0.28"
+# AGP 9.3.x：compileSdk 36 官方支持（8.7.3 只测到 35，构建时报警告）
+# 兼容矩阵（官方 release notes 核实）：Gradle >= 9.5.0 / JDK 17 / Build Tools 36.0.0 / KGP >= 2.2.10
+agp = "9.3.1"
+# AGP 9 内置 Kotlin 支持：不再需要应用 kotlin-android 插件，
+# 但 KGP 版本仍需 >= 2.2.10（AGP 自带运行期依赖会兜到这个版本）
+kotlin = "2.2.10"
+# KSP 自 2.3.0 起与 Kotlin 编译器版本解耦；AGP 9 内置 Kotlin 支持自 2.3.1 引入，
+# 2.3.3 起才摆脱已废弃的 KGP compilerOptions API → 取矩阵推荐的 2.3.6。
+# 注意：新版 KSP 不再使用 "2.0.21-1.0.28" 这种 Kotlin 绑定格式。
+ksp = "2.3.6"
 coroutines = "1.9.0"
 composeBom = "2024.12.01"
 activityCompose = "1.9.3"
