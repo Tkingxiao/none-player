@@ -1,0 +1,13 @@
+*.iml
+.gradle
+/local.properties
+/.idea
+.DS_Store
+# 子模块（app/plugins/kernel/core）的构建产物也必须忽略；
+# 仅写 /build 只覆盖根模块，子模块 build 会进入待提交列表（E37）
+**/build/
+**/.kotlin/
+/build
+/captures
+.externalNativeBuild
+.cxx

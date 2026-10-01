@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 声明由 PermissionProvider 扩展点聚合申请的权限 -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <application
+        android:name=".NonePlayerApplication"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.NonePlayer">
+
+        <!-- configChanges：旋转/窗口尺寸变化由 Compose 直接响应，
+             不重建 Activity——避免旋转黑闪、播放状态与页面栈重置（E5） -->
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- E2 深链入口：noneplayer://player?uri=… 等由各插件
+                 ScreenProvider.deepLinks 声明，经导航图 navDeepLink 分发（E26）；
+                 singleTask + onNewIntent 保证应用在前台时也能被外部唤起 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="noneplayer" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

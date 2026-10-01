@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 与 core:ui 的 BackgroundLight 一致，避免启动窗口闪白 -->
+    <color name="np_window_background">#F2F2F7</color>
+    <color name="ic_launcher_background">#1C1C1E</color>
+</resources>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 后台播放：前台媒体服务 + 媒体通知（通知权限在 Android 13+ 由 PermissionProvider 聚合申请） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application>
+        <service
+            android:name=".PlaybackService"
+            android:exported="true"
+            android:foregroundServiceType="mediaPlayback">
+            <intent-filter>
+                <action android:name="androidx.media3.session.MediaSessionService" />
+            </intent-filter>
+        </service>
+    </application>
+
+</manifest>
