@@ -1,5 +1,6 @@
 package com.noneplayer.plugins.library
 
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -110,9 +111,21 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     val sources by remember {
         kernel.registry.observe<MediaSourceProvider>()
     }.collectAsStateWithLifecycle(initialValue = emptyList())
-    val items by remember(sources) {
-        if (sources.isEmpty()) flowOf(emptyList()) else combine(sources.map { it.observeMedia() }) { lists -> lists.flatMap { it } }
-    }.collectAsStateWithLifecycle(initialValue = emptyList())
+    // E78：媒体列表用「可空哨兵」承载，以区分两种语义完全不同的空：
+    //   null      = 尚未收到任何发射（插件/扫描数据未就绪）
+    //   emptyList = 已确实加载，且结果就是空
+    // 此前二者不可区分，导致下面的「目录失效 → 回根层」守卫在**入口重建的首帧**
+    // 拿空树去校验刚被 rememberSaveable 恢复的选中路径，把状态当场清掉：
+    // 表现为「文件夹进到第 N 层 → 切 Tab 或看视频返回 → 退回根层」。
+    val mediaState by remember(sources) {
+        if (sources.isEmpty()) {
+            flowOf<List<MediaItem>?>(null)
+        } else {
+            combine(sources.map { it.observeMedia() }) { lists -> lists.flatMap { it } }
+        }
+    }.collectAsStateWithLifecycle(initialValue = null)
+    val mediaLoaded = mediaState != null
+    val items = mediaState ?: emptyList()
 
     val sortedItems = remember(items, sortMode, sortAscending) {
         val comparator: Comparator<MediaItem> = when (sortMode) {
@@ -127,9 +140,17 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     // 文件夹层级树（根 = 虚拟根；进入子级后展示子文件夹 + 本级视频）
     val folderRoot = remember(sortedItems) { buildFolderTree(sortedItems) }
     val currentFolder = remember(selectedFolder, folderRoot) { folderRoot.findByPath(selectedFolder) }
-    // 目录被移除/重扫后选中路径可能失效 → 自动回到根层
-    LaunchedEffect(selectedFolder, folderRoot) {
-        if (selectedFolder != null && currentFolder == null) selectedFolder = null
+    // 目录被移除/重扫后选中路径可能失效 → 自动回到根层。
+    // E78：**必须等媒体数据真正加载完再校验**——未加载时树必然是空的，
+    // 此时校验等于用"还没读到"冒充"已不存在"，会清掉刚恢复的层级状态。
+    LaunchedEffect(selectedFolder, folderRoot, mediaLoaded) {
+        if (mediaLoaded && selectedFolder != null && currentFolder == null) selectedFolder = null
+    }
+
+    // E54：文件夹层级是页内状态（不入返回栈），系统返回必须在此消费，
+    // 否则返回事件落到导航层 → 切走 Tab / 弹回首页，用户看到"退出了文件夹页"。
+    BackHandler(enabled = viewMode == LibraryView.FOLDERS && selectedFolder != null) {
+        selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
     }
 
     // ---- 权限与目录门控 ----
@@ -154,14 +175,26 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
         ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
         if (uri != null) {
-            context.contentResolver.takePersistableUriPermission(
-                uri,
-                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
-            )
-            scope.launch {
-                val current = settings.scanFolderUris.first()
-                settings.setScanFolders(current + uri.toString())
-                sources.filter { it.isAvailable() }.forEach { it.scan() }
+            // E64 修复：与 LocalScannerSettings 同根因——take 侧补齐与 release 侧
+            // （LocalMediaSource.removeScanFolder）一致的 SecurityException 捕获。
+            val granted = runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }.isSuccess
+            if (granted) {
+                scope.launch {
+                    val current = settings.scanFolderUris.first()
+                    settings.setScanFolders(current + uri.toString())
+                    sources.filter { it.isAvailable() }.forEach { it.scan() }
+                }
+            } else {
+                android.widget.Toast.makeText(
+                    context,
+                    "无法持久化该目录的访问权限（可能已达到系统上限）",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
             }
         }
     }
@@ -246,7 +279,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                 onAction = { folderPicker.launch(null) },
             )
 
-            items.isEmpty() -> NpEmptyState(
+            // E78：媒体未加载完（mediaLoaded=false）时不判定"空库"，
+            // 否则进入本页的首帧会闪一下「媒体库是空的」再跳出内容。
+            mediaLoaded && items.isEmpty() -> NpEmptyState(
                 title = "媒体库是空的",
                 message = "扫描所选文件夹中的视频，建立你的媒体库。",
                 actionLabel = if (requestedScan) null else "开始扫描",
@@ -607,13 +642,20 @@ private fun MediaCard(item: MediaItem, modifier: Modifier = Modifier, onClick: (
     }
 }
 
-/** 跳转播放页：媒体信息经 URL 编码查询参数传递，由播放页插件解析 */
+/**
+ * 跳转播放页：媒体信息经 URL 编码查询参数传递，由播放页插件解析。
+ *
+ * E55：编码用 `encode(value, "")` 把允许集显式收到"仅 unreserved 字符"。
+ * 单参重载会放行 `& = ? +` 一类分隔符，一个含 `&` 的标题
+ * （"Rock & Roll.mkv"）就能把后面的 mime/id 参数整段截掉。
+ */
 private fun openPlayer(navigator: Navigator, item: MediaItem) {
+    fun enc(value: String) = android.net.Uri.encode(value, "")
     navigator.navigate(
-        route = "player?uri=${android.net.Uri.encode(item.uri)}" +
-            "&title=${android.net.Uri.encode(item.title)}" +
-            "&mime=${android.net.Uri.encode(item.mimeType)}" +
-            "&id=${android.net.Uri.encode(item.id)}",
+        route = "player?uri=${enc(item.uri)}" +
+            "&title=${enc(item.title)}" +
+            "&mime=${enc(item.mimeType)}" +
+            "&id=${enc(item.id)}",
     )
 }
 

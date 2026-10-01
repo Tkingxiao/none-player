@@ -12,6 +12,8 @@ datastore = "1.1.1"
 media3 = "1.11.1"
 coil = "2.7.0"
 junit = "4.13.2"
+# androidx-window 不在 compose BOM 内 → 必须自带版本项（§13.2）
+window = "1.5.0"
 
 [libraries]
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -41,6 +43,12 @@ compose-ui-graphics = { group = "androidx.compose.ui", name = "ui-graphics" }
 compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
 compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
 compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+# E52 形态判定层依赖（§13.2）：别名沿用现有命名风格（compose 系不带 androidx- 前缀）
+# 注：§13.2 建议的别名 `compose-material3-window-size-class` 会被 Gradle 拒绝
+# （"class" 是保留字，无法生成访问器），故改用下面不含 class 的等价别名。
+compose-material3-window-size = { group = "androidx.compose.material3", name = "material3-window-size-class" }
+compose-material3-adaptive-navigation-suite = { group = "androidx.compose.material3", name = "material3-adaptive-navigation-suite" }
+androidx-window = { group = "androidx.window", name = "window", version.ref = "window" }
 compose-material-icons = { group = "androidx.compose.material", name = "material-icons-core" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }

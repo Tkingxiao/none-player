@@ -54,11 +54,24 @@ object FormatProbe {
         data object Unknown : Result
     }
 
-    /** 在 IO 线程执行；绝不抛出，异常按 [Result.Unknown] 放行 */
+    /**
+     * 在 IO 线程执行；非取消异常按 [Result.Unknown] 放行。
+     *
+     * E58 修复：此前用 `runCatching { }.getOrDefault(...)` 兜底，但 `runCatching`
+     * 捕获 `Throwable`——`CancellationException` 是其子类，会被一并吞掉，
+     * 使结构化并发的取消信号失效：调用方 `prepareJob?.cancel()` 后，旧探测仍可能
+     * "被取消"却跑完并返回正常结果，静默覆盖新一次 prepare() 的媒体。
+     * 显式区分取消异常并继续向上抛出，是修复的关键一步。
+     */
     suspend fun probe(context: Context, uriString: String): Result =
         withContext(Dispatchers.IO) {
-            runCatching { probeLocal(context.applicationContext, uriString) }
-                .getOrDefault(Result.Unknown)
+            try {
+                probeLocal(context.applicationContext, uriString)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                Result.Unknown
+            }
         }
 
     // ---- 内部实现 ----

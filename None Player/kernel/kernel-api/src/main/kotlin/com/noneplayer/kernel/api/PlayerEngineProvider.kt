@@ -45,6 +45,41 @@ interface VideoPlayer {
         get() = MutableStateFlow(emptyList())
 
     /**
+     * 当前播放队列（同文件夹连播的来源）。默认空——不支持队列的引擎退化为单曲播放。
+     *
+     * 队列放在引擎契约而非 UI 侧，是因为"自动连播/通知栏 ⏮⏭"只有引擎（会话侧）
+     * 才知道：media3 在 `setMediaItems` 之后由框架负责切集与通知按钮，
+     * UI 侧另存一份队列反而会出现两份真相（§8.2）。
+     */
+    val queue: StateFlow<List<com.noneplayer.core.media.MediaItem>>
+        get() = MutableStateFlow(emptyList())
+
+    /** 当前队列下标；无队列或未播放为 -1 */
+    val currentIndex: StateFlow<Int>
+        get() = MutableStateFlow(-1)
+
+    /**
+     * 装载整个队列并从 [startIndex] 开始播放（队列连播、通知 ⏮⏭ 由此免费获得）。
+     * 不支持队列的引擎可退化为只 [prepare] [startIndex] 那一项。
+     */
+    fun setQueue(
+        items: List<com.noneplayer.core.media.MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long = 0L,
+    ) {
+        items.getOrNull(startIndex)?.let { prepare(it.uri, it.mimeType, it.title, it.coverUri) }
+    }
+
+    /** 跳到队列中的指定项（选集面板）；越界忽略 */
+    fun selectQueueIndex(index: Int) {}
+
+    /** 下一集（无下一集时为空操作） */
+    fun playNext() {}
+
+    /** 上一集（无上一集时为空操作） */
+    fun playPrevious() {}
+
+    /**
      * 准备播放指定地址。
      *
      * [title] / [artworkUri] 供媒体通知与锁屏展示（E4）；实现不支持时忽略。

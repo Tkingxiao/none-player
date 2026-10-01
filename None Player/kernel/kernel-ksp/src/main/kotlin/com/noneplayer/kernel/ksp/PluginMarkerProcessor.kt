@@ -54,6 +54,11 @@ class PluginMarkerProcessor(
             }
 
             if (!validatePluginClass(clazz)) {
+                // E71 修复：此前校验失败的类不会加入 processed，KSP 多轮增量编译期间
+                // （该注解符号持续可见时）会被反复重新校验、反复重复打印同一条错误日志。
+                // 校验结果是确定性的（基于类声明本身，不依赖尚未解析的符号），
+                // 失败一次即可认定"本轮已处理"，不需要重试。
+                processed += fqn
                 continue
             }
 

@@ -32,4 +32,10 @@ sealed interface KernelEvent {
 
     /** 插件完成安装 */
     data class PluginInstalled(val pluginId: String) : KernelEvent
+
+    /**
+     * E59 修复配套：某个插件的 onStart() 抛出异常（已被内核捕获、不影响其余插件与
+     * BootState.Running）。设置页"插件管理"等可订阅此事件向用户呈现局部故障。
+     */
+    data class PluginStartFailed(val pluginId: String, val cause: Throwable) : KernelEvent
 }

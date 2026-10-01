@@ -1,16 +1,26 @@
 package com.noneplayer.core.data
 
 import android.content.Context
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
+/**
+ * E65 修复：此前未配置 corruptionHandler——偏好文件一旦因异常关机/存储故障等损坏，
+ * 所有暴露的 Flow（themeMode/sortMode/scanFolderUris/playbackPosition 等）都会抛
+ * IOException 终止，且消费端（MainActivity/LibraryScreen 等）均未加 .catch{}，
+ * 表现为相关界面彻底无法渲染。改为"损坏即重置为空偏好"，让应用能继续启动
+ * （代价是损坏当次会丢失用户偏好，但远好于直接崩溃不可用）。
+ */
 private val Context.dataStore: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> by preferencesDataStore(
     name = "none_player_settings",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
 /** 媒体库排序方式 */
@@ -40,6 +50,13 @@ class AppSettings(private val context: Context) {
         val KEY_LIBRARY_VIEW = stringPreferencesKey("library_view")
         val KEY_PLAYBACK_SPEED = stringPreferencesKey("playback_speed")
 
+        // E73（跟踪中，未在本批次改 key 格式）：playback_pos_<mediaId> / subtitle_<mediaId>
+        // 未按 sourceId 分命名空间。当前唯一数据源是本地扫描（LocalMediaSource 产出的
+        // id 形如 "ms-123"），风险是潜在的——一旦新增网络/其他 MediaSourceProvider 且
+        // id 格式重叠才会触发。此处暂不改 key 格式：那样做会让现有用户的断点续播/
+        // 字幕记忆在升级后直接读不到旧 key（静默丢数据），代价比潜在风险本身更大。
+        // 按《功能审核文档.md》§14.6 的建议，命名空间方案与 §8.3 的 :core:database
+        // 迁移一起定稿（彼时本就要做一次性数据搬迁，可以把前缀加好）。
         fun playbackPosKey(mediaId: String) = longPreferencesKey("playback_pos_$mediaId")
         fun subtitleKey(mediaId: String) = stringPreferencesKey("subtitle_$mediaId")
     }

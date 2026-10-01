@@ -31,7 +31,18 @@ object SubtitleCharset {
     /** 判定中文编码是否可信的最低分（误判为中文编码时通常远低于此） */
     private const val MIN_SCORE = 6
 
+    /**
+     * E75 修复：此前 decode() 完全依赖调用方（SubtitleFile.kt）先行限流，自身没有
+     * 大小护栏——作为公共可复用 object，一旦未来新增调用方忘记先限流，这里就是
+     * 唯一的最后防线。32MB 是比 SubtitleFile 的 8MB 更宽松的硬上限（留给非字幕场景
+     * 的余量），超限直接拒绝而不是进入多轮严格解码 + 逐字符打分（本身是比较重的操作）。
+     */
+    private const val MAX_DECODE_BYTES = 32 * 1024 * 1024
+
     fun decode(bytes: ByteArray): Result {
+        require(bytes.size <= MAX_DECODE_BYTES) {
+            "字幕内容过大（${bytes.size} 字节 > $MAX_DECODE_BYTES 字节上限），调用方应先行限流"
+        }
         // 1) BOM 优先
         if (bytes.startsWith(0xEF, 0xBB, 0xBF)) {
             return Result(

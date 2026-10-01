@@ -29,6 +29,13 @@ dependencies {
     api(platform(libs.compose.bom))
     api(libs.compose.ui)
     api(libs.compose.material3)
+    // E52（§13.2）：NpWindowInfo 的字段类型是 WindowWidthSizeClass，必须 api 出去，
+    // 否则消费方（各插件）拿不到该类型；adaptive-navigation-suite 供 KernelTabScaffold
+    // 的导航栏形态分派用（E46），同样落本模块。
+    api(libs.compose.material3.window.size)
+    api(libs.compose.material3.adaptive.navigation.suite)
     api(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    // hinge 避让（折叠屏）用的 WindowInfoTracker 只在实现内使用，不必外泄
+    implementation(libs.androidx.window)
 }

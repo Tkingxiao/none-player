@@ -43,6 +43,8 @@ import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.KernelNavHost
 import com.noneplayer.kernel.ui.api.LocalKernel
+import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
+import com.noneplayer.kernel.ui.api.rememberNpWindowInfo
 import kotlinx.coroutines.flow.MutableSharedFlow
 
 /**
@@ -77,6 +79,10 @@ class MainActivity : ComponentActivity() {
             val app = application as NonePlayerApplication
             val themeMode by (app.kernel.services.get<AppSettings>())
                 .themeMode.collectAsStateWithLifecycle(app.initialThemeMode)
+            // E45/E52：形态判定层的**唯一注入点**（§13.2）——全应用一次判定，
+            // 经 LocalNpWindowInfo 下发；各页面一律消费它，不得各自读 LocalConfiguration
+            // 做档位分支（唯一例外是"窗口是否横向"，见 NpWindowInfo 文档注释）。
+            val windowInfo = rememberNpWindowInfo(activity = this@MainActivity)
             NonePlayerTheme(
                 darkTheme = when (themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
@@ -93,7 +99,10 @@ class MainActivity : ComponentActivity() {
                 ) { s ->
                     when (s) {
                         BootState.Idle, BootState.Booting -> LaunchScreen()
-                        BootState.Running -> CompositionLocalProvider(LocalKernel provides kernel) {
+                        BootState.Running -> CompositionLocalProvider(
+                            LocalKernel provides kernel,
+                            LocalNpWindowInfo provides windowInfo,
+                        ) {
                             PermissionRequester(kernel)
                             KernelNavHost(deepLinkIntents = deepLinkIntents)
                         }

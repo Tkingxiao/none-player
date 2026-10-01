@@ -95,7 +95,17 @@ class Kernel private constructor(
                     events.publish(KernelEvent.PluginInstalled(plugin.id))
                 }
             }
-            sorted.forEach { it.onStart() }
+            // E59 修复：onStart() 逐插件隔离——此前所有插件的 onStart 共享本方法外层的
+            // 大 try/catch，任何一个插件启动期抽风（如一次 MediaStore 查询异常）都会被
+            // catch 成 BootState.Failed，拖垮整个 App 的启动。微内核的插件化解耦目标要求
+            // 单个插件的 onStart 失败只应是局部故障，不应连累其余已就绪的插件与主界面。
+            sorted.forEach { plugin ->
+                runCatching { plugin.onStart() }
+                    .onFailure { cause ->
+                        Log.w(TAG, "插件 ${plugin.id} onStart 异常，已隔离，其余插件不受影响", cause)
+                        events.publish(KernelEvent.PluginStartFailed(plugin.id, cause))
+                    }
+            }
 
             registerBuiltins()
             _bootState.value = BootState.Running
@@ -124,6 +134,11 @@ class Kernel private constructor(
         services.register<EventBus>(events)
         services.register<AppSettings>(AppSettings(context.applicationContext))
         services.register<VideoPlayerFactory>(VideoPlayerFactory(registry))
+        // 扩展注册表本身也是内核级服务：插件在 onBind 阶段只能拿到 ServiceLocator
+        // （onInstall 的 registry 参数要等安装期才来），而 `VideoPlayerFactory` 之类的
+        // 构造需要它。播放会话层要在 onBind 就建起来（迷你条可能在首个 Tab 组合时就
+        // 需要它），因此把 registry 一并登记，避免插件各建一份互不相认的注册表。
+        services.register<ExtensionRegistry>(registry)
     }
 
     /** 内核内置扩展：聚合设置页（设计文档 §8 的内核实现） */

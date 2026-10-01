@@ -25,6 +25,7 @@ import com.noneplayer.kernel.api.ScanResult
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -84,7 +85,17 @@ class LocalMediaSource(
 
     override suspend fun scan(): ScanResult = withContext(dispatchers.io) {
         if (_scanning.value) {
-            return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
+            // E67 修复：扫描进行中到达的请求不再是无条件丢弃——短轮询等待当前扫描
+            // 结束后重新发起一次，避免 ContentObserver 去抖触发的变更被永久遗漏
+            // （debounce 已经消费了那次发射，之前不重试就等于丢了这批文件增删）。
+            var waited = 0
+            while (_scanning.value && waited < SCAN_WAIT_TIMEOUT_MS) {
+                delay(SCAN_WAIT_POLL_MS)
+                waited += SCAN_WAIT_POLL_MS.toInt()
+            }
+            if (_scanning.value) {
+                return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
+            }
         }
         val folderUriStrs = settings.scanFolderUris.first()
         if (folderUriStrs.isEmpty()) {
@@ -93,52 +104,94 @@ class LocalMediaSource(
 
         _scanning.value = true
         try {
-            val startedAt = System.currentTimeMillis()
-            // E24：无法解析的目录绝不回退"全量扫描整机"；全部无法解析时拒绝扫描
-            val scopes = folderUriStrs.map { scanScopeFromTree(it) }
-            val validScopes = scopes.filterNot { it is ScanScope.Unresolvable }
-            if (validScopes.isEmpty()) {
-                Log.w(TAG, "授权目录均无法解析，已拒绝扫描: $folderUriStrs")
-                _lastScan.value = LocalScanSummary(
-                    added = 0,
-                    removed = 0,
-                    total = _media.value.size,
-                    durationMs = 0,
-                    note = "授权目录无法解析，已拒绝扫描（不会扫描其他位置）",
-                )
-                return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
-            }
-            val previousIds = _media.value.map { it.id }.toSet()
-            val items = queryMediaStore(validScopes)
-            // B7：清理已删除视频对应的缩略图缓存
-            val validIds = items.map { it.id.removePrefix("ms-") }.toSet()
-            File(context.cacheDir, "video_thumbs")
-                .listFiles()
-                ?.forEach { f -> if (f.nameWithoutExtension !in validIds) f.delete() }
-            _media.value = items
-            // E30（B7 收尾）：按 id 集合差集统计，而非净值——
-            // 同时增删时净值会互相抵消（新增 3 删 2 显示为 +1/0）
-            val newIds = items.map { it.id }.toSet()
-            val skippedCount = scopes.size - validScopes.size
-            val summary = LocalScanSummary(
-                added = (newIds - previousIds).size,
-                removed = (previousIds - newIds).size,
-                total = items.size,
-                durationMs = System.currentTimeMillis() - startedAt,
-                note = if (skippedCount > 0) "$skippedCount 个目录无法解析，已跳过" else null,
-            )
-            _lastScan.value = summary
-            eventBus.publish(KernelEvent.MediaScanned(sourceId = sourceId, count = items.size))
-            ScanResult(
-                sourceId = sourceId,
-                added = summary.added,
-                updated = 0,
-                removed = summary.removed,
-                durationMs = summary.durationMs,
-            )
+            // E59 修复：scan() 本体现在整体包一层 runCatching——任何异常（如 OEM
+            // MediaStore 列缺失、Provider 查询失败）都不再向上冒泡崩溃插件 onStart()
+            // 乃至拖垮整个内核启动，而是落成一条带原因的失败摘要。
+            runCatching { scanInternal(folderUriStrs) }
+                .getOrElse { t ->
+                    Log.w(TAG, "扫描异常，已降级为失败摘要而非崩溃", t)
+                    val failSummary = LocalScanSummary(
+                        added = 0,
+                        removed = 0,
+                        total = _media.value.size,
+                        durationMs = 0,
+                        note = "扫描失败：${t.message ?: t.javaClass.simpleName}",
+                    )
+                    _lastScan.value = failSummary
+                    ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
+                }
         } finally {
             _scanning.value = false
         }
+    }
+
+    private suspend fun scanInternal(folderUriStrs: List<String>): ScanResult {
+        val startedAt = System.currentTimeMillis()
+        // E24：无法解析的目录绝不回退"全量扫描整机"；全部无法解析时拒绝扫描
+        // E68 修复：先剔除已被系统撤销持久化授权的目录，摘要里与"docId 畸形"区分开
+        val revoked = revokedFolders(folderUriStrs)
+        val liveFolders = folderUriStrs - revoked
+        val scopes = liveFolders.map { scanScopeFromTree(it) }
+        val validScopes = scopes.filterNot { it is ScanScope.Unresolvable }
+        if (validScopes.isEmpty()) {
+            Log.w(TAG, "授权目录均无法解析，已拒绝扫描: $folderUriStrs")
+            _lastScan.value = LocalScanSummary(
+                added = 0,
+                removed = 0,
+                total = _media.value.size,
+                durationMs = 0,
+                note = if (revoked.isNotEmpty()) {
+                    "授权目录已被系统撤销或无法解析，已拒绝扫描（不会扫描其他位置）"
+                } else {
+                    "授权目录无法解析，已拒绝扫描（不会扫描其他位置）"
+                },
+            )
+            return ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
+        }
+        val previousIds = _media.value.map { it.id }.toSet()
+        val items = queryMediaStore(validScopes)
+        // B7：清理已删除视频对应的缩略图缓存
+        val validIds = items.map { it.id.removePrefix("ms-") }.toSet()
+        File(context.cacheDir, "video_thumbs")
+            .listFiles()
+            ?.forEach { f -> if (f.nameWithoutExtension !in validIds) f.delete() }
+        _media.value = items
+        // E30（B7 收尾）：按 id 集合差集统计，而非净值——
+        // 同时增删时净值会互相抵消（新增 3 删 2 显示为 +1/0）
+        val newIds = items.map { it.id }.toSet()
+        val skippedCount = scopes.size - validScopes.size
+        val notes = buildList {
+            if (skippedCount > 0) add("$skippedCount 个目录无法解析，已跳过")
+            if (revoked.isNotEmpty()) add("${revoked.size} 个目录授权已被系统撤销，请重新选择或移除")
+        }
+        val summary = LocalScanSummary(
+            added = (newIds - previousIds).size,
+            removed = (previousIds - newIds).size,
+            total = items.size,
+            durationMs = System.currentTimeMillis() - startedAt,
+            note = notes.joinToString("；").ifEmpty { null },
+        )
+        _lastScan.value = summary
+        eventBus.publish(KernelEvent.MediaScanned(sourceId = sourceId, count = items.size))
+        return ScanResult(
+            sourceId = sourceId,
+            added = summary.added,
+            updated = 0,
+            removed = summary.removed,
+            durationMs = summary.durationMs,
+        )
+    }
+
+    /**
+     * E68：与系统持久化授权列表交叉核对，找出已被用户在系统设置中撤销的扫描目录。
+     * 不在此处修改 settings——交给调用方决定提示文案，用户仍可手动移除。
+     */
+    private fun revokedFolders(folderUriStrs: List<String>): List<String> {
+        val persisted = context.contentResolver.persistedUriPermissions
+            .filter { it.isReadPermission }
+            .map { it.uri.toString() }
+            .toSet()
+        return folderUriStrs.filterNot { it in persisted }
     }
 
     /** 添加扫描目录：已存在则直接重扫，否则持久化后立即扫描 */
@@ -172,6 +225,12 @@ class LocalMediaSource(
             scan()
         }
     }
+
+    /**
+     * E77：对外暴露观察者是否已注册，供插件禁用/`Kernel.shutdown()` 路径的
+     * 集成测试断言"onStop 后 ContentObserver 确已注销"，不必依赖反射读私有字段。
+     */
+    val isObserving: Boolean get() = contentObserver != null
 
     /**
      * 监听 MediaStore 视频集合的变化（文件添加/删除），去抖后自动重扫。
@@ -216,6 +275,10 @@ class LocalMediaSource(
 
     private fun queryScope(scope: ScanScope): List<MediaItem> {
         // E24：按授权范围构建过滤；Unresolvable 不应到达此处，防御性返回空
+        // E66 修复：relativePath/scope.name 来自 SAF tree docId 拆分，Android
+        // 文件夹名允许包含 '%'/'_'——不转义会被 SQLite LIKE 解释成通配符，使匹配范围
+        // 超出用户实际选择的目录，削弱"任何分支都不得回退全量扫描"的不变量。
+        // 下面所有 LIKE 子句统一转义 + 追加 ESCAPE '\'。
         val selection: String?
         val selectionArgs: Array<String>?
         when (scope) {
@@ -223,12 +286,13 @@ class LocalMediaSource(
             is ScanScope.Primary -> {
                 val relativePath = scope.relativePath
                 if (relativePath != null) {
+                    val escaped = escapeLike(relativePath)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        selection = "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ?"
-                        selectionArgs = arrayOf("$relativePath%")
+                        selection = "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ? ESCAPE '\\'"
+                        selectionArgs = arrayOf("$escaped%")
                     } else {
-                        selection = "${MediaStore.Video.Media.DATA} LIKE ?"
-                        selectionArgs = arrayOf("%/$relativePath/%")
+                        selection = "${MediaStore.Video.Media.DATA} LIKE ? ESCAPE '\\'"
+                        selectionArgs = arrayOf("%/$escaped/%")
                     }
                 } else {
                     // 用户选的主存储根目录——全量扫描是明确意图
@@ -241,20 +305,27 @@ class LocalMediaSource(
                     // 按卷精确过滤（SAF 卷名 == MediaStore VOLUME_NAME），绝不回退全量
                     val relativePath = scope.relativePath
                     selection = if (relativePath != null) {
-                        "${MediaStore.MediaColumns.VOLUME_NAME} = ? AND ${MediaStore.Video.Media.RELATIVE_PATH} LIKE ?"
+                        "${MediaStore.MediaColumns.VOLUME_NAME} = ? AND " +
+                            "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ? ESCAPE '\\'"
                     } else {
                         "${MediaStore.MediaColumns.VOLUME_NAME} = ?"
                     }
+                    // VOLUME_NAME 走等值比较（=），不是 LIKE，本身不需要转义；
+                    // 只有 RELATIVE_PATH 的 LIKE 参数需要转义
                     selectionArgs = if (relativePath != null) {
-                        arrayOf(scope.name, "$relativePath%")
+                        arrayOf(scope.name, "${escapeLike(relativePath)}%")
                     } else {
                         arrayOf(scope.name)
                     }
                 } else {
-                    val root = "/storage/${scope.name}"
-                    selection = "${MediaStore.Video.Media.DATA} LIKE ?"
+                    val root = "/storage/${escapeLike(scope.name)}"
+                    selection = "${MediaStore.Video.Media.DATA} LIKE ? ESCAPE '\\'"
                     selectionArgs = arrayOf(
-                        if (scope.relativePath != null) "$root/${scope.relativePath}/%" else "$root/%",
+                        if (scope.relativePath != null) {
+                            "$root/${escapeLike(scope.relativePath)}/%"
+                        } else {
+                            "$root/%"
+                        },
                     )
                 }
             }
@@ -268,7 +339,14 @@ class LocalMediaSource(
             MediaStore.Video.Media.DATE_ADDED,
             MediaStore.Video.Media.MIME_TYPE,
             MediaStore.Video.Media.DATA,
+            // E79：分组（以及同文件夹连播队列）依赖"视频在哪个目录"。
+            // 此前只读 DATA，而 DATA 在 Android 10+ 受分区存储限制、**经常返回 null**
+            // ——整个媒体的 folder 于是全为 null，"按文件夹分组"与"同目录连播"双双静默失效
+            // （播放本身正常，所以很难被发现）。RELATIVE_PATH 是 Q 起官方提供且始终可用的
+            // 相对路径，优先用它；DATA 仅作旧版本兜底。
+            MediaStore.Video.Media.RELATIVE_PATH,
         )
+        val hasRelativePath = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
         val primaryRelativePath = (scope as? ScanScope.Primary)?.relativePath
         val items = mutableListOf<MediaItem>()
         context.contentResolver.query(
@@ -278,27 +356,45 @@ class LocalMediaSource(
             selectionArgs,
             "${MediaStore.Video.Media.DATE_ADDED} DESC",
         )?.use { cursor ->
-            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
-            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DISPLAY_NAME)
+            // E59 修复配套：7 个投影列此前 6 个用 getColumnIndexOrThrow，任何一个列在
+            // 异常 OEM MediaStore 实现下缺失都会直接抛异常、中止整次扫描。统一改为
+            // getColumnIndex + 安全默认值；只有 _ID 缺失时该行确实无法构造合法 MediaItem，
+            // 跳过这一行而不是中止整个游标遍历。
+            val idCol = cursor.getColumnIndex(MediaStore.Video.Media._ID)
+            val nameCol = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
             val durationCol = cursor.getColumnIndex(MediaStore.Video.Media.DURATION)
-            val sizeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.SIZE)
-            val addedCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
-            val mimeCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.MIME_TYPE)
-            val dataCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATA)
+            val sizeCol = cursor.getColumnIndex(MediaStore.Video.Media.SIZE)
+            val addedCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_ADDED)
+            val mimeCol = cursor.getColumnIndex(MediaStore.Video.Media.MIME_TYPE)
+            val dataCol = cursor.getColumnIndex(MediaStore.Video.Media.DATA)
+            val relativeCol = if (hasRelativePath) {
+                cursor.getColumnIndex(MediaStore.Video.Media.RELATIVE_PATH)
+            } else {
+                -1
+            }
             while (cursor.moveToNext()) {
+                if (idCol < 0) continue
                 val id = cursor.getLong(idCol)
-                val dataPath = cursor.getString(dataCol).orEmpty()
+                val dataPath = if (dataCol >= 0) cursor.getString(dataCol).orEmpty() else ""
                 val item = MediaItem(
                     id = "ms-$id",
                     sourceId = sourceId,
-                    title = cursor.getString(nameCol).orEmpty().ifEmpty { "未命名视频" },
+                    title = (if (nameCol >= 0) cursor.getString(nameCol) else null)
+                        .orEmpty().ifEmpty { "未命名视频" },
                     uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id).toString(),
-                    mimeType = cursor.getString(mimeCol) ?: "video/mp4",
+                    mimeType = (if (mimeCol >= 0) cursor.getString(mimeCol) else null) ?: "video/mp4",
                     durationMs = if (durationCol >= 0) cursor.getLong(durationCol) else 0L,
-                    sizeBytes = cursor.getLong(sizeCol),
-                    addedAtMs = cursor.getLong(addedCol) * 1000,
+                    sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
+                    addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
                     coverUri = thumbnailFor(id, ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)),
-                    folder = folderOf(dataPath, primaryRelativePath),
+                    folder = folderOf(
+                        dataPath = dataPath,
+                        relativePath = if (relativeCol >= 0) {
+                            cursor.getString(relativeCol)
+                        } else {
+                            null
+                        },
+                    ),
                 )
                 items += item
             }
@@ -306,8 +402,23 @@ class LocalMediaSource(
         return items
     }
 
-    /** 从完整路径提取展示用文件夹（去掉主存储前缀，如 "DCIM/Camera"） */
+    /** E66：转义 SQLite LIKE 模式中的通配符，使文件夹名里的 '%'/'_' 不被误当通配符 */
+    private fun escapeLike(value: String): String =
+        value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    /**
+     * 从媒体记录提取展示用文件夹（如 "Movies"、"DCIM/Camera"）。
+     *
+     * E79：**优先 RELATIVE_PATH**。Android 10 起 [MediaStore.Video.Media.DATA] 受分区
+     * 存储限制，取到 null 是常态；以前只看 DATA，导致 folder 全为 null，
+     * "按文件夹分组"和"同文件夹连播"一起静默失效。RELATIVE_PATH 形如 "Movies/"，
+     * 去掉尾部斜杠即为展示名；两者都拿不到时返回 null（调用方按"无目录"处理）。
+     */
     private fun folderOf(dataPath: String, relativePath: String?): String? {
+        relativePath
+            ?.trim('/')
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { return it }
         if (dataPath.isEmpty()) return null
         val dir = dataPath.substringBeforeLast('/')
             .removePrefix("/storage/emulated/0/")
@@ -351,6 +462,10 @@ class LocalMediaSource(
 }
 
 private const val TAG = "LocalMediaSource"
+
+/** E67：scan() 命中并发守卫时的最长等待时长与轮询间隔 */
+private const val SCAN_WAIT_TIMEOUT_MS = 10_000L
+private const val SCAN_WAIT_POLL_MS = 100L
 
 /**
  * 用户授权目录（SAF tree）解析出的扫描范围（E24）。

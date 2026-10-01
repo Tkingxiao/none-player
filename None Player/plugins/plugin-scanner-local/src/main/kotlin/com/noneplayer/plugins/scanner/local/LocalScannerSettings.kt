@@ -1,5 +1,6 @@
 package com.noneplayer.plugins.scanner.local
 
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
@@ -42,11 +43,24 @@ class LocalScannerSettings(private val source: LocalMediaSource) : SettingsProvi
             ActivityResultContracts.OpenDocumentTree(),
         ) { uri ->
             if (uri != null) {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                )
-                scope.launch { source.addScanFolder(uri.toString()) }
+                // E64 修复：take 侧此前无 try/catch，而对称的 release
+                // （LocalMediaSource.removeScanFolder）早已用 runCatching 包裹——
+                // 非持久化授权或达到系统每应用 128 个授权上限时会抛 SecurityException。
+                val granted = runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }.isSuccess
+                if (granted) {
+                    scope.launch { source.addScanFolder(uri.toString()) }
+                } else {
+                    Toast.makeText(
+                        context,
+                        "无法持久化该目录的访问权限（可能已达到系统上限）",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             }
         }
 

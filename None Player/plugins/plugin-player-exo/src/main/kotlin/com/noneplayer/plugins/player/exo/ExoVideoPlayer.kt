@@ -72,6 +72,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private val _cues = MutableStateFlow<List<SubtitleCue>>(emptyList())
     override val cues: StateFlow<List<SubtitleCue>> = _cues.asStateFlow()
 
+    // ---- 队列（§8.2）：写入 media3 会话后，通知 ⏮⏭ 与"播完自动下一集"由框架免费提供 ----
+    private val _queue = MutableStateFlow<List<com.noneplayer.core.media.MediaItem>>(emptyList())
+    override val queue: StateFlow<List<com.noneplayer.core.media.MediaItem>> = _queue.asStateFlow()
+
+    private val _currentIndex = MutableStateFlow(-1)
+    override val currentIndex: StateFlow<Int> = _currentIndex.asStateFlow()
+
     private val connected = CompletableDeferred<MediaController>()
     private var controller: MediaController? = null
     private var attachedDisplay: Any? = null
@@ -90,9 +97,20 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var probedVideoCodec: String? = null
     private var probedAudioCodec: String? = null
 
+    // E58 修复配套：prepare() 世代号，见 prepare() 内注释
+    private var prepareGeneration = 0
+
     // 失败闩锁：Error 是终态，之后引擎的 IDLE 等状态回调不得覆盖它；
     // 下一次 prepare 时清除（重试）
     private var terminalFailure = false
+
+    // E62 修复：release() 可能先于 MediaController.Builder.buildAsync() 的异步连接完成
+    // 执行（例如用户快速退出播放页）。该监听器运行在独立于 scope 的 MainExecutor 上，
+    // 此前会无条件把新连接的 controller 赋给实例字段——release() 已经跑过，不会再有人
+    // 释放这个重新冒出来的连接，造成 MediaController 绑定泄漏。用 @Volatile 标志位
+    // 在连接完成时判断：已释放则直接释放新连接，不再挂到实例字段上。
+    @Volatile
+    private var released = false
 
     init {
         val future = MediaController.Builder(
@@ -103,6 +121,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             {
                 try {
                     val c = future.get()
+                    if (released) {
+                        // release() 已先执行：这个连接不再被任何人持有，直接释放
+                        c.release()
+                        return@addListener
+                    }
                     controller = c
                     c.addListener(object : Player.Listener {
                         override fun onPlaybackStateChanged(playbackState: Int) {
@@ -125,6 +148,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
                         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
                             _currentUri.value = mediaItem?.localConfiguration?.uri?.toString()
+                            // 队列下标跟随会话（自动连播推进到下一集时也要更新，
+                            // 否则迷你条/选集面板会一直停在旧下标）
+                            val index = c.currentMediaItemIndex
+                            if (index != _currentIndex.value) _currentIndex.value = index
                         }
 
                         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -205,6 +232,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     /**
      * 准备播放（E39）：先做格式预探测——"容器无解封装"或"视频编码无解码器"时
      * 直接进入结构化失败态（省掉 3–8s 白转圈）；探测通过/无结论才装载媒体。
+     *
+     * E58 修复配套（二次防御）：即便 FormatProbe.probe 已正确区分取消异常
+     * （见 FormatProbe.kt），这里仍为每次 prepare() 打一个单调递增的世代号。
+     * 快速切换 A→B 时，A 的探测协程即便在极端调度下"取消晚了一步"跑完，
+     * 落地前也会先核对世代号——不是最新一次就直接丢弃，不会覆盖 B 的状态。
      */
     override fun prepare(uri: String, mimeType: String, title: String, artworkUri: String?) {
         currentMediaUri = uri
@@ -213,8 +245,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentArtworkUri = artworkUri
         prepareJob?.cancel()
         terminalFailure = false
+        val myGeneration = ++prepareGeneration
         prepareJob = scope.launch {
-            when (val probe = FormatProbe.probe(appContext, uri)) {
+            val probe = FormatProbe.probe(appContext, uri)
+            if (myGeneration != prepareGeneration) return@launch // 已有更新的 prepare()，丢弃
+            when (probe) {
                 is FormatProbe.Result.Unplayable -> {
                     appliedUri = null
                     probedContainer = probe.failure.container
@@ -241,6 +276,85 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         controller?.setVideoSurfaceView(view as? SurfaceView)
     }
 
+    /**
+     * 装载整个队列并从 [startIndex] 起播（§8.2）。
+     *
+     * 走 `setMediaItems(items, startIndex, startPositionMs)` 而非逐项
+     * `setMediaItem`：队列进入会话后，系统媒体通知自动出现 ⏮⏭，
+     * `STATE_ENDED` 时由 media3 自动推进到下一项——连播由此**免费获得**，
+     * 无需自己监听结束再手工装载（手工装载在后台/锁屏场景下容易漏）。
+     *
+     * 每项都按 [prepare] 同款带上标题与封面，否则切集后通知栏会丢掉元数据。
+     */
+    override fun setQueue(
+        items: List<com.noneplayer.core.media.MediaItem>,
+        startIndex: Int,
+        startPositionMs: Long,
+    ) {
+        val c = controller ?: return
+        if (items.isEmpty()) return
+        val safeIndex = startIndex.coerceIn(0, items.lastIndex)
+        _queue.value = items
+        _currentIndex.value = safeIndex
+        // 队列装载即覆盖当前媒体：重置世代号，避免上一次探测结果回写
+        prepareJob?.cancel()
+        terminalFailure = false
+        pendingSeekMs = startPositionMs.takeIf { it > 0 }
+        val mediaItems = items.map { it.toMediaItem() }
+        c.setMediaItems(mediaItems, safeIndex, startPositionMs.coerceAtLeast(0L))
+        _currentUri.value = items[safeIndex].uri
+        c.prepare()
+        c.play()
+    }
+
+    override fun selectQueueIndex(index: Int) {
+        val c = controller ?: return
+        val items = _queue.value
+        if (index !in items.indices) return
+        _currentIndex.value = index
+        // seekToDefaultPosition(index) 由 media3 负责装载目标项；
+        // 预载源命中时这一步几乎无缓冲（L2 的收益点）
+        c.seekToDefaultPosition(index)
+        c.play()
+    }
+
+    override fun playNext() {
+        val c = controller ?: return
+        if (c.hasNextMediaItem()) {
+            c.seekToNextMediaItem()
+            c.play()
+        }
+    }
+
+    override fun playPrevious() {
+        val c = controller ?: return
+        if (c.hasPreviousMediaItem()) {
+            c.seekToPreviousMediaItem()
+            c.play()
+        }
+    }
+
+    /** 队列项 → media3 MediaItem（标题/封面/字幕一并带上） */
+    private fun com.noneplayer.core.media.MediaItem.toMediaItem(): MediaItem =
+        MediaItem.Builder()
+            .setUri(uri)
+            .setMimeType(mimeType)
+            .setMediaMetadata(
+                MediaMetadata.Builder()
+                    .setTitle(title.ifBlank { null })
+                    .setIsBrowsable(false)
+                    .setIsPlayable(true)
+                    .apply {
+                        val bytes = readArtworkBytes(coverUri)
+                        if (bytes != null) {
+                            setArtworkData(bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                        } else {
+                            coverUri?.let { setArtworkUri(it.toUri()) }
+                        }
+                    }
+                    .build(),
+            )
+            .build()
     override fun setSpeed(speed: Float) {
         controller?.playbackParameters = PlaybackParameters(speed)
         _speed.value = speed
@@ -302,23 +416,48 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     }
 
 
-    /** 读取本地封面字节（file/content），失败返回 null；远程 http(s) 不在此处理 */
+    /**
+     * 读取本地封面字节（file/content），失败返回 null；远程 http(s) 不在此处理。
+     *
+     * E63 修复：此前用 `readBytes()` 把整个文件/流一次性读进内存，再检查是否超过
+     * [MAX_ARTWORK_BYTES]——"封面"若意外指向一个几 GB 的大文件（现场抽帧兜底 URI
+     * 理论上也可能传入非预期地址），读取本身就先触发一次性大内存分配，上限形同虚设。
+     * 改为有界读取：读满上限 +1 字节即判定超限并立即中止，不等整份数据落地。
+     */
     private fun readArtworkBytes(uriString: String?): ByteArray? = runCatching {
         val uri = uriString?.toUri() ?: return null
-        val bytes = when (uri.scheme) {
-            "file" -> uri.path?.let { java.io.File(it).takeIf { f -> f.isFile }?.readBytes() }
-            "content" -> appContext.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        val stream = when (uri.scheme) {
+            "file" -> uri.path
+                ?.let { java.io.File(it) }
+                ?.takeIf { f -> f.isFile }
+                ?.let { java.io.FileInputStream(it) }
+            "content" -> appContext.contentResolver.openInputStream(uri)
             else -> null
-        }
-        // 过大的封面不塞进媒体项（Binder 事务与内存都吃不消）
-        bytes?.takeIf { it.size <= MAX_ARTWORK_BYTES }
+        } ?: return null
+        readBounded(stream, MAX_ARTWORK_BYTES)
     }.getOrNull()
+
+    /** 有界读取：读满 limit+1 字节即视为超限并返回 null，不把超限数据整份读入内存 */
+    private fun readBounded(stream: java.io.InputStream, limit: Int): ByteArray? = stream.use {
+        val buffer = java.io.ByteArrayOutputStream(minOf(limit, 64 * 1024))
+        val chunk = ByteArray(16 * 1024)
+        var total = 0
+        while (true) {
+            val read = it.read(chunk)
+            if (read < 0) break
+            total += read
+            if (total > limit) return null
+            buffer.write(chunk, 0, read)
+        }
+        buffer.toByteArray()
+    }
 
     private companion object {
         const val MAX_ARTWORK_BYTES = 512 * 1024
     }
 
     override fun release() {
+        released = true
         scope.cancel()
         // 注意：会话侧播放器由 PlaybackService 持有，后台播放继续；
         // 这里只解除 UI 与会话的连接
@@ -328,7 +467,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private fun applyMedia(mediaUri: String) {
         val c = controller ?: return
-        val position = c.currentPosition
+        // E74 修复：此前恢复位置只读 c.currentPosition，没有优先消费未落实的
+        // pendingSeekMs——几乎同时切字幕与拖动进度条时，字幕触发的媒体项重建会用
+        // 稍微过期的位置恢复播放，产生极窄的"位置回退"窗口。
+        val position = pendingSeekMs ?: c.currentPosition
         val wasPlaying = c.isPlaying || c.playWhenReady
         val builder = MediaItem.Builder()
             .setUri(mediaUri)
@@ -353,8 +495,25 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         subtitleUri?.let { sub ->
             builder.setSubtitleConfigurations(listOf(subtitleConfiguration(sub)))
         }
-        c.setMediaItem(builder.build(), position)
-        c.prepare()
+        val item = builder.build()
+        // 队列完整性（E32 后续）：字幕更换需要重建**当前媒体项**（SubtitleConfiguration
+        // 烘焙在 MediaItem 里，改不了），但**不能**用 setMediaItem——那是"替换整个队列为
+        // 单项"，会把同文件夹队列连同通知栏 ⏮⏭ 一起清掉，连播随即失效。
+        // 仅当目标 uri 确实是队列中的当前项时才 replaceMediaItem(当前下标)：只换那一项、
+        // 队列结构不动；若是首次装载或换到了别的媒体，才走 setMediaItem（单项队列）。
+        val currentQueueItem = _queue.value.getOrNull(c.currentMediaItemIndex)
+        val replaceInPlace = c.mediaItemCount > 1 &&
+            currentQueueItem?.uri == mediaUri &&
+            c.currentMediaItemIndex in 0 until c.mediaItemCount
+        if (replaceInPlace) {
+            c.replaceMediaItem(c.currentMediaItemIndex, item)
+            c.prepare()
+            // replaceMediaItem 把位置重置到该项起点，需显式还原（含待落实 seek）
+            c.seekTo(position)
+        } else {
+            c.setMediaItem(item, position)
+            c.prepare()
+        }
         // 落实探测期间挂起的 seek（进页断点续播在 prepare 与 probe 完成之间到达）
         pendingSeekMs?.let { pending ->
             c.seekTo(pending)

@@ -69,6 +69,15 @@ fun KernelNavHost(
     val navController = rememberNavController()
     val navigator = remember(navController) { NavControllerNavigator(navController) }
 
+    /**
+     * Tab 导航控制器**必须在本层创建**（E53）——早前它在 [KernelTabScaffold] 内部
+     * `remember`，跳播放页时 Shell 目的地离开组合、控制器随之销毁；返回时
+     * `startDestination` 重新解析成首个 Tab，表现为
+     * **「在文件夹里看了视频再返回，回到了首页」**（Tab 选择与页内层级全丢）。
+     * 提升到外层后实例跨导航存活，内层返回栈与 `rememberSaveable` 归属都不变。
+     */
+    val tabNavController = rememberNavController()
+
     // 热启动深链：Activity 复用实例时系统不会重建导航图，必须显式转发给 NavController
     LaunchedEffect(navController, deepLinkIntents) {
         deepLinkIntents?.collect { navController.handleDeepLink(it) }
@@ -90,7 +99,7 @@ fun KernelNavHost(
     ) {
         // 主界面 = 底部标签栏 Shell（B 站式信息架构）；Tab 由各插件贡献
         composable(SHELL_ROUTE) {
-            KernelTabScaffold(navigator = navigator)
+            KernelTabScaffold(navigator = navigator, tabNavController = tabNavController)
         }
         screens.forEach { screen ->
             screen.register(builder = this, navigator = navigator)

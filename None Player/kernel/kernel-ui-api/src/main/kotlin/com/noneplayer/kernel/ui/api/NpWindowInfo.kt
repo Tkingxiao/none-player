@@ -1,0 +1,182 @@
+package com.noneplayer.kernel.ui.api
+
+import android.app.Activity
+import android.content.Context
+import android.content.pm.PackageManager
+import android.hardware.input.InputManager
+import android.view.InputDevice
+import androidx.compose.material3.windowsizeclass.ExperimentalMaterial3WindowSizeClassApi
+import androidx.compose.material3.windowsizeclass.WindowHeightSizeClass
+import androidx.compose.material3.windowsizeclass.WindowSizeClass
+import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
+import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+
+/**
+ * 设备形态（§13.1 矩阵的落地枚举）。
+ *
+ * 判据是"**窗口**形态 + 平台能力"，不是"屏幕尺寸"——折叠屏展开/分屏会让
+ * 屏幕宽度与实际窗口宽度脱钩（§13.2 开头）。
+ */
+enum class NpFormFactor { PHONE, FOLDABLE, TABLET, DESKTOP }
+
+/**
+ * 形态判定层（E45）——**一处判定，全局消费**。
+ *
+ * 插件与内核页面**不得各自读 `LocalConfiguration.screenWidthDp` 做档位分支**：
+ * 那样每加一个页面就多一份真相，多形态适配必然分叉。需要档位时一律消费
+ * [LocalNpWindowInfo]。
+ *
+ * **唯一例外（§13.2 已核实的边界）**：`screenWidthDp` / `screenHeightDp` 只允许
+ * 用来回答"窗口是不是横向"这一个问题（播放页全屏的单一真相，E48）。
+ * 不得在它之上继续长 `if (screenWidthDp > 600)` 这类档位判断。
+ *
+ * 归属 `kernel-ui-api` 而非 `core:ui`：本包是 app + 5 个插件的既有公共依赖，
+ * 放这里零条新依赖边即可全覆盖；而 `core:ui` 与 `kernel-ui-api` 之间当前**没有**
+ * 依赖边，放过去等于把主题/组件层拖进内核骨架层（§13.2 归属修正）。
+ */
+data class NpWindowInfo(
+    /** 宽度档（material3 window-size-class） */
+    val widthClass: WindowWidthSizeClass,
+    /** 高度档 */
+    val heightClass: WindowHeightSizeClass,
+    /** 设备形态 */
+    val formFactor: NpFormFactor,
+    /** 窗口是否横向 */
+    val isLandscape: Boolean,
+    /** EXPANDED 且宽高比 > 1.4 → "类 PC"（§13.4 平板横屏三栏布局的判据） */
+    val isDesktopLike: Boolean,
+    /** 是否有指针设备（鼠标/触控板）——桌面化输入（E50）的前提 */
+    val isHoverable: Boolean,
+    /** 阅读型内容的最大宽度约束，防超宽拉伸；`Dp.Unspecified` 表示不约束 */
+    val maxContentWidth: Dp,
+) {
+    /** 紧凑档：底部 NavigationBar + 单列（现状） */
+    val isCompact: Boolean get() = widthClass == WindowWidthSizeClass.Compact
+
+    /** 中等档：NavigationRail + 可双栏 */
+    val isMedium: Boolean get() = widthClass == WindowWidthSizeClass.Medium
+
+    /** 扩展档：Rail/三栏 + 列表详情并列 */
+    val isExpanded: Boolean get() = widthClass == WindowWidthSizeClass.Expanded
+}
+
+/**
+ * 形态判定结果的下发通道。
+ *
+ * 未提供时读取即抛错——形态未注入就渲染页面属于编程错误，应尽早失败
+ * （与 [LocalKernel] 同一约定）。
+ */
+val LocalNpWindowInfo: androidx.compose.runtime.ProvidableCompositionLocal<NpWindowInfo> =
+    staticCompositionLocalOf {
+        error("LocalNpWindowInfo 未提供：请在 MainActivity 用 CompositionLocalProvider 注入（§13.2）")
+    }
+
+/**
+ * 由 Activity 计算形态判定结果（唯一注入点用，§13.2）。
+ *
+ * [hasFoldingFeature] 由调用方从 `WindowInfoTracker.windowLayoutInfo` 流里取
+ * （铰链/折叠状态是异步的，无法在组合期同步读到）。
+ */
+@OptIn(ExperimentalMaterial3WindowSizeClassApi::class)
+@Composable
+fun rememberNpWindowInfo(
+    activity: Activity,
+    hasFoldingFeature: Boolean = false,
+): NpWindowInfo {
+    val context = LocalContext.current
+    val sizeClass: WindowSizeClass = calculateWindowSizeClass(activity)
+    val configuration = LocalConfiguration.current
+    // 有指针设备的状态在插拔鼠标时会变，用 configuration 作为失效键重新探测
+    val hoverable = remember(configuration) { detectHoverable(context) }
+    return remember(sizeClass, configuration, hasFoldingFeature, hoverable) {
+        buildNpWindowInfo(
+            sizeClass = sizeClass,
+            isLandscape = configuration.screenWidthDp > configuration.screenHeightDp,
+            screenWidthDp = configuration.screenWidthDp,
+            screenHeightDp = configuration.screenHeightDp,
+            smallestScreenWidthDp = configuration.smallestScreenWidthDp,
+            hasFoldingFeature = hasFoldingFeature,
+            isHoverable = hoverable,
+            isDesktopPlatform = isDesktopPlatform(context),
+        )
+    }
+}
+
+/**
+ * 形态判定核心（纯函数，便于单测）。
+ *
+ * 形态优先级：桌面平台 > 折叠屏 > 平板 > 手机。折叠屏判在平板之前——
+ * 展开态折叠屏的 `smallestScreenWidthDp` 可能已过 600，但它需要的是
+ * **铰链避让**语义，不是平板的分栏语义。
+ */
+internal fun buildNpWindowInfo(
+    sizeClass: WindowSizeClass,
+    isLandscape: Boolean,
+    screenWidthDp: Int,
+    screenHeightDp: Int,
+    smallestScreenWidthDp: Int,
+    hasFoldingFeature: Boolean,
+    isHoverable: Boolean,
+    isDesktopPlatform: Boolean,
+): NpWindowInfo {
+    val formFactor = when {
+        isDesktopPlatform -> NpFormFactor.DESKTOP
+        hasFoldingFeature -> NpFormFactor.FOLDABLE
+        smallestScreenWidthDp >= TABLET_SMALLEST_WIDTH_DP -> NpFormFactor.TABLET
+        else -> NpFormFactor.PHONE
+    }
+    // "类 PC"：窗口足够宽且横向——平板横屏、桌面窗口都属于这一类（§13.4）
+    val aspect = if (screenHeightDp > 0) screenWidthDp.toFloat() / screenHeightDp else 1f
+    val isDesktopLike = sizeClass.widthSizeClass == WindowWidthSizeClass.Expanded &&
+        isLandscape && aspect > DESKTOP_LIKE_ASPECT
+    return NpWindowInfo(
+        widthClass = sizeClass.widthSizeClass,
+        heightClass = sizeClass.heightSizeClass,
+        formFactor = formFactor,
+        isLandscape = isLandscape,
+        isDesktopLike = isDesktopLike,
+        isHoverable = isHoverable,
+        maxContentWidth = maxContentWidthFor(sizeClass.widthSizeClass),
+    )
+}
+
+/** 阅读型内容最大宽度：紧凑档不约束，越宽越需要收窄以防行长失控 */
+private fun maxContentWidthFor(widthClass: WindowWidthSizeClass): Dp = when (widthClass) {
+    WindowWidthSizeClass.Compact -> Dp.Unspecified
+    WindowWidthSizeClass.Medium -> 840.dp
+    else -> 1200.dp
+}
+
+/** 平板判据：最小宽度 ≥ 600dp（Android 官方 sw600dp 分界） */
+private const val TABLET_SMALLEST_WIDTH_DP = 600
+
+/** "类 PC" 判据：宽高比 > 1.4（§13.2 定义） */
+private const val DESKTOP_LIKE_ASPECT = 1.4f
+
+/** 桌面平台（ChromeOS / Android PC 模式） */
+private fun isDesktopPlatform(context: Context): Boolean = runCatching {
+    context.packageManager.hasSystemFeature(PackageManager.FEATURE_PC)
+}.getOrDefault(false)
+
+/**
+ * 是否有指针设备：输入设备里存在鼠标或触控板。
+ *
+ * 用 InputManager 实查而非猜"平板就有鼠标"——平板也可能纯触屏。
+ */
+private fun detectHoverable(context: Context): Boolean = runCatching {
+    val inputManager = context.getSystemService(Context.INPUT_SERVICE) as? InputManager
+        ?: return@runCatching false
+    inputManager.inputDeviceIds.any { id ->
+        val device = inputManager.getInputDevice(id) ?: return@any false
+        val sources = device.sources
+        sources and InputDevice.SOURCE_MOUSE == InputDevice.SOURCE_MOUSE ||
+            sources and InputDevice.SOURCE_TOUCHPAD == InputDevice.SOURCE_TOUCHPAD
+    }
+}.getOrDefault(false)

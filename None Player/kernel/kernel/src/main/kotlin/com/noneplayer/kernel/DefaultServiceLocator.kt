@@ -16,7 +16,10 @@ class DefaultServiceLocator : ServiceLocator {
     private val services = ConcurrentHashMap<KClass<*>, Any>()
 
     override fun <T : Any> register(clazz: KClass<T>, service: T) {
-        val old = services.put(clazz, service)
+        // E61 修复：put 无条件覆盖、check 在覆盖之后才做，是 check-then-act 竞态——
+        // 两个线程并发注册同一 clazz 时底层 map 已被破坏。putIfAbsent 是原子的
+        // "若不存在才写入"，返回值即为已存在的旧值，判重与写入一步完成。
+        val old = services.putIfAbsent(clazz, service)
         check(old == null) { "内核服务重复注册: ${clazz.qualifiedName}" }
     }
 

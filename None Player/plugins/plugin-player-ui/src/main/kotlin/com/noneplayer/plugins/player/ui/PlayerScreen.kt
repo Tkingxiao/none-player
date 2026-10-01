@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.os.SystemClock
+import android.util.Log
 import android.view.SurfaceView
 import android.view.WindowManager
 import android.widget.Toast
@@ -30,12 +31,16 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -50,6 +55,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -73,6 +79,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
@@ -81,6 +88,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.PlaybackFailure
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.kernel.api.ExtensionRegistry
@@ -100,8 +108,8 @@ import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.math.abs
 
@@ -115,6 +123,21 @@ private const val SCRUB_PREVIEW_INTERVAL_MS = 200L
 private const val CONTROLS_AUTO_HIDE_MS = 3500L
 
 /**
+ * 播放页方向锁（E48）：UI 只表达**意图**，窗口方向由一个 effect 单点落地，
+ * 避免多处命令式 `requestedOrientation` 互相覆盖。
+ */
+private enum class OrientationLock(val requestedOrientation: Int) {
+    /** 不干预：跟随系统"自动旋转"设置（横过来即横向，即全屏） */
+    FollowSensor(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED),
+
+    /** 用户点「全屏」：锁横向，直到显式退出 */
+    Landscape(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE),
+
+    /** 用户点「退出全屏」：锁竖向，窗口转竖后立刻交还 [FollowSensor] */
+    Portrait(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT),
+}
+
+/**
  * 播放页——媒体库点击视频后的目的地。
  *
  * - 经 VideoPlayerFactory 扩展点选择播放引擎；引擎驻留后台服务，退到后台继续播放；
@@ -122,8 +145,8 @@ private const val CONTROLS_AUTO_HIDE_MS = 3500L
  * - 倍速 / 外挂字幕（srt/vtt/ass）一键切换；
  * - B 站式控制层：上下渐变 scrim + 点按切换 + 自动隐藏（拖动进度条时不隐藏）+ 沉浸式系统栏；
  * - 进度条擦洗：拖动中暂停并按关键帧预览（CLOSEST_SYNC），松手精确定位（EXACT）；
- * - 全屏：仅竖持窗口自动转向横屏；退出回"跟随传感器"，绝不硬锁竖屏
- *   （硬锁竖屏会在平板上触发系统竖屏兼容模式，整页被压成窄条）；
+ * - 全屏 ≡ 窗口横向：进入播放页不预设方向（E48），点「全屏」锁横向、
+ *   把设备横过来也进横向；退出全屏只短暂锁竖向把窗口转过去，随即交还传感器；
  * - 动态挂载 PlaybackOverlay 覆盖层（字幕/弹幕插件零侵入接入）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -140,26 +163,31 @@ fun PlayerScreen(
     val scope = rememberCoroutineScope()
     val settings = remember { kernel.services.get<AppSettings>() }
 
-    val player = remember {
-        kernel.services.get<VideoPlayerFactory>().create(context, mimeType)
-    }
+    // L0（§11.2，**前置不是优化项**）：播放引擎由 `PlaybackSession` 独占，
+    // 播放页只是它的一个"视图"。此前页面用 `remember { factory.create(...) }` 自建
+    // 引擎、`onDispose` 时 `release()`——退页即销毁，于是：
+    //   ① 后台播放被 UI 生命周期绑架（退页/切 Tab 就把引擎拆了）；
+    //   ② 迷你条拿不到任何会话状态；
+    //   ③ L1/L2 的预载配置与预载好的源一起被释放，预载永远没有收益。
+    // 现在引擎归会话，退页只"停用视图"，不 release（释放交给进程结束/引擎换代）。
+    val session = remember { SessionHolder.of(sessionFactoryOf(kernel.services)) }
+    val player = remember(session) { session.acquire(mimeType) }
 
-    // 退页收口（E28）：单一 effect 内完成"读位置 → 落盘 → 释放播放器"。
-    // 三个独立 DisposableEffect 的相对执行顺序没有任何保证：若 release 先跑，
-    // 读到的 position 会失真；若取消 scope 先跑，进度会被自己取消。
-    // 位置在 release 前同步读取，写入放入 NonCancellable + IO 后再释放，
-    // 即使调用方取消也不会丢进度（断点续播 B1 链路的兜底）。
+    // 退页收口（E28 语义保留，但**不再 release 播放器**）：
+    // 位置在会话失效前同步读取，落盘用 NonCancellable 协程——它会活过本组合的取消，
+    // 但不阻塞主线程（runBlocking 会在每次退页时卡住退出动画，扫描期间尤其明显）。
     DisposableEffect(mediaId) {
         onDispose {
             val position = player.positionMs.value
             if (mediaId.isNotEmpty() && position > 1_000) {
-                runBlocking {
-                    withContext(Dispatchers.IO + NonCancellable) {
+                scope.launch(NonCancellable) {
+                    withContext(Dispatchers.IO) {
                         settings.savePlaybackPosition(mediaId, position)
                     }
                 }
             }
-            player.release()
+            // 注意：**不调用 player.release()**（L0）。播放继续在后台服务里跑，
+            // 迷你条据此持续可见、点回来无缝续播。
         }
     }
 
@@ -167,12 +195,24 @@ fun PlayerScreen(
     // 保证媒体通知有标题封面、播放页标题栏不空
     var displayTitle by remember(uri) { mutableStateOf(title) }
     var artworkUri by remember(uri) { mutableStateOf<String?>(null) }
+    // E57 修复：scheme 不在白名单内时在此落地一个本地（非播放器）错误态——
+    // 连 prepare() 都不调用，避免未知 scheme 的字符串以任何形式送进引擎。
+    var rejectedUriError by remember(uri) { mutableStateOf<String?>(null) }
 
     // 准备播放：等会话就绪。
     // B1 修复：会话已在播同一视频（后台播放中重进）时仅续播——
     // 禁止用过期断点 prepare/seek 覆盖会话里更新的进度。
     LaunchedEffect(uri) {
-        // 1) 解析展示名与封面（同一协程内先于 prepare，保证通知拿到元数据）
+        // E57 修复：深链 `noneplayer://player?uri=...` 对外暴露（BROWSABLE），任何
+        // 第三方 App 都能携带任意 uri 唤起本页。此前该值未经任何 scheme 校验就直接送进
+        // ContentResolver.query 与播放引擎——scheme 白名单是信任边界的第一道闸。
+        // 只允许本机内容来源（content/file），拒绝 http(s) 等其他任意 scheme
+        // （本应用是纯本地播放器，产品边界本就不含网络流）。
+        if (!isPlayableUriScheme(uri)) {
+            rejectedUriError = "不支持的地址来源，已拒绝加载。"
+            return@LaunchedEffect
+        }
+        // 1) 解析展示名与封面（同一协程内先于装载，保证通知拿到元数据）
         val resolvedTitle = title.ifBlank { resolveDisplayName(context, uri) }
         displayTitle = resolvedTitle
         val cover = resolveCoverUri(kernel.registry, mediaId)
@@ -181,8 +221,25 @@ fun PlayerScreen(
         player.awaitReady()
         val sameMedia = player.currentUri.value == uri
         if (!sameMedia) {
+            // §8.2 同文件夹队列：把当前媒体的同目录兄弟一起交给会话，
+            // 于是"播完自动下一集"与通知栏 ⏮⏭ 由 media3 免费提供。
+            // 查询失败/目录不可得时退化为单项队列，不影响单集播放。
+            val queue = resolveFolderQueue(kernel.registry, uri, mediaId)
+            // 队列里匹配到的那一项才是"权威条目"（有真实标题/时长/封面/来源），
+            // 路由参数只是入口线索——深链场景下 title 甚至可能为空。
+            val authoritative = queue.firstOrNull { it.uri == uri || it.id == mediaId }
             val saved = if (mediaId.isNotEmpty()) settings.playbackPosition(mediaId).first() else 0L
-            player.prepare(uri, mimeType, resolvedTitle, cover)
+            session.open(
+                item = authoritative ?: MediaItem(
+                    id = mediaId,
+                    sourceId = "",
+                    title = resolvedTitle,
+                    uri = uri,
+                    mimeType = mimeType,
+                    coverUri = cover,
+                ),
+                queueOfFolder = queue,
+            )
             if (saved > 5_000) player.seekTo(saved)
             player.setSpeed(settings.playbackSpeed.first())
             if (mediaId.isNotEmpty()) {
@@ -191,7 +248,6 @@ fun PlayerScreen(
                 }
             }
             player.play()
-            kernel.events.publish(KernelEvent.PlaybackStarted(mediaId))
         } else {
             player.play()
         }
@@ -202,38 +258,46 @@ fun PlayerScreen(
     val durationMs by player.durationMs.collectAsStateWithLifecycle()
     val videoAspectRatio by player.videoAspectRatio.collectAsStateWithLifecycle()
     val cues by player.cues.collectAsStateWithLifecycle()
+    // 队列与下标提到组合顶层：底部控制层（上/下一集按钮）与选集面板两处都要用，
+    // 放在底栏 AnimatedVisibility 内部会让面板拿不到（且底栏隐藏时值也读不到）。
+    val queue by session.queue.collectAsStateWithLifecycle()
+    val queueIndex by session.index.collectAsStateWithLifecycle()
 
-    // ---- 横屏全屏 ----
+    // ---- 方向与全屏（E48）----
+    // 单一真相：**全屏 ≡ 窗口为横向**，不再有独立的 isFullscreen UI 状态。
+    // 于是三件事同时成立且无需任何抑制标志位协调：
+    //   进入播放页 = 当前持机姿态（竖持即竖屏，不再被视频宽高比强行转横）；
+    //   手动点"全屏" = 锁横向；
+    //   把手机/平板横过来 = 窗口转横向 = 全屏自动成立。
+    // 旧写法（比例驱动自动全屏 + autoFullscreenSuppressed 竞态闩）正是
+    // "点视频直接横屏、返回时先转竖屏再退出界面"的根因。
     val activity = context as? ComponentActivity
     val configuration = LocalConfiguration.current
     val windowIsPortrait = configuration.screenHeightDp >= configuration.screenWidthDp
-    var isFullscreen by rememberSaveable { mutableStateOf(false) }
-    // 用户主动退出全屏后，本次播放不再自动进全屏。否则竖持设备会形成拉锯：
-    // 返回退出全屏→窗口随传感器转竖→自动全屏条件成立→立刻拉回横屏，退不出去
-    var autoFullscreenSuppressed by rememberSaveable { mutableStateOf(false) }
+    val isFullscreen = !windowIsPortrait
+    var orientationLock by rememberSaveable { mutableStateOf(OrientationLock.FollowSensor) }
+
     fun setFullscreen(fullscreen: Boolean) {
-        activity?.requestedOrientation = if (fullscreen) {
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-        } else {
-            // 退出全屏回到跟随传感器：硬编码 PORTRAIT 会触发平板竖屏兼容模式
-            // （整页被系统压成中间窄条）且违背用户当前持机姿态
-            ActivityInfo.SCREEN_ORIENTATION_SENSOR
+        orientationLock = if (fullscreen) OrientationLock.Landscape else OrientationLock.Portrait
+    }
+
+    // 方向只在用户显式操作时锁定；FollowSensor 用 UNSPECIFIED 而非 SENSOR，
+    // 前者尊重系统"自动旋转"开关，用户关掉它就不该替他转
+    LaunchedEffect(orientationLock) {
+        activity?.requestedOrientation = orientationLock.requestedOrientation
+    }
+    // 手动退出全屏：锁竖屏把窗口转过去，到位后立刻交还传感器——
+    // 锁不留存量，否则"退出全屏后再把设备横过来"不会再进全屏
+    LaunchedEffect(orientationLock, windowIsPortrait) {
+        if (orientationLock == OrientationLock.Portrait && windowIsPortrait) {
+            orientationLock = OrientationLock.FollowSensor
         }
-        isFullscreen = fullscreen
-        autoFullscreenSuppressed = !fullscreen
     }
     // 离开播放页恢复系统默认方向（全屏方向不残留到其他页面）
     DisposableEffect(Unit) {
         onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     }
-    // 横屏视频自动进全屏（B 站行为）：仅对**竖持窗口**生效——
-    // 平板/横屏窗口本就横向，强制旋转只会与持机姿态打架（E48）
-    LaunchedEffect(videoAspectRatio, windowIsPortrait, autoFullscreenSuppressed) {
-        if (videoAspectRatio > 1f && windowIsPortrait && !isFullscreen && !autoFullscreenSuppressed) {
-            setFullscreen(true)
-        }
-    }
-    // 全屏时返回键先退出全屏；退出后不再自动拉回（第二次返回才离开播放页）
+    // 全屏时返回键先退出全屏（业界一致语义）；第二次返回才离开播放页
     BackHandler(enabled = isFullscreen) { setFullscreen(false) }
 
     // 系统栏随全屏状态联动：全屏沉浸（滑动呼出），非全屏显示系统栏
@@ -264,6 +328,8 @@ fun PlayerScreen(
     }
 
     var controlsVisible by remember { mutableStateOf(true) }
+    // 选集面板（§8.3）：控制层之上的模态浮层，选中即跳集并关闭
+    var episodePanelVisible by remember { mutableStateOf(false) }
     var userDragging by remember { mutableStateOf(false) }
     var dragPositionMs by remember { mutableFloatStateOf(0f) }
     // 拖动释放后的目标位置：seek 完成前进度条停在目标处，避免"回跳再快进"的跳变感
@@ -384,6 +450,16 @@ fun PlayerScreen(
                     .size(44.dp),
                 color = MaterialTheme.colorScheme.primary,
                 strokeWidth = 3.dp,
+            )
+        }
+
+        // E57 修复：scheme 被拒绝——不提供"重试"（没有合法地址可重试），也不提供
+        // "用其他播放器打开"/"复制地址"（这正是我们要拒绝转发的那条不可信地址）。
+        if (rejectedUriError != null) {
+            ErrorPanel(
+                message = rejectedUriError.orEmpty(),
+                onBack = navigator::popBackStack,
+                modifier = Modifier.align(Alignment.Center),
             )
         }
 
@@ -539,7 +615,22 @@ fun PlayerScreen(
                         .padding(bottom = 12.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // 播放/暂停（Apple 式缩放切换动效）——左下角，B 站式布局
+                    // 上一集 / 播放暂停 / 下一集——连播的操作面（§8.2）。
+                    // 无上/下一集时按钮禁用而非隐藏：位置固定，避免点"下一集"时误触
+                    // 到滑过来的"倍速"。按钮走 session（与迷你条、通知栏同一份队列状态）。
+                    val hasPrevious = queueIndex > 0
+                    val hasNext = queueIndex in 0 until (queue.size - 1)
+                    IconButton(
+                        onClick = { session.previous() },
+                        enabled = hasPrevious,
+                        modifier = Modifier.size(44.dp),
+                    ) {
+                        Icon(
+                            imageVector = NpIcons.SkipPrevious,
+                            contentDescription = "上一集",
+                            tint = if (hasPrevious) Color.White else Color.White.copy(alpha = 0.35f),
+                        )
+                    }
                     AnimatedContent(
                         targetState = state == PlaybackState.Playing,
                         transitionSpec = {
@@ -564,7 +655,28 @@ fun PlayerScreen(
                             }
                         }
                     }
+                    IconButton(
+                        onClick = { session.next() },
+                        enabled = hasNext,
+                        modifier = Modifier.size(44.dp),
+                    ) {
+                        Icon(
+                            imageVector = NpIcons.SkipNext,
+                            contentDescription = "下一集",
+                            tint = if (hasNext) Color.White else Color.White.copy(alpha = 0.35f),
+                        )
+                    }
                     Box(modifier = Modifier.weight(1f))
+                    // 选集（§8.3）：仅当队列 > 1 时出现——单项队列没有"选"的意义
+                    if (queue.size > 1) {
+                        ControlChip(
+                            text = "选集 ${queueIndex + 1}/${queue.size}",
+                            contentDescription = "选集面板",
+                        ) {
+                            episodePanelVisible = true
+                            controlsVisible = true
+                        }
+                    }
                     // 倍速（B 站式档位循环），并记忆为默认倍速
                     ControlChip(
                         text = "%.2fx".format(speed).removeSuffix("0").removeSuffix("."),
@@ -589,6 +701,115 @@ fun PlayerScreen(
                     ) {
                         setFullscreen(!isFullscreen)
                         controlsVisible = true
+                    }
+                }
+            }
+        }
+
+        // ---- 选集面板（§8.3）----
+        // 放在最上层：它是模态的，控制层不应从它下面透出来抢点击。
+        // BackHandler 优先关面板而不是退出播放页（面板开着时的返回语义）。
+        if (episodePanelVisible) {
+            BackHandler { episodePanelVisible = false }
+            EpisodePanel(
+                queue = queue,
+                currentIndex = queueIndex,
+                onSelect = { index ->
+                    session.selectQueueIndex(index)
+                    episodePanelVisible = false
+                    controlsVisible = false
+                },
+                onDismiss = { episodePanelVisible = false },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
+}
+
+/**
+ * 选集面板（§8.3）——同文件夹队列的列表浮层。
+ *
+ * 用**底部抽屉式**而非居中对话框：集数可能几十上百，抽屉天然可滚动、
+ * 拇指可达（平板/手机一致），且不遮挡正在播的画面上半部分（半透明 scrim + 列表只占下半屏）。
+ */
+@Composable
+private fun EpisodePanel(
+    queue: List<MediaItem>,
+    currentIndex: Int,
+    onSelect: (Int) -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.55f))
+            // 点空白处关闭：给用户"点外面就收起来"的直觉出口
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss,
+            ),
+    ) {
+        Surface(
+            tonalElevation = 6.dp,
+            color = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                // 只占下半屏：上半留出画面，用户能边看边选
+                .fillMaxHeight(0.55f)
+                .navigationBarsPadding(),
+        ) {
+            Column {
+                Text(
+                    text = "选集（${queue.size}）",
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.padding(16.dp),
+                )
+                LazyColumn(modifier = Modifier.fillMaxWidth()) {
+                    itemsIndexed(queue, key = { _, item -> item.id }) { index, item ->
+                        val selected = index == currentIndex
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onSelect(index) }
+                                .background(
+                                    if (selected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        Color.Transparent
+                                    },
+                                )
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                        ) {
+                            Text(
+                                text = "${index + 1}",
+                                style = MaterialTheme.typography.labelMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.width(32.dp),
+                            )
+                            Text(
+                                text = item.title.ifBlank { item.uri.substringAfterLast('/') },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.onPrimaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.onSurface
+                                },
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (selected) {
+                                Text(
+                                    text = "播放中",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                )
+                            }
+                        }
                     }
                 }
             }
@@ -794,16 +1015,33 @@ private fun ErrorPanel(
     }
 }
 
-/** ACTION_VIEW 外唤（本地 Intent，零网络）；无处理方或 file:// 受限时返回 false */
-private fun openExternally(context: Context, uriString: String): Boolean = runCatching {
-    context.startActivity(
-        Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(uriString.toUri(), "video/*")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        },
-    )
-    true
-}.getOrDefault(false)
+/**
+ * 允许进入播放/探测/外发链路的 scheme 白名单（E57/E76）。
+ *
+ * 本应用是纯本地播放器（产品边界零网络），`content`/`file` 覆盖本机选择器、
+ * MediaStore、SAF 三类来源；深链等外部输入若携带其他 scheme（含任意网络 scheme），
+ * 一律在最早的入口处拒绝，不送进 ContentResolver 查询或播放引擎。
+ */
+private val ALLOWED_URI_SCHEMES = setOf("content", "file")
+
+private fun isPlayableUriScheme(uriString: String): Boolean =
+    runCatching { uriString.toUri().scheme?.lowercase() }.getOrNull() in ALLOWED_URI_SCHEMES
+
+/** ACTION_VIEW 外唤（本地 Intent，零网络）；scheme 不在白名单、无处理方或 file:// 受限时返回 false */
+private fun openExternally(context: Context, uriString: String): Boolean {
+    // E76 修复：与 E57 同根因——此前未校验 scheme 就把外部/深链来源的地址转发给
+    // 其他 App，同样属于"未经校验的不可信输入扩大信任面"模式。
+    if (!isPlayableUriScheme(uriString)) return false
+    return runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uriString.toUri(), "video/*")
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            },
+        )
+        true
+    }.getOrDefault(false)
+}
 
 private fun toMediaItem(
     id: String,
@@ -822,7 +1060,7 @@ private fun toMediaItem(
 /** 深链只带 uri 时的展示名兜底：MediaStore 显示名 → uri 末段 */
 private suspend fun resolveDisplayName(context: android.content.Context, uri: String): String =
     withContext(Dispatchers.IO) {
-        runCatching {
+        try {
             context.contentResolver
                 .query(
                     android.net.Uri.parse(uri),
@@ -830,7 +1068,16 @@ private suspend fun resolveDisplayName(context: android.content.Context, uri: St
                     null, null, null,
                 )
                 ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
-        }.getOrNull() ?: android.net.Uri.parse(uri).lastPathSegment.orEmpty()
+                ?: android.net.Uri.parse(uri).lastPathSegment.orEmpty()
+        } catch (e: SecurityException) {
+            // E70 修复：此前与"查不到名字"一视同仁地吞掉，权限问题被伪装成了正常兜底。
+            // 深链传入未授权的 content:// 时最常触发这条路径（见 E57）——保留诊断信息。
+            Log.d("PlayerScreen", "resolveDisplayName 无权限访问 $uri", e)
+            android.net.Uri.parse(uri).lastPathSegment.orEmpty()
+        } catch (e: Exception) {
+            Log.d("PlayerScreen", "resolveDisplayName 查询失败 $uri", e)
+            android.net.Uri.parse(uri).lastPathSegment.orEmpty()
+        }
     }
 
 /**
@@ -854,3 +1101,63 @@ private suspend fun resolveCoverUri(
         }.getOrNull()
     }
 }
+
+/**
+ * 解析**同文件夹队列**（§8.2）——当前媒体所在目录的兄弟条目，按标题自然序排列。
+ *
+ * 为什么在播放端而不是库里做：队列属于"播放会话"的输入，而播放页可能由深链/通知
+ * 直接唤起（此时没有任何"库页面选择上下文"可继承）。在这里按 uri 反查来源，深链
+ * 与普通点击因此走同一条路径。
+ *
+ * 失败 / 找不到目录 / 只有一项时返回**只含当前项的列表**：单集播放照样成立，
+ * 不会因为队列构造失败而播不出来（宁可没有连播，也不能没有播放）。
+ */
+private suspend fun resolveFolderQueue(
+    registry: ExtensionRegistry,
+    uri: String,
+    mediaId: String,
+): List<MediaItem> {
+    val fallback = listOf(
+        MediaItem(id = mediaId, sourceId = "", title = "", uri = uri, mimeType = "video/mp4"),
+    )
+    if (mediaId.isEmpty()) return fallback
+    return withContext(Dispatchers.IO) {
+        runCatching {
+            val sources = registry.query<MediaSourceProvider>()
+            for (source in sources) {
+                // 不能只取 `.first()`：来源的媒体列表是 StateFlow，首帧可能是
+                // `emptyList()`（冷启动时扫描尚未落库），此时会误判成"找不到本项"
+                // 而退化成单项队列——表现为迷你条没有标题、也没有 '1 / N'。
+                // 这里等到出现"包含本项"的那一次发射为止（有上限，绝不无限等）。
+                // 匹配顺序：先 id，再 uri。
+                //
+                // **为什么 uri 是必不可少的兜底**：`id` 是来源自己的稳定标识
+                // （本地来源是 `ms-<MediaStore._id>`），而 MediaStore 的 `_id`
+                // **会变**——重扫、删除后重建、系统数据清理都可能让同一个视频换号。
+                // 一旦换号，路由里带过来的旧 id 就再也匹配不上，队列会静默退化成
+                // "只有当前项"（迷你条没标题、没有 1/N、连播失效）——**播放本身却正常**，
+                // 于是这个缺陷很难被发现。uri 是播放真正依赖的东西，它不变。
+                val all = withTimeoutOrNull(SOURCE_WAIT_MS) {
+                    source.observeMedia().first { list ->
+                        list.any { it.id == mediaId || it.uri == uri }
+                    }
+                } ?: source.observeMedia().first()
+                val self = all.firstOrNull { it.id == mediaId }
+                    ?: all.firstOrNull { it.uri == uri }
+                    ?: continue
+                val folder = self.folder ?: return@withContext listOf(self)
+                val siblings = all
+                    .filter { it.folder == folder }
+                    // 自然序（"第2集" 排在 "第10集" 前）——库里列表用的同款比较器，
+                    // 队列顺序必须与用户看到的顺序一致，否则"下一集"会跳错
+                    .sortedWith(compareBy({ it.title.lowercase() }, { it.title }))
+                val result = if (siblings.none { it.id == self.id }) siblings + self else siblings
+                return@withContext result
+            }
+            fallback
+        }.getOrElse { fallback }
+    }
+}
+
+/** 等媒体来源把"本项"扫出来的上限；超过则退回单项队列（绝不卡住进页） */
+private const val SOURCE_WAIT_MS = 3_000L

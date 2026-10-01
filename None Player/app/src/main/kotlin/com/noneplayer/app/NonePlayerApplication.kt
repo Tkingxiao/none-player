@@ -6,6 +6,7 @@ import coil.ImageLoaderFactory
 import coil.decode.VideoFrameDecoder
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.ThemeMode
+import com.noneplayer.kernel.BootState
 import com.noneplayer.kernel.Kernel
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.generated.ExoPlayerPluginIndex
@@ -13,8 +14,12 @@ import com.noneplayer.kernel.generated.LibraryPluginIndex
 import com.noneplayer.kernel.generated.LocalScannerPluginIndex
 import com.noneplayer.kernel.generated.PlayerUiPluginIndex
 import com.noneplayer.kernel.generated.ProfilePluginIndex
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.launch
 
 /**
  * 宿主 Application——只做一件事：装配并引导内核（设计文档 §1）。
@@ -37,15 +42,18 @@ class NonePlayerApplication : Application(), ImageLoaderFactory {
         .build()
 
     /**
-     * B9 修复：启动时同步读取一次持久化主题，让首帧组合即用正确外观，
-     * 避免"系统亮色 + 应用强制暗色"时首帧闪白。
-     * （一次性 ~毫秒级 DataStore 读取，换取首帧色彩正确）
+     * E69 修复：B9 原实现用 `by lazy { runBlocking { ... } }`，首次访问（在
+     * MainActivity.setContent 的主线程组合期间）会阻塞主线程等 DataStore 读盘——
+     * 低端设备/首次冷启动创建 DataStore 文件/扫描抢占存储 I/O 时没有硬上限保证，
+     * 是潜在的 ANR 诱因。改为 Application.onCreate() 内用后台调度器预热：
+     * boot() 刚启动即可读（services 在 bootInternal 的第一步就同步注册完毕），
+     * 结果写入 StateFlow；MainActivity 侧只做无阻塞读取，读不到时退默认主题
+     * （代价是极端情况下首帧可能短暂用默认主题，换来主线程绝不阻塞）。
      */
-    val initialThemeMode: ThemeMode by lazy {
-        runBlocking {
-            kernel.services.get<AppSettings>().themeMode.first()
-        }
-    }
+    private val _initialThemeMode = MutableStateFlow<ThemeMode?>(null)
+    val initialThemeMode: ThemeMode get() = _initialThemeMode.value ?: ThemeMode.SYSTEM
+
+    private val appScope = CoroutineScope(Dispatchers.Default)
 
     override fun onCreate() {
         super.onCreate()
@@ -60,5 +68,13 @@ class NonePlayerApplication : Application(), ImageLoaderFactory {
             ),
         )
         kernel.boot()
+        // 服务在 bootInternal() 的第一步（registerKernelServices）同步注册，
+        // 早于插件安装/启动——等到不再是 Idle 即可安全取 AppSettings，不必等 Running。
+        appScope.launch {
+            kernel.bootState.filter { it != BootState.Idle }.first()
+            runCatching {
+                _initialThemeMode.value = kernel.services.get<AppSettings>().themeMode.first()
+            }
+        }
     }
 }

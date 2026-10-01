@@ -2,7 +2,7 @@
 
 插件化微内核视频播放器（Android / Kotlin / Compose）。架构设计见 `../设计文档.md`。
 
-当前完成 **P0 + P1 + P2 阶段**：内核骨架 + 本地扫描插件 + ExoPlayer 播放内核/播放页 + 主题切换，全链路真机验证通过。
+当前完成 **P0 + P1 + P2 阶段 + 批次 1（会话层 / 队列 / 迷你条 / 形态判定层）**，全链路真机验证通过。
 
 ## 功能
 
@@ -12,6 +12,10 @@
 - **封面缩略图**：扫描时系统缩略图落盘缓存，界面瞬时加载
 - **播放内核**：ExoPlayer 驻留 MediaSessionService 后台播放 + 音频焦点/拔耳机暂停 + 系统媒体通知
 - **播放页**：倍速（会话回读+默认倍速记忆）、外挂字幕（per-media 持久化）、断点续播（会话感知，不回退后台进度）、按视频分辨率比例渲染、前台常亮/后台可息屏、B 站式控制层
+- **会话层（批次 1）**：`PlaybackSession` 进程级单例——播放器归 `PlaybackService` 独占，页面只经 `MediaController` 驱动，**退出播放页不释放引擎**（L0），退页后仍在后台继续播放
+- **同文件夹队列 + 连播**：进入播放页自动收集同目录兄弟项，`⏮ ▶ ⏭` 切换、「选集 N/M」底部抽屉面板选段，播完自动下一集
+- **迷你条（批次 1）**：任意 Tab 常驻显示当前播放（封面 / 标题 / `N / M · 时间` / 进度线 / ⏸⏭✕），点回播放页**无缝续播不重新 prepare**；无会话时不占高度
+- **形态判定层（批次 1）**：`NpWindowInfo` + `LocalNpWindowInfo` 单点注入，按 `NpFormFactor`（手机/折叠/平板/桌面）分派，不依赖 `screenWidthDp` 做尺寸档位
 - **我的页**：设置入口、已加载插件清单、版本信息
 - **主题**：三模式 + ColorScheme 全槽位 320ms 动画 + 首帧主题同步（无闪屏）
 - **动效**：iOS push 转场、按压弹性、播放/暂停缩放、网格入场、启动屏淡入
@@ -22,22 +26,32 @@
 | --- | --- | --- |
 | ![标签栏](docs/screenshots/v4-tabs-home.png) | ![文件夹](docs/screenshots/v4-tabs-folders.png) | ![我的](docs/screenshots/v4-tabs-profile.png) |
 
+### 批次 1：迷你条与队列
+
+| 迷你条（标题 + `1 / 4` + 进度） | 播放页 ⏮▶⏭ + 选集 | 选集面板 |
+| --- | --- | --- |
+| ![迷你条](docs/screenshots/b1-minibar-title-queue.png) | ![播放页](docs/screenshots/b1-player-prevnext-episodechip.png) | ![选集](docs/screenshots/b1-episode-panel.png) |
+
 ## 模块结构
 
 ```
 :app                     # 宿主：装配 Kernel、收集 PluginIndex，无业务逻辑
 :kernel
   ├─ kernel-api          # 扩展点契约（纯 Kotlin）：Plugin / ExtensionPoint / Registry / EventBus / ServiceLocator / Navigator
-  ├─ kernel-ui-api       # Compose 扩展点：ScreenProvider / PlaybackOverlay / SettingsProvider / KernelNavHost
+  ├─ kernel-ui-api       # Compose 扩展点：ScreenProvider / PlaybackOverlay / SettingsProvider / BottomChromeProvider / KernelNavHost / NpWindowInfo
   ├─ kernel-ksp          # KSP 处理器：@PluginMarker → 生成 <Xxx>PluginIndex（零反射，R8 安全）
   └─ kernel              # 内核实现：Kernel / DefaultExtensionRegistry / FlowEventBus / PluginSorter / VideoPlayerFactory
 :core
   ├─ common              # DispatcherProvider 等工具（纯 Kotlin）
   ├─ media               # 领域模型：MediaItem / SearchResult / PlaybackFailure（纯 Kotlin）
   ├─ media-android       # Android 媒体能力：FormatProbe 起播前格式探测（E39）
+  ├─ data                # 设置持久化（DataStore）：AppSettings
   └─ ui                  # 设计系统：语义色令牌（明/暗）、iOS 刻度字号、⊘ 签名组件
 :plugins
-  └─ plugin-library      # 媒体库插件（演示）：route "home"，聚合 MediaSourceProvider
+  ├─ plugin-library      # 媒体库插件：route "home"，聚合 MediaSourceProvider
+  ├─ plugin-scanner-local# 本地 MediaStore 扫描来源（SAF 门控 + RELATIVE_PATH 分组）
+  ├─ plugin-player-exo   # ExoPlayer 播放内核：PlaybackService + 预加载（L1/L2）
+  └─ plugin-player-ui    # 播放页 + 会话层 + 迷你条（PlaybackSession / MiniPlayerChrome）
 ```
 
 ### 依赖铁律
@@ -60,12 +74,15 @@ app       →  kernel, 所有 plugin-*（仅装配）
 
 ## 构建与测试
 
-要求 JDK 17、Android SDK（compileSdk 35）。
+要求 JDK 17、Android SDK（compileSdk 36 / minSdk 26 / targetSdk 35）。
 
 ```bash
 ./gradlew assembleDebug   # 打 Debug 包
 ./gradlew test            # 内核单元测试（拓扑排序/注册表/事件总线）
+./gradlew assembleRelease # R8 压缩链路
 ```
+
+> 门禁约定：每个批次必须同时通过 `assembleDebug` + `test` + `assembleRelease`，并附**真机验证截图**（`docs/screenshots/`）。批次 1 的 9 项真机验收记录见《功能审核文档.md》§10.0 台账。
 
 ## P0 关键设计决策
 
