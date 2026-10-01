@@ -300,12 +300,57 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         prepareJob?.cancel()
         terminalFailure = false
         pendingSeekMs = startPositionMs.takeIf { it > 0 }
-        val mediaItems = items.map { it.toMediaItem() }
+
+        // E80 修复：**队列路径也必须过起播前探测**。
+        //
+        // 批次 1 引入队列后，播放页改走 setQueue()，而 setQueue 直接 setMediaItems +
+        // c.prepare()，**绕过了 prepare() 里的 FormatProbe**。后果是 E39 的"体面失败"
+        // 在队列路径上整体失效：以 wmv2-clip.avi 为例，AviExtractor 会丢弃它不认识的
+        // WMV2 视频轨（`Missing Stream Format`），只剩 MP3 音轨——于是播放器"成功地"
+        // 播完 4 秒音频并显示"播放结束"，用户只看到**纯黑屏**，无从知道是编码不支持。
+        //
+        // 这里对**即将播放的那一项**做探测：不可解则不装载队列，直接落结构化失败态。
+        val target = items[safeIndex]
+        val myGeneration = ++prepareGeneration
+        prepareJob = scope.launch {
+            val probe = FormatProbe.probe(appContext, target.uri)
+            if (myGeneration != prepareGeneration) return@launch // 已有更新的装载，丢弃
+            when (probe) {
+                is FormatProbe.Result.Unplayable -> {
+                    appliedUri = null
+                    probedContainer = probe.failure.container
+                    probedVideoCodec = probe.failure.videoCodec
+                    probedAudioCodec = probe.failure.audioCodec
+                    runCatching { controller?.stop() }
+                    terminalFailure = true
+                    _state.value = PlaybackState.Error(probe.failure.reason, probe.failure)
+                }
+                is FormatProbe.Result.Playable -> {
+                    probedContainer = probe.container
+                    probedVideoCodec = probe.videoCodec
+                    probedAudioCodec = probe.audioCodec
+                    applyQueue(mediaItemsOf(items), safeIndex, startPositionMs)
+                }
+                FormatProbe.Result.Unknown -> applyQueue(mediaItemsOf(items), safeIndex, startPositionMs)
+            }
+        }
+    }
+
+    /** setQueue 成功路径的装载体（探测通过后调用），保持与探测前的行为一致 */
+    private fun applyQueue(
+        mediaItems: List<MediaItem>,
+        safeIndex: Int,
+        startPositionMs: Long,
+    ) {
+        val c = controller ?: return
+        _queue.value.let { if (it.isNotEmpty()) _currentUri.value = it[safeIndex].uri }
         c.setMediaItems(mediaItems, safeIndex, startPositionMs.coerceAtLeast(0L))
-        _currentUri.value = items[safeIndex].uri
         c.prepare()
         c.play()
     }
+
+    private fun mediaItemsOf(items: List<com.noneplayer.core.media.MediaItem>): List<MediaItem> =
+        items.map { it.toMediaItem() }
 
     override fun selectQueueIndex(index: Int) {
         val c = controller ?: return
