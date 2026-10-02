@@ -8,6 +8,8 @@ android {
 
     defaultConfig {
         minSdk = 26
+        // §12.9.2 QPel 探测 harness（androidTest）所需
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -29,4 +31,7 @@ dependencies {
     implementation(libs.media3.common)
     implementation(libs.media3.extractor)
     implementation(libs.media3.datasource)
+
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }
