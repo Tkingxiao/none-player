@@ -50,6 +50,37 @@ data class PlaybackFailure(
             reason = "本设备没有该视频编码可用的解码器（或解码器不支持该文件的编码档次/特性），None Player 也未内置视频软解。",
         )
 
+        /**
+         * 有解码器但**档次（profile）不受支持**——起播前就判出，避免崩在第一帧（§12.9.4）。
+         * 典型：MPEG-4 ASP（Advanced Simple Profile，含 qpel/GMC）码流遇到仅 Simple Profile
+         * 的设备解码器。[requiredProfile] 如 "Advanced Simple Profile"，[deviceProfiles]
+         * 如 "Simple Profile"。
+         */
+        fun videoProfileUnsupported(
+            container: String?,
+            videoCodec: String?,
+            audioCodec: String?,
+            requiredProfile: String,
+            deviceProfiles: String?,
+        ) = PlaybackFailure(
+            container = container,
+            videoCodec = videoCodec,
+            audioCodec = audioCodec,
+            reason = buildString {
+                append("该文件需要「")
+                append(requiredProfile)
+                append("」档次，但本设备的解码器")
+                if (deviceProfiles.isNullOrBlank()) {
+                    append("不支持该档次")
+                } else {
+                    append("仅支持「")
+                    append(deviceProfiles)
+                    append("」")
+                }
+                append("。此类文件会在解码第一帧时失败，None Player 也未内置视频软解。")
+            },
+        )
+
         /** 文件不可读（损坏 / 截断 / 权限） */
         fun unreadable(container: String? = null) = PlaybackFailure(
             container = container,

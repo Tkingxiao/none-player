@@ -1,6 +1,7 @@
 package com.noneplayer.core.media.probe
 
 import android.content.Context
+import android.media.MediaCodecInfo
 import android.media.MediaCodecList
 import android.media.MediaFormat as PlatformMediaFormat
 import androidx.annotation.OptIn
@@ -22,6 +23,7 @@ import android.net.Uri
 import androidx.media3.extractor.TrackOutput
 import com.noneplayer.core.media.MediaNames
 import com.noneplayer.core.media.PlaybackFailure
+import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlin.math.max
@@ -79,6 +81,10 @@ object FormatProbe {
     private val PROBE_SCHEMES = setOf("file", "content")
     private const val MAX_READS = 400
     private const val LENGTH_HINT = 8L * 1024 * 1024
+    private const val MIME_MP4V = "video/mp4v-es"
+
+    /** profile 判读只需头部字节；截留上限（VOS/VOL/GOV 头远小于此） */
+    private const val HEAD_CAP = 4 * 1024
 
     private fun probeLocal(context: Context, uriString: String): Result {
         val uri = Uri.parse(uriString)
@@ -151,8 +157,10 @@ object FormatProbe {
                 } else if (result == Extractor.RESULT_END_OF_INPUT) {
                     break
                 }
-                // hdrl/moov/tracks 解析完成后轨道表已确定，不再读样本数据
-                if (output.tracksEnded) break
+                // 轨道表确定后通常即可收尾；但 MPEG-4 ASP 判读（§12.9.4）需要 codec 头字节，
+                // 而 XVID/DivX 的 AVI 常把 VOS/VOL 头内联在首帧（initializationData 为空）。
+                // 这种情况下继续读到抓住首个视频样本的前导字节为止（仍受 MAX_READS 封顶）。
+                if (output.tracksEnded && output.hasEnoughForProfileCheck()) break
             }
             matched.release()
             return output.decide(effectiveContainer)
@@ -200,8 +208,15 @@ object FormatProbe {
         var tracksEnded = false
             private set
 
+        /** 首个视频样本的前导字节（上限 [HEAD_CAP]）——mp4v 无 csd 时的 profile 判读来源 */
+        var firstVideoSampleHead: ByteArray? = null
+            private set
+
         override fun track(id: Int, type: Int): TrackOutput = object : TrackOutput {
             private val discard = DiscardingTrackOutput()
+            private val isVideo = type == C.TRACK_TYPE_VIDEO
+            private val head: ByteArrayOutputStream? = if (isVideo) ByteArrayOutputStream() else null
+            private var sampleCaptured = false
 
             override fun format(format: Format) {
                 formats.add(format)
@@ -212,10 +227,34 @@ object FormatProbe {
                 length: Int,
                 allowEndOfInput: Boolean,
                 sampleDataPart: Int,
-            ): Int = discard.sampleData(input, length, allowEndOfInput, sampleDataPart)
+            ): Int {
+                // 非视频轨 / 已抓够：维持原丢弃行为（零额外内存）
+                if (head == null || firstVideoSampleHead != null) {
+                    return discard.sampleData(input, length, allowEndOfInput, sampleDataPart)
+                }
+                // 视频轨首样本：自读以截留前导字节，读完即丢（不改变 input 消费语义）
+                val buf = ByteArray(length)
+                var read = 0
+                while (read < length) {
+                    val n = input.read(buf, read, length - read)
+                    if (n == -1) {
+                        if (allowEndOfInput) break
+                        error("unexpected EOF in sampleData read=$read/$length")
+                    }
+                    read += n
+                }
+                captureHead(head, buf, 0, read)
+                return read
+            }
 
-            override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) =
-                discard.sampleData(data, length, sampleDataPart)
+            override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) {
+                if (head == null || firstVideoSampleHead != null) {
+                    discard.sampleData(data, length, sampleDataPart)
+                    return
+                }
+                captureHead(head, data.data, data.position, length)
+                data.skipBytes(length)
+            }
 
             override fun sampleMetadata(
                 timeUs: Long,
@@ -223,7 +262,22 @@ object FormatProbe {
                 size: Int,
                 offset: Int,
                 cryptoData: TrackOutput.CryptoData?,
-            ) = discard.sampleMetadata(timeUs, flags, size, offset, cryptoData)
+            ) {
+                // 视频轨：首个样本边界到达 → 固化前导字节
+                if (head != null && !sampleCaptured && head.size() > 0 && firstVideoSampleHead == null) {
+                    firstVideoSampleHead = head.toByteArray()
+                    sampleCaptured = true
+                }
+                if (head == null) {
+                    discard.sampleMetadata(timeUs, flags, size, offset, cryptoData)
+                }
+            }
+
+            private fun captureHead(sink: ByteArrayOutputStream, src: ByteArray, from: Int, len: Int) {
+                if (sink.size() >= HEAD_CAP || len <= 0) return
+                val take = minOf(len, HEAD_CAP - sink.size())
+                sink.write(src, from, take)
+            }
         }
 
         override fun endTracks() {
@@ -232,7 +286,18 @@ object FormatProbe {
 
         override fun seekMap(seekMap: SeekMap) = Unit
 
-        /** 探测结论：容器/编码名 + 平台解码器查询 */
+        /**
+         * 读到可以收尾了吗？—— 只在"首个视频轨是 mp4v 且 initializationData 为空"时
+         * 需要额外抓首帧前导字节；其余格式轨道表齐了就够。
+         */
+        fun hasEnoughForProfileCheck(): Boolean {
+            val video = formats.firstOrNull { it.isVideoTrack } ?: return true
+            val needsHead = video.sampleMimeType == MIME_MP4V &&
+                video.initializationData.isNullOrEmpty()
+            return !needsHead || firstVideoSampleHead != null
+        }
+
+        /** 探测结论：容器/编码名 + 平台解码器查询（含 §12.9.4 profile 求交） */
         fun decide(containerName: String?): Result {
             val video = formats.firstOrNull { it.isVideoTrack }
             val audio = formats.firstOrNull { it.sampleMimeType?.startsWith("audio/") == true }
@@ -247,8 +312,77 @@ object FormatProbe {
                     PlaybackFailure.videoCodecUnsupported(containerName, videoName, audioName),
                 )
             }
+            // §12.9.4：有解码器，但档次可能不被设备解码器支持（mp4v ASP vs Simple-only）
+            profileMismatch(video, containerName, videoName, audioName)?.let { return it }
             return Result.Playable(containerName, videoName, audioName)
         }
+
+        /**
+         * MPEG-4 ASP 档次拦截（§12.9.4）：判读码流需要的 profile，与设备 mp4v 解码器声明的
+         * `profileLevels` 求交。仅当"码流确需 Advanced Simple 且无任何解码器声明 ASP"时
+         * 返回 [Result.Unplayable]；拿不准一律返回 null（fail-open 放行给引擎）。
+         */
+        private fun profileMismatch(
+            video: Format,
+            containerName: String?,
+            videoName: String?,
+            audioName: String?,
+        ): Result? {
+            if (video.sampleMimeType != MIME_MP4V) return null
+            val header = video.initializationData?.firstOrNull()?.takeIf { it.isNotEmpty() }
+                ?: firstVideoSampleHead
+                ?: return null
+            val verdict = Mpeg4ProfileParser.parse(header)
+            if (verdict.required != Mpeg4ProfileParser.RequiredProfile.ADVANCED_SIMPLE) return null
+            // 设备上所有 mp4v 解码器声明的 profile 集合
+            val deviceProfiles = mp4vDeviceProfiles()
+            val supportsAsp = deviceProfiles.any {
+                it == MediaCodecInfo.CodecProfileLevel.MPEG4ProfileAdvancedSimple
+            }
+            if (supportsAsp) return null // 设备确实声明了 ASP：放行
+            if (deviceProfiles.isEmpty()) return null // 查不到声明：fail-open，交给引擎
+            return Result.Unplayable(
+                PlaybackFailure.videoProfileUnsupported(
+                    container = containerName,
+                    videoCodec = videoName,
+                    audioCodec = audioName,
+                    requiredProfile = "Advanced Simple Profile",
+                    deviceProfiles = deviceProfiles
+                        .map { mpeg4ProfileName(it) }
+                        .distinct()
+                        .joinToString(" / "),
+                ),
+            )
+        }
+    }
+
+    /** 枚举设备上所有支持 mp4v 的解码器声明的 profile（去不去重由调用方定）。 */
+    private fun mp4vDeviceProfiles(): List<Int> = runCatching {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .asSequence()
+            .filter { !it.isEncoder }
+            .filter { info ->
+                runCatching { info.supportedTypes.any { it.equals(MIME_MP4V, true) } }
+                    .getOrDefault(false)
+            }
+            .flatMap { info ->
+                runCatching {
+                    info.getCapabilitiesForType(MIME_MP4V).profileLevels?.map { it.profile }
+                        ?: emptyList()
+                }.getOrDefault(emptyList()).asSequence()
+            }
+            .toList()
+    }.getOrDefault(emptyList())
+
+    private fun mpeg4ProfileName(profile: Int): String = when (profile) {
+        MediaCodecInfo.CodecProfileLevel.MPEG4ProfileSimple -> "Simple Profile"
+        MediaCodecInfo.CodecProfileLevel.MPEG4ProfileSimpleScalable -> "Simple Scalable Profile"
+        MediaCodecInfo.CodecProfileLevel.MPEG4ProfileCore -> "Core Profile"
+        MediaCodecInfo.CodecProfileLevel.MPEG4ProfileMain -> "Main Profile"
+        MediaCodecInfo.CodecProfileLevel.MPEG4ProfileAdvancedSimple -> "Advanced Simple Profile"
+        MediaCodecInfo.CodecProfileLevel.MPEG4ProfileAdvancedCoding -> "Advanced Coding Profile"
+        MediaCodecInfo.CodecProfileLevel.MPEG4ProfileAdvancedCore -> "Advanced Core Profile"
+        else -> "0x${Integer.toHexString(profile)}"
     }
 
     /** 平台解码器查询：与系统同源（MediaCodecList），尺寸缺失时按常见档位查询 */
