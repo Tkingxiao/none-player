@@ -13,6 +13,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Person
@@ -32,6 +35,7 @@ import androidx.navigation.compose.composable
 import com.noneplayer.core.ui.NpListRow
 import com.noneplayer.core.ui.NpSectionHeader
 import com.noneplayer.core.ui.NoneMark
+import com.noneplayer.core.ui.npCardSurface
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.TabProvider
@@ -63,13 +67,29 @@ private fun ProfileScreen(navigator: Navigator) {
         }.getOrNull() ?: "—"
     }
 
-    Column(
-        modifier = androidx.compose.ui.Modifier
+    // E47 响应式：平板/折叠展开后收窄居中，避免分组卡横跨超宽行长
+    val maxContentWidth = com.noneplayer.kernel.ui.api.LocalNpWindowInfo.current.maxContentWidth
+
+    androidx.compose.foundation.layout.Box(
+        modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
             .statusBarsPadding()
             .navigationBarsPadding(),
+        contentAlignment = Alignment.TopCenter,
     ) {
+      Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .then(
+                if (maxContentWidth != androidx.compose.ui.unit.Dp.Unspecified) {
+                    Modifier.widthIn(max = maxContentWidth)
+                } else {
+                    Modifier
+                },
+            )
+            .verticalScroll(rememberScrollState()),
+      ) {
         // 应用信息头
         Row(
             modifier = Modifier
@@ -134,19 +154,21 @@ private fun ProfileScreen(navigator: Navigator) {
         }
 
         Spacer(modifier = Modifier.height(24.dp))
+      }
     }
 }
 
-/** iOS 分组列表风格的圆角卡片容器 */
+/** 分组列表卡片容器：surface1 实底 + accent 派生发丝描边 + 顶边高光（§4 材质层）。 */
 @Composable
 private fun GroupedCard(content: @Composable () -> Unit) {
-    Surface(
+    val ink = com.noneplayer.core.ui.LocalNpInk.current
+    val shape = MaterialTheme.shapes.medium
+    Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        shape = MaterialTheme.shapes.medium,
-        color = MaterialTheme.colorScheme.surface,
+            .padding(horizontal = 16.dp)
+            .npCardSurface(ink, shape),
     ) {
-        Column { content() }
+        content()
     }
 }

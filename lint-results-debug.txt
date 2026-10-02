@@ -1,0 +1,133 @@
+D:\Code\Player\None Player\plugins\plugin-player-exo\build.gradle.kts:8: Warning: A newer version of compileSdk than 36 is available: 37 [GradleDependency]
+    compileSdk = 36
+    ~~~~~~~~~~~~~~~
+
+   Explanation for issues of type "GradleDependency":
+   This detector looks for usages of libraries where the version you are using
+   is not the current stable release. Using older versions is fine, and there
+   are cases where you deliberately want to stick with an older version.
+   However, you may simply not be aware that a more recent version is
+   available, and that is what this lint check helps find.
+
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\kotlin\com\noneplayer\plugins\player\exo\PlaybackService.kt:56: Error: This declaration is opt-in and its usage should be marked with @androidx.media3.common.util.UnstableApi or @OptIn(markerClass = androidx.media3.common.util.UnstableApi.class) [UnsafeOptInUsageError from androidx.annotation.experimental]
+    private var preloadManager: DefaultPreloadManager? = null
+                                ~~~~~~~~~~~~~~~~~~~~~~
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\kotlin\com\noneplayer\plugins\player\exo\PlaybackService.kt:234: Error: This declaration is opt-in and its usage should be marked with @androidx.media3.common.util.UnstableApi or @OptIn(markerClass = androidx.media3.common.util.UnstableApi.class) [UnsafeOptInUsageError from androidx.annotation.experimental]
+            val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+                                                         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\kotlin\com\noneplayer\plugins\player\exo\PlaybackService.kt:238: Error: This declaration is opt-in and its usage should be marked with @androidx.media3.common.util.UnstableApi or @OptIn(markerClass = androidx.media3.common.util.UnstableApi.class) [UnsafeOptInUsageError from androidx.annotation.experimental]
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+                                                 ~~~~~~~~~~~~~~~~~~~~~
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\kotlin\com\noneplayer\plugins\player\exo\PlaybackService.kt:239: Error: This declaration is opt-in and its usage should be marked with @androidx.media3.common.util.UnstableApi or @OptIn(markerClass = androidx.media3.common.util.UnstableApi.class) [UnsafeOptInUsageError from androidx.annotation.experimental]
+                .setAvailableSessionCommands(commands)
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\kotlin\com\noneplayer\plugins\player\exo\PlaybackService.kt:240: Error: This declaration is opt-in and its usage should be marked with @androidx.media3.common.util.UnstableApi or @OptIn(markerClass = androidx.media3.common.util.UnstableApi.class) [UnsafeOptInUsageError from androidx.annotation.experimental]
+                .build()
+                 ~~~~~
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\kotlin\com\noneplayer\plugins\player\exo\PlaybackService.kt:274: Error: This declaration is opt-in and its usage should be marked with @androidx.media3.common.util.UnstableApi or @OptIn(markerClass = androidx.media3.common.util.UnstableApi.class) [UnsafeOptInUsageError from androidx.annotation.experimental]
+        runCatching { preloadManager?.release() }
+                                      ~~~~~~~
+
+   Explanation for issues of type "UnsafeOptInUsageError":
+   This API has been flagged as opt-in with error-level severity.
+
+   Any declaration annotated with this marker is considered part of an
+   unstable or
+   otherwise non-standard API surface and its call sites should accept the
+   opt-in
+   aspect of it by using the @OptIn annotation, using the marker annotation
+   --
+   effectively causing further propagation of the opt-in aspect -- or
+   configuring
+   the UnsafeOptInUsageError check's options for project-wide opt-in.
+
+   To configure project-wide opt-in, specify the opt-in option value in
+   lint.xml
+   as a comma-delimited list of opted-in annotations:
+
+   <lint>
+       <issue id="UnsafeOptInUsageError">
+           <option name="opt-in" value="com.foo.ExperimentalBarAnnotation" />
+       </issue>
+   </lint>
+
+   Vendor: Android Open Source Project
+   Identifier: androidx.annotation.experimental
+   Feedback: https://issuetracker.google.com/issues/new?component=459778
+
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\AndroidManifest.xml:11: Warning: Exported service does not require permission [ExportedService]
+        <service
+         ~~~~~~~
+
+   Explanation for issues of type "ExportedService":
+   Exported services (services which either set exported=true or contain an
+   intent-filter and do not specify exported=false) should define a permission
+   that an entity must have in order to launch the service or bind to it.
+   Without this, any application can use this service.
+
+   https://goo.gle/ExportedService
+
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\kotlin\com\noneplayer\plugins\player\exo\PlaybackService.kt:205: Warning: Use the KTX extension function String.toUri instead? [UseKtx]
+            data = Uri.parse("noneplayer://player")
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+D:\Code\Player\None Player\plugins\plugin-player-exo\src\main\kotlin\com\noneplayer\plugins\player\exo\PlaybackService.kt:205: Warning: Use the KTX extension function String.toUri instead? [UseKtx]
+            data = Uri.parse("noneplayer://player")
+                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+   Explanation for issues of type "UseKtx":
+   The Android KTX libraries decorates the Android platform SDK as well as
+   various libraries with more convenient extension functions available from
+   Kotlin, allowing you to use default parameters, named parameters, and
+   more.
+
+   Available options:
+
+   **remove-defaults** (default is true):
+   Whether to skip arguments that match the defaults provided by the extension.
+
+   Extensions often provide default values for some of the parameters. For example:
+   ```kotlin
+   fun Path.readLines(charset: Charset = Charsets.UTF_8): List<String> { return Files.readAllLines(this, charset) }
+   ```
+   This lint check will by default automatically omit parameters that match the default, so if your code was calling
+
+   ```kotlin
+   Files.readAllLines(file, Charset.UTF_8)
+   ```
+   lint would replace this with
+   ```kotlin
+   file.readLines()
+   ```
+   rather than
+
+   ```kotlin
+   file.readLines(Charset.UTF_8
+   ```
+   You can turn this behavior off using this option.
+
+   To configure this option, use a `lint.xml` file with an <option> like this:
+
+   ```xml
+   <lint>
+       <issue id="UseKtx">
+           <option name="remove-defaults" value="true" />
+       </issue>
+   </lint>
+   ```
+
+   **require-present** (default is true):
+   Whether to only offer extensions already available.
+
+   This option lets you only have lint suggest extension replacements if those extensions are already available on the class path (in other words, you're already depending on the library containing the extension method.)
+
+   To configure this option, use a `lint.xml` file with an <option> like this:
+
+   ```xml
+   <lint>
+       <issue id="UseKtx">
+           <option name="require-present" value="true" />
+       </issue>
+   </lint>
+   ```
+
+6 errors, 4 warnings

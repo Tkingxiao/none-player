@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -40,6 +41,7 @@ import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.ThemeMode
 import com.noneplayer.core.ui.NpListRow
 import com.noneplayer.core.ui.NpSectionHeader
+import com.noneplayer.core.ui.npCardSurface
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.get
@@ -100,6 +102,8 @@ private fun KernelSettingsScreen(
     val themeMode by vm.themeMode.collectAsStateWithLifecycle()
     // 页面渲染时聚合各插件的设置区块（而非 boot 时缓存，保证动态发现语义）
     val sections = kernel.registry.query<SettingsProvider>().sortedBy { it.order }
+    // E47 响应式：平板/折叠展开后收窄居中
+    val maxContentWidth = com.noneplayer.kernel.ui.api.LocalNpWindowInfo.current.maxContentWidth
 
     Column(
         modifier = Modifier
@@ -127,22 +131,26 @@ private fun KernelSettingsScreen(
             )
         }
 
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier.fillMaxSize().navigationBarsPadding(),
+            contentAlignment = Alignment.TopCenter,
+        ) {
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
-                .navigationBarsPadding(),
+                .then(
+                    if (maxContentWidth != androidx.compose.ui.unit.Dp.Unspecified) {
+                        Modifier.widthIn(max = maxContentWidth)
+                    } else {
+                        Modifier
+                    },
+                ),
             contentPadding = PaddingValues(bottom = 32.dp),
         ) {
             // ---- 内核自带区块：外观 ----
             item { NpSectionHeader("外观") }
             item(key = "theme") {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surface,
-                ) {
+                SettingsCard {
                     SingleChoiceSegmentedButtonRow(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -167,41 +175,39 @@ private fun KernelSettingsScreen(
             sections.forEach { section ->
                 item(key = "section-${section.sectionId}") { NpSectionHeader(section.title) }
                 item(key = "content-${section.sectionId}") {
-                    Surface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp),
-                        shape = MaterialTheme.shapes.medium,
-                        color = MaterialTheme.colorScheme.surface,
-                    ) {
-                        // Surface 内容默认是 Box：区块内多行必须纵向排列，否则互相叠压
-                        Column { section.Render() }
-                    }
+                    SettingsCard { section.Render() }
                 }
             }
             // ---- 内核信息 ----
             item { NpSectionHeader("内核") }
             item(key = "plugins") {
-                Surface(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    shape = MaterialTheme.shapes.medium,
-                    color = MaterialTheme.colorScheme.surface,
-                ) {
-                    Column {
-                        plugins.forEachIndexed { index, plugin ->
-                            if (index > 0) {
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                            }
-                            NpListRow(
-                                title = plugin.name,
-                                subtitle = "${plugin.id} · v${plugin.version}",
-                            )
+                SettingsCard {
+                    plugins.forEachIndexed { index, plugin ->
+                        if (index > 0) {
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                         }
+                        NpListRow(
+                            title = plugin.name,
+                            subtitle = "${plugin.id} · v${plugin.version}",
+                        )
                     }
                 }
             }
         }
+        }
+    }
+}
+
+/** 设置分组卡片：surface1 实底 + accent 派生发丝描边 + 顶边高光，与"我的"页一致。 */
+@Composable
+private fun SettingsCard(content: @Composable () -> Unit) {
+    val ink = com.noneplayer.core.ui.LocalNpInk.current
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .npCardSurface(ink, MaterialTheme.shapes.medium),
+    ) {
+        content()
     }
 }

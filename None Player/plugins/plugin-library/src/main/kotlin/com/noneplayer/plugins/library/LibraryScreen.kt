@@ -4,6 +4,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -18,6 +19,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -45,11 +47,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -205,6 +209,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
         }
     }
 
+    // E47 响应式：阅读型内容最大宽度（紧凑手机不约束，平板/折叠展开后收窄居中防超宽拉伸）
+    val maxContentWidth = com.noneplayer.kernel.ui.api.LocalNpWindowInfo.current.maxContentWidth
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -294,7 +301,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                 // E31（B3 收尾）：无顶层文件夹时给出明确说明再展示视频墙，不再"静默"回落
                 viewMode == LibraryView.FOLDERS && selectedFolder == null && folderRoot.children.isEmpty() -> Column {
                     FolderFallbackHint()
-                    MediaGrid(items = sortedItems, columns = gridColumns, onOpen = { item -> openPlayer(navigator, item) })
+                    MediaGrid(items = sortedItems, columns = gridColumns, maxContentWidth = maxContentWidth, onOpen = { item -> openPlayer(navigator, item) })
                 }
                 viewMode == LibraryView.FOLDERS -> Column {
                     val node = currentFolder ?: folderRoot
@@ -312,11 +319,12 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                     FolderContentsGrid(
                         node = node,
                         columns = gridColumns,
+                        maxContentWidth = maxContentWidth,
                         onOpenFolder = { selectedFolder = it.path },
                         onOpenVideo = { item -> openPlayer(navigator, item) },
                     )
                 }
-                else -> MediaGrid(items = sortedItems, columns = gridColumns, onOpen = { item -> openPlayer(navigator, item) })
+                else -> MediaGrid(items = sortedItems, columns = gridColumns, maxContentWidth = maxContentWidth, onOpen = { item -> openPlayer(navigator, item) })
             }
         }
     }
@@ -467,39 +475,54 @@ private fun FolderNode.findByPath(path: String?): FolderNode? {
 }
 
 /** 文件夹内容网格：子文件夹卡片在前、本级视频在后（同一网格滚动） */
+/**
+ * 自适应网格每格最小宽度：把用户的「列数」偏好重新诠释为**密度档**——
+ * 2 列=舒适（大卡）、3 列=紧凑（小卡）。真实列数随窗口宽度连续变化（E47），
+ * 平板/折叠展开后自动变多列，不再被 `GridCells.Fixed` 锁死在手机的 2/3 列。
+ */
+private fun gridMinCell(gridColumns: Int): Dp =
+    if (gridColumns <= 2) com.noneplayer.core.ui.NpDimens.gridMinCellComfy else com.noneplayer.core.ui.NpDimens.gridMinCell
+
 @Composable
 private fun FolderContentsGrid(
     node: FolderNode,
     columns: Int,
+    maxContentWidth: Dp,
     onOpenFolder: (FolderNode) -> Unit,
     onOpenVideo: (MediaItem) -> Unit,
 ) {
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(columns),
-        contentPadding = PaddingValues(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-        modifier = Modifier
-            .fillMaxSize()
-            .navigationBarsPadding(),
-    ) {
-        items(node.children, key = { "folder:${it.path}" }) { child ->
-            FolderCard(node = child, modifier = Modifier.animateItem(), onClick = { onOpenFolder(child) })
-        }
-        items(node.directVideos, key = { "video:${it.sourceId}:${it.id}" }) { item ->
-            MediaCard(item = item, modifier = Modifier.animateItem(), onClick = { onOpenVideo(item) })
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(gridMinCell(columns)),
+            contentPadding = PaddingValues(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (maxContentWidth != Dp.Unspecified) Modifier.widthIn(max = maxContentWidth) else Modifier)
+                .navigationBarsPadding(),
+        ) {
+            items(node.children, key = { "folder:${it.path}" }) { child ->
+                FolderCard(node = child, modifier = Modifier.animateItem(), onClick = { onOpenFolder(child) })
+            }
+            items(node.directVideos, key = { "video:${it.sourceId}:${it.id}" }) { item ->
+                MediaCard(item = item, modifier = Modifier.animateItem(), onClick = { onOpenVideo(item) })
+            }
         }
     }
 }
 
 @Composable
 private fun FolderCard(node: FolderNode, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    val ink = com.noneplayer.core.ui.LocalNpInk.current
+    val coverShape = RoundedCornerShape(com.noneplayer.core.ui.NpRadius.card)
     Column(modifier = modifier.npPressScale(onClick = onClick)) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .clip(MaterialTheme.shapes.medium)
+                .shadow(10.dp, coverShape, clip = false, ambientColor = Color.Black.copy(alpha = 0.35f), spotColor = Color.Black.copy(alpha = 0.25f))
+                .clip(coverShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             // 封面取该文件夹（含子层级）有缩略图的最新视频；全无缩略图时显示 ⊘ 标记
@@ -516,16 +539,21 @@ private fun FolderCard(node: FolderNode, modifier: Modifier = Modifier, onClick:
                     com.noneplayer.core.ui.NoneMark(modifier = Modifier.size(40.dp), strokeWidth = 3.dp)
                 }
             }
-            // 右上角数量角标（含子层级总数）
+            // 右上角数量角标（含子层级总数）——丸形 chip
             Text(
                 text = "${node.totalCount}",
-                style = MaterialTheme.typography.labelMedium,
+                style = com.noneplayer.core.ui.NpTimecode,
                 color = Color.White,
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(6.dp)
-                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                    .padding(8.dp)
+                    .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(com.noneplayer.core.ui.NpRadius.chip))
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            )
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .border(1.dp, ink.border, coverShape),
             )
         }
         Text(
@@ -548,34 +576,40 @@ private fun FolderCard(node: FolderNode, modifier: Modifier = Modifier, onClick:
 }
 
 @Composable
-private fun MediaGrid(items: List<MediaItem>, columns: Int, onOpen: (MediaItem) -> Unit) {
-    LazyVerticalGrid(
-        columns = GridCells.Fixed(columns),
-        contentPadding = PaddingValues(16.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-        modifier = Modifier
-            .fillMaxSize()
-            .navigationBarsPadding(),
-    ) {
-        items(items, key = { "${it.sourceId}:${it.id}" }) { item ->
-            MediaCard(
-                item = item,
-                modifier = Modifier.animateItem(),
-                onClick = { onOpen(item) },
-            )
+private fun MediaGrid(items: List<MediaItem>, columns: Int, maxContentWidth: Dp, onOpen: (MediaItem) -> Unit) {
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
+        LazyVerticalGrid(
+            columns = GridCells.Adaptive(gridMinCell(columns)),
+            contentPadding = PaddingValues(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+            modifier = Modifier
+                .fillMaxSize()
+                .then(if (maxContentWidth != Dp.Unspecified) Modifier.widthIn(max = maxContentWidth) else Modifier)
+                .navigationBarsPadding(),
+        ) {
+            items(items, key = { "${it.sourceId}:${it.id}" }) { item ->
+                MediaCard(
+                    item = item,
+                    modifier = Modifier.animateItem(),
+                    onClick = { onOpen(item) },
+                )
+            }
         }
     }
 }
 
 @Composable
 private fun MediaCard(item: MediaItem, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
+    val ink = com.noneplayer.core.ui.LocalNpInk.current
+    val coverShape = RoundedCornerShape(com.noneplayer.core.ui.NpRadius.card)
     Column(modifier = modifier.npPressScale(onClick = onClick)) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .clip(MaterialTheme.shapes.medium)
+                .shadow(10.dp, coverShape, clip = false, ambientColor = Color.Black.copy(alpha = 0.35f), spotColor = Color.Black.copy(alpha = 0.25f))
+                .clip(coverShape)
                 .background(MaterialTheme.colorScheme.surfaceVariant),
         ) {
             // 优先读扫描时缓存的系统缩略图文件；无缓存时现场抽帧兜底
@@ -612,15 +646,21 @@ private fun MediaCard(item: MediaItem, modifier: Modifier = Modifier, onClick: (
                 )
                 Text(
                     text = formatDuration(item.durationMs),
-                    style = MaterialTheme.typography.labelMedium,
+                    style = com.noneplayer.core.ui.NpTimecode,
                     color = Color.White,
                     modifier = Modifier
                         .align(Alignment.BottomEnd)
-                        .padding(6.dp)
-                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(4.dp))
-                        .padding(horizontal = 5.dp, vertical = 2.dp),
+                        .padding(8.dp)
+                        .background(Color.Black.copy(alpha = 0.62f), RoundedCornerShape(com.noneplayer.core.ui.NpRadius.chip))
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
                 )
             }
+            // 发丝描边：把封面与底色分出一层（§4 材质层）
+            Box(
+                modifier = Modifier
+                    .matchParentSize()
+                    .border(1.dp, ink.border, coverShape),
+            )
         }
         Text(
             text = item.title,

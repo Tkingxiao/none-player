@@ -1,8 +1,5 @@
 package com.noneplayer.core.ui
 
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -179,9 +176,11 @@ fun NpEmptyState(
 }
 
 /**
- * 按压缩放微动效——卡片类可点击内容的统一触感（Apple 式按压 + B 站式弹性）。
+ * 按压缩放微动效——卡片类可点击内容的统一触感。
  *
- * 按下时缩放到 [pressedScale] 并以弹簧回弹；无边框涟漪，保持画面干净。
+ * 按下缩放到 [pressedScale]，用 Silk 临界阻尼弹簧回弹（**不过冲**）：320ms 弹簧上的
+ * 果冻回弹（旧实现 `DampingRatioMediumBouncy`）在列表卡片上显得廉价；B 站式弹性只保留
+ * 给开关与滑块 thumb。无边框涟漪，保持画面干净。
  */
 fun Modifier.npPressScale(
     onClick: () -> Unit,
@@ -189,12 +188,9 @@ fun Modifier.npPressScale(
 ): Modifier = composed {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
-    val scale by animateFloatAsState(
-        targetValue = if (pressed) pressedScale else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
-            stiffness = Spring.StiffnessMediumLow,
-        ),
+    val scale by silkFloat(
+        target = if (pressed) pressedScale else 1f,
+        durationMs = Motion.Hover,
         label = "npPressScale",
     )
     this

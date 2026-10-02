@@ -42,12 +42,31 @@ val NpTypography = Typography(
 )
 
 /**
- * 圆角体系：小 10 / 中 14 / 大 20，近似 iOS 连续圆角的观感。
+ * 圆角体系：小 10 / 中 14 / 大 20 / 特大 28（Sheet / 玻璃面板 / 迷你条展开态），
+ * 近似 iOS 连续圆角的观感。
  */
 val NpShapes = Shapes(
     extraSmall = RoundedCornerShape(6.dp),
     small = RoundedCornerShape(10.dp),
     medium = RoundedCornerShape(14.dp),
     large = RoundedCornerShape(20.dp),
-    extraLarge = RoundedCornerShape(24.dp),
+    extraLarge = RoundedCornerShape(28.dp),
+)
+
+/**
+ * 播放器专用字号——等宽数字（tabular）防止时间码位数变化时整行左右抖动。
+ * 字体不含 tnum 时退化为 Monospace（Android 内置，零包体）。
+ */
+val NpTimecode = TextStyle(
+    fontSize = 13.sp,
+    fontWeight = FontWeight.Medium,
+    lineHeight = 16.sp,
+    fontFeatureSettings = "tnum",
+)
+
+val NpTimecodeLarge = TextStyle(
+    fontSize = 20.sp,
+    fontWeight = FontWeight.SemiBold,
+    lineHeight = 24.sp,
+    fontFeatureSettings = "tnum",
 )

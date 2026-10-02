@@ -70,9 +70,15 @@ class MiniPlayerChrome : BottomChromeProvider {
         ) {
             // nowPlaying 在退出动画期间会变 null，逐帧读取需要兜底快照
             val snapshot = nowPlaying ?: return@AnimatedVisibility
-            Surface(
-                tonalElevation = 3.dp,
+            // 玻璃材质 chrome：顶边高光 + 半透明暖面，与内容区分出"放映灯浮层"一层
+            com.noneplayer.core.ui.NpGlass(
                 modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(
+                    topStart = com.noneplayer.core.ui.NpRadius.miniCollapsed,
+                    topEnd = com.noneplayer.core.ui.NpRadius.miniCollapsed,
+                ),
+                strength = 1.1f,
+                elevation = 10.dp,
             ) {
                 Column {
                     MiniPlayerRow(
@@ -135,7 +141,7 @@ private fun MiniPlayerRow(
             )
             Text(
                 text = miniStatusText(snapshot),
-                style = MaterialTheme.typography.labelSmall,
+                style = com.noneplayer.core.ui.NpTimecode,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,

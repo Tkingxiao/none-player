@@ -19,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -35,84 +36,42 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 /**
- * None Player 设计令牌。
+ * None Player 设计令牌 → Material ColorScheme 的映射。
  *
- * 遵循 Apple HIG 的色彩原则（color.md）：
- * - 语义化角色命名，明暗两套完整定义，跟随系统外观，不提供应用内切换；
- * - 一种颜色只表达一种含义：琥珀橙 accent 只用于主操作与品牌时刻，
- *   其余界面保持中性灰阶；
- * - 对比度按 WCAG AA 校验：小字 ≥ 4.5:1，大字/粗体 ≥ 3:1。
+ * 色板的唯一事实源是 [InkTokens]（`DesignTokens.kt`）：美学主张「暗室与放映灯」——
+ * 中性面是带琥珀色相的暖黑/暖米，accent 只用于主操作与"正在播放"。这里把 Ink 令牌
+ * 投影到 M3 槽位，使所有读 `MaterialTheme.colorScheme` 的既有界面**自动**获得暖化分层；
+ * 需要更精细材质（玻璃/高光/选中底）的组件再经 [LocalNpInk] 取用原始令牌。
  */
-private object NpTokens {
-    // ---- 明亮外观 ----
-    val BackgroundLight = Color(0xFFF2F2F7)      // 分组列表底色（iOS systemGroupedBackground）
-    val SurfaceLight = Color(0xFFFFFFFF)         // 分组卡片
-    val LabelLight = Color(0xFF000000)           // 4.5:1+ 参照黑
-    val LabelSecondaryLight = Color(0xFF6C6C70)  // 次要文字，白底对比 5.2:1
-    val SeparatorLight = Color(0xFFDCDCE2)
-    val AccentLight = Color(0xFFC24E00)          // 主橙，白底对比 4.8:1，可直接作文字色
-    val OnAccentLight = Color(0xFFFFFFFF)        // 橙底白字 4.8:1
-    val AccentContainerLight = Color(0xFFC24E00) // 选中态容器：与 accent 同义（一色一义）
-    val OnAccentContainerLight = Color(0xFFFFFFFF)
-    val DestructiveLight = Color(0xFFD70015)     // 白底对比 5.4:1
-
-    // ---- 暗色外观 ----
-    val BackgroundDark = Color(0xFF000000)       // iOS systemBackground（base）
-    val SurfaceDark = Color(0xFF1C1C1E)          // elevated 分组卡片
-    val SurfaceElevatedDark = Color(0xFF2C2C2E)
-    val LabelDark = Color(0xFFFFFFFF)
-    val LabelSecondaryDark = Color(0xFF9E9EA6)   // 黑底对比 7.2:1
-    val SeparatorDark = Color(0xFF38383C)
-    val AccentDark = Color(0xFFFF9F0A)           // 播放器的"放映灯"，黑底对比 10:1
-    val OnAccentDark = Color(0xFF1C1C1E)         // 橙底深字 8.3:1
-    val AccentContainerDark = Color(0xFFFF9F0A)  // 选中态容器：与 accent 同义
-    val OnAccentContainerDark = Color(0xFF1C1C1E)
-    val DestructiveDark = Color(0xFFFF453A)
-}
-
-private val LightColors: ColorScheme = lightColorScheme(
-    primary = NpTokens.AccentLight,
-    onPrimary = NpTokens.OnAccentLight,
-    secondary = NpTokens.AccentLight,
-    onSecondary = NpTokens.OnAccentLight,
-    secondaryContainer = NpTokens.AccentContainerLight,
-    onSecondaryContainer = NpTokens.OnAccentContainerLight,
-    tertiary = NpTokens.AccentLight,
-    onTertiary = NpTokens.OnAccentLight,
-    background = NpTokens.BackgroundLight,
-    onBackground = NpTokens.LabelLight,
-    surface = NpTokens.SurfaceLight,
-    onSurface = NpTokens.LabelLight,
-    surfaceVariant = NpTokens.SurfaceLight,
-    onSurfaceVariant = NpTokens.LabelSecondaryLight,
-    surfaceContainer = NpTokens.SurfaceLight,
-    surfaceContainerHigh = NpTokens.SurfaceLight,
-    surfaceContainerHighest = NpTokens.SurfaceLight,
-    outlineVariant = NpTokens.SeparatorLight,
-    error = NpTokens.DestructiveLight,
+private fun ColorScheme.applyInk(ink: InkTokens): ColorScheme = copy(
+    primary = ink.accent,
+    onPrimary = ink.onAccent,
+    secondary = ink.accent,
+    onSecondary = ink.onAccent,
+    secondaryContainer = ink.accentBg,
+    onSecondaryContainer = ink.accentStrong,
+    tertiary = ink.accentStrong,
+    onTertiary = ink.onAccent,
+    background = ink.bg,
+    onBackground = ink.label,
+    surface = ink.surface1,
+    onSurface = ink.label,
+    surfaceVariant = ink.surface2,
+    onSurfaceVariant = ink.label2,
+    surfaceContainerLowest = ink.void,
+    surfaceContainerLow = ink.bg,
+    surfaceContainer = ink.surface1,
+    surfaceContainerHigh = ink.surface2,
+    surfaceContainerHighest = ink.surface3,
+    outline = ink.label3,
+    outlineVariant = ink.separator,
+    error = ink.destructive,
+    scrim = ink.scrim,
 )
 
-private val DarkColors: ColorScheme = darkColorScheme(
-    primary = NpTokens.AccentDark,
-    onPrimary = NpTokens.OnAccentDark,
-    secondary = NpTokens.AccentDark,
-    onSecondary = NpTokens.OnAccentDark,
-    secondaryContainer = NpTokens.AccentContainerDark,
-    onSecondaryContainer = NpTokens.OnAccentContainerDark,
-    tertiary = NpTokens.AccentDark,
-    onTertiary = NpTokens.OnAccentDark,
-    background = NpTokens.BackgroundDark,
-    onBackground = NpTokens.LabelDark,
-    surface = NpTokens.SurfaceDark,
-    onSurface = NpTokens.LabelDark,
-    surfaceVariant = NpTokens.SurfaceElevatedDark,
-    onSurfaceVariant = NpTokens.LabelSecondaryDark,
-    surfaceContainer = NpTokens.SurfaceDark,
-    surfaceContainerHigh = NpTokens.SurfaceElevatedDark,
-    surfaceContainerHighest = NpTokens.SurfaceElevatedDark,
-    outlineVariant = NpTokens.SeparatorDark,
-    error = NpTokens.DestructiveDark,
-)
+private val LightColors: ColorScheme = lightColorScheme().applyInk(NpInkLight)
+
+private val DarkColors: ColorScheme = darkColorScheme().applyInk(NpInkDark)
 
 /**
  * None Player 主题。
@@ -161,8 +120,14 @@ fun NonePlayerTheme(
             colorScheme = if (appliedDark) DarkColors else LightColors,
             typography = NpTypography,
             shapes = NpShapes,
-            content = content,
-        )
+        ) {
+            // 语义色令牌与 ColorScheme 同源同步切换：需要玻璃/高光/选中底等材质的组件
+            // 经 LocalNpInk 取用原始令牌（ColorScheme 只投影得到 M3 槽位，损失了 alpha 阶梯）。
+            CompositionLocalProvider(
+                LocalNpInk provides if (appliedDark) NpInkDark else NpInkLight,
+                content = content,
+            )
+        }
         frozenFrame?.let { frame ->
             Image(
                 bitmap = frame,
@@ -176,7 +141,7 @@ fun NonePlayerTheme(
     }
 }
 
-private const val SCHEME_ANIMATION_MS = 320
+private const val SCHEME_ANIMATION_MS = Motion.Scheme
 
 /** 冻结帧降采样：面积取 1/4，抓帧更快、瞬时内存更小，淡化期间肉眼无差 */
 private const val CAPTURE_SCALE = 2
