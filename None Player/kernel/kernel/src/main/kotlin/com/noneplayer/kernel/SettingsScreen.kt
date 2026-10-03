@@ -1,6 +1,8 @@
 package com.noneplayer.kernel
 
-import androidx.compose.foundation.background
+import android.media.MediaCodecList
+import android.widget.Toast
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -8,7 +10,6 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -18,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -31,6 +33,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -48,7 +51,6 @@ import com.noneplayer.core.ui.NpAppTopBar
 import com.noneplayer.core.ui.NpEyebrow
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpPageScaffold
-import com.noneplayer.core.ui.NpSegmented
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpSwitch
 import com.noneplayer.kernel.api.Navigator
@@ -62,10 +64,12 @@ import com.noneplayer.kernel.ui.api.PLUGINS_ROUTE
 import com.noneplayer.kernel.ui.api.SETTINGS_ROUTE
 import com.noneplayer.kernel.ui.api.SettingsProvider
 import com.noneplayer.kernel.ui.api.TabProvider
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.noneplayer.core.ui.LocalNpTopBarInset
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
 
@@ -165,7 +169,6 @@ private fun KernelSettingsScreen(
     onOpenPlugins: () -> Unit,
 ) {
     val kernel = LocalKernel.current
-    val ink = LocalNpInk.current
     val windowInfo = LocalNpWindowInfo.current
     val compact = windowInfo.isCompact
     val vm: SettingsViewModel = viewModel(
@@ -174,6 +177,12 @@ private fun KernelSettingsScreen(
         },
     )
     val themeMode by vm.themeMode.collectAsStateWithLifecycle()
+    // 设计稿的主题行图标反映**当前解析后的明暗**（system 跟随系统）
+    val darkNow = when (themeMode) {
+        ThemeMode.LIGHT -> false
+        ThemeMode.DARK -> true
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+    }
     // 页面渲染时聚合各插件的设置区块（而非 boot 时缓存，保证动态发现语义）
     val sections = kernel.registry.query<SettingsProvider>().sortedBy { it.order }
     val gutter = if (compact) 14.dp else 20.dp
@@ -209,36 +218,6 @@ private fun KernelSettingsScreen(
                     GestureSettingsGroup(gutter = gutter)
                 }
 
-                // ---- 内核自带区块：外观 ----
-                item(key = "theme-head") { EyebrowBlock(text = "外观", gutter = gutter) }
-                item(key = "theme") {
-                    Column(modifier = Modifier.padding(horizontal = gutter)) {
-                        // 主题三选一排成一行（设计稿 `.seg`）
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(
-                                text = "主题外观",
-                                style = com.noneplayer.core.ui.NpTypography.titleSmall,
-                                color = ink.fg,
-                                modifier = Modifier.weight(1f),
-                            )
-                            NpSegmented(
-                                options = ThemeMode.entries.map { it.label },
-                                selected = themeMode.label,
-                                onSelect = { label ->
-                                    ThemeMode.entries.firstOrNull { it.label == label }
-                                        ?.let(vm::setThemeMode)
-                                },
-                            )
-                        }
-                        Divider()
-                    }
-                }
-
                 // ---- 插件贡献的设置区块 ----
                 sections.forEach { section ->
                     item(key = "section-head-${section.sectionId}") {
@@ -251,20 +230,35 @@ private fun KernelSettingsScreen(
                     }
                 }
 
-                // ---- 应用自身信息：两个独立入口，各自的详情页 ----
+                // ---- 内核自带区块：外观与关于（设计稿 settingsView 第四组）----
                 //
-                // 为什么拆成两页而不是并进"关于"一页：
-                //   插件   —— 产品的**核心概念**（微内核 + 扩展点即插即用），
-                //             且是会随插件增减变动的运行时状态；
-                //   关于   —— 静态元信息（版本 / 构建 / 运行环境）。
-                // 堆在一页会把架构主张降级成一行附注，也让"我要找插件"变成
-                // "我得先知道插件藏在关于里"。
+                // 设计稿把「主题外观 / 解码能力检测 / 版本 / 清除播放缓存」收在**同一个**
+                // `.eyebrow 外观与关于` 下；此前 App 拆成「外观」（主题 segmented）+「应用」
+                // （插件 / 关于）两段，与设计稿的区块划分不符。这里合并为一段，并把
+                // 主题控件从 `NpSegmented` 改成设计稿 `rowVal` 的形态（值行 + 下钻箭头）——
+                // 设置页每一行都是"标签在左、值在右"，塞一排 segmented 会破坏这条视线。
                 //
-                // 设置页里也不再直接列出插件或版本号：设置项是**可写偏好**，
-                // 而这些都是**只读事实**——混在同一张清单里，用户会以为自己能改。
-                item(key = "app-head") { EyebrowBlock(text = "应用", gutter = gutter) }
-                item(key = "app-entries") {
+                // 「解码能力检测」「清除播放缓存」此前缺失，现按设计稿补回：前者用
+                // `MediaCodecList` 真实枚举硬解编码器（只读值，不编造）；后者做真实清理
+                // （断点续播进度是唯一可清的"播放缓存"）。
+                item(key = "about-head") { EyebrowBlock(text = "外观与关于", gutter = gutter) }
+                item(key = "about-entries") {
                     Column(modifier = Modifier.padding(horizontal = gutter)) {
+                        ValuePickerRow(
+                            title = "主题外观",
+                            // 设计稿 `rowVal(light ? "sun" : "moon", …)`：图标随当前明暗切换
+                            icon = if (darkNow) NpIcon.Moon else NpIcon.Sun,
+                            value = themeMode.label,
+                            options = ThemeMode.entries.map { it.label },
+                            onSelect = { label ->
+                                ThemeMode.entries.firstOrNull { it.label == label }
+                                    ?.let(vm::setThemeMode)
+                            },
+                        )
+                        DecoderCapabilityRow()
+                        // 插件 / 关于：App 的**正向**增量（设计稿这里只有一行"版本"）。
+                        // 两者各自是独立二级页——插件是产品的核心概念且随运行时可增减，
+                        // 关于是静态元信息；并进一页会把架构主张降级成一行附注。
                         NpSettingRow(
                             title = "插件",
                             subtitle = "${plugins.size} 个已加载 · 扩展点即插即用",
@@ -277,9 +271,9 @@ private fun KernelSettingsScreen(
                             subtitle = "版本、构建号与运行环境",
                             icon = NpIcon.Info,
                             onClick = onOpenAbout,
-                            showDivider = false,
                             trailing = { ChevronTrail() },
                         )
+                        ClearPlaybackCacheRow()
                     }
                 }
             }
@@ -311,17 +305,6 @@ private fun EyebrowBlock(text: String, gutter: Dp) {
         NpEyebrow(text = text)
         Spacer(modifier = Modifier.height(8.dp))
     }
-}
-
-/** 行间发丝线（设计稿 `.row-item{border-bottom:1px solid var(--border)}`）。 */
-@Composable
-private fun Divider() {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(1.dp)
-            .background(LocalNpInk.current.border),
-    )
 }
 
 // ================= 设计稿 settingsView 的三组真设置 =================
@@ -552,5 +535,120 @@ private fun ValueReadonly(text: String) {
         style = com.noneplayer.core.ui.NpMonoSmall,
         color = LocalNpInk.current.muted,
         maxLines = 1,
+    )
+}
+
+/**
+ * 设计稿 1213「解码能力检测」：只读值 `H.264 / H.265 / AV1 ✓`。
+ *
+ * 用 `MediaCodecList` **真实枚举**本机带硬解加速的解码器（与 FormatProbe 同源），
+ * 而不是写死设计稿演示壳里的字符串——设备换了、编码支持也变，写死就是假信息。
+ * 缺失的编码由内置 FFmpeg 软解兜底，因此只标注"硬解命中"的那几个。
+ */
+@Composable
+private fun DecoderCapabilityRow() {
+    val ink = LocalNpInk.current
+    // 枚举 `MediaCodecList` 要走一次系统媒体服务的查询（数毫秒到数十毫秒）。
+    // 放在组合里同步做，会在"设置页滚到这一行"时卡一帧；移到 IO 线程，
+    // 先给占位文案、探测完再填真值。
+    val caps by produceState<DecoderCapability?>(initialValue = null) {
+        value = withContext(Dispatchers.IO) { probeHardwareCodecs() }
+    }
+    NpSettingRow(
+        title = "解码能力检测",
+        subtitle = "硬解优先，缺失编码由内置 FFmpeg 软解兜底",
+        icon = NpIcon.Film,
+        trailing = {
+            Text(
+                text = caps?.label ?: "检测中…",
+                style = com.noneplayer.core.ui.NpMonoSmall,
+                color = if (caps?.allHardware == true) ink.success else ink.muted,
+                maxLines = 1,
+            )
+        },
+    )
+}
+
+/** 硬解能力探测结果：展示值与"三种常见编码是否全部硬解"。 */
+private class DecoderCapability(val label: String, val allHardware: Boolean)
+
+private fun probeHardwareCodecs(): DecoderCapability {
+    val wanted = listOf(
+        "video/avc" to "H.264",
+        "video/hevc" to "H.265",
+        "video/av01" to "AV1",
+    )
+    val hardwareTypes = runCatching {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
+            .asSequence()
+            .filter { !it.isEncoder }
+            .filter { info ->
+                // isHardwareAccelerated 需要 API 29；更低版本无法区分，按"有解码器即可"计
+                android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q ||
+                    runCatching { info.isHardwareAccelerated }.getOrDefault(false)
+            }
+            .flatMap { info -> runCatching { info.supportedTypes.asList() }.getOrDefault(emptyList()).asSequence() }
+            .map { it.lowercase() }
+            .toSet()
+    }.getOrDefault(emptySet())
+
+    val hits = wanted.filter { it.first in hardwareTypes }
+    val label = if (hits.isEmpty()) {
+        "软解兜底"
+    } else {
+        hits.joinToString(" / ") { it.second } + " ✓"
+    }
+    return DecoderCapability(label, hits.size == wanted.size)
+}
+
+/**
+ * 设计稿 1215「清除播放缓存」：真实清理断点续播进度 + 最近播放记录。
+ *
+ * 值是**真实条数**而非设计稿演示壳的"共 128 MB"——本应用没有媒体文件缓存，
+ * 唯一的可清数据就是这份播放记忆，报一个磁盘占用数字就是编造。
+ */
+@Composable
+private fun ClearPlaybackCacheRow() {
+    val kernel = LocalKernel.current
+    val settings = remember { kernel.services.get<AppSettings>() }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val count by settings.playbackMemoryCount.collectAsStateWithLifecycle(initialValue = 0)
+    val ink = LocalNpInk.current
+    NpSettingRow(
+        title = "清除播放缓存",
+        subtitle = "断点续播进度与最近播放记录",
+        icon = NpIcon.Trash,
+        onClick = {
+            val cleared = count
+            scope.launch {
+                settings.clearPlaybackMemory()
+                Toast.makeText(
+                    context,
+                    if (cleared > 0) "已清除 $cleared 条播放记录" else "没有可清除的播放记录",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+        },
+        showDivider = false,
+        trailing = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = "$count 条",
+                    style = com.noneplayer.core.ui.NpMonoSmall,
+                    color = ink.muted,
+                    maxLines = 1,
+                )
+                Icon(
+                    imageVector = NpIcon.ChevronRight,
+                    contentDescription = null,
+                    tint = ink.muted,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        },
     )
 }

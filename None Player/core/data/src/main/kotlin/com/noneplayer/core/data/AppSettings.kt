@@ -271,6 +271,28 @@ class AppSettings(private val context: Context) {
         }
     }
 
+    /**
+     * 可清除的播放记忆条数（按 mediaId 去重）。
+     *
+     * 设置页「清除播放缓存」的实值——本应用唯一的可清"播放缓存"就是这份
+     * 断点续播进度 + 最近播放时间，不虚报一个磁盘占用数字。
+     */
+    val playbackMemoryCount: Flow<Int> = context.dataStore.data
+        .map { prefs ->
+            prefs.asMap().keys.count {
+                it.name.startsWith("playback_pos_") && it.name != "playback_pos_"
+            }
+        }
+
+    /** 清除全部播放记忆（断点续播进度 + 最近播放时间），用于设置页「清除播放缓存」。 */
+    suspend fun clearPlaybackMemory() {
+        context.dataStore.edit { prefs ->
+            prefs.asMap().keys
+                .filter { it.name.startsWith("playback_pos_") || it.name.startsWith("playback_at_") }
+                .forEach { prefs.remove(it) }
+        }
+    }
+
     /** 用户偏好的默认倍速（跨会话记忆），默认 1.0 */
     val playbackSpeed: Flow<Float> = context.dataStore.data
         .map { it[KEY_PLAYBACK_SPEED]?.toFloatOrNull() ?: 1f }
