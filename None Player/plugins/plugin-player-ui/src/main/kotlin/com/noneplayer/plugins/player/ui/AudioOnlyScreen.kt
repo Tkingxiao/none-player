@@ -55,6 +55,7 @@ import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.bouncySpring
 import com.noneplayer.core.ui.npPressScale
+import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.PlaybackState
 
 /**
@@ -68,6 +69,11 @@ import com.noneplayer.kernel.api.PlaybackState
 fun AudioOnlyScreen(
     session: PlaybackSession,
     onBack: () -> Unit,
+    favorited: Boolean = false,
+    onToggleFavorite: () -> Unit = {},
+    onOpenSpeed: () -> Unit = {},
+    onOpenEpisodes: () -> Unit = {},
+    speedText: String = "1.0x",
     modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
@@ -75,6 +81,13 @@ fun AudioOnlyScreen(
     val snapshot = nowPlaying ?: return
     val player = session.player ?: return
     val isPlaying = snapshot.isPlaying
+    val loopMode by session.loopMode.collectAsStateWithLifecycle()
+    val loopIcon = when (loopMode) {
+        NpLoopMode.OFF -> NpIcon.ListView
+        NpLoopMode.ONE -> NpIcon.Rotate
+        NpLoopMode.SHUFFLE -> NpIcon.Sort
+        NpLoopMode.ALL -> NpIcon.Sound
+    }
 
     Box(
         modifier = modifier
@@ -192,21 +205,34 @@ fun AudioOnlyScreen(
                     )
                 }
             }
-            // 控制排（设计稿 .audio-controls：44 / 56 / 56 主钮 / 44）
+            // 控制排（设计稿 .audio-controls：循环(sm 44) / 上一首(56) / 播放主钮(56) /
+            // 下一首(56) / 播放列表(sm 44)，gap 18 居中）。此前只做了中间三钮，
+            // 两侧的循环与播放列表缺失——与设计稿的 5 钮结构不符。
+            val loopModes = listOf(NpLoopMode.OFF, NpLoopMode.ONE, NpLoopMode.SHUFFLE, NpLoopMode.ALL)
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 26.dp, vertical = 18.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                horizontalArrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
             ) {
+                NpIconButton(
+                    icon = loopIcon,
+                    contentDescription = "循环模式",
+                    onClick = {
+                        session.setLoopMode(loopModes[(loopModes.indexOf(loopMode) + 1) % loopModes.size])
+                    },
+                    size = 44.dp,
+                    iconSize = 22.dp,
+                    tint = if (loopMode == NpLoopMode.OFF) ink.muted else ink.accent,
+                )
                 NpIconButton(
                     icon = NpIcon.SkipPrevious,
                     contentDescription = "上一首",
                     onClick = { session.previous() },
-                    size = 44.dp,
-                    iconSize = 24.dp,
-                    tint = ink.muted,
+                    size = 56.dp,
+                    iconSize = 26.dp,
+                    tint = ink.fg,
                     enabled = snapshot.hasPrevious,
                 )
                 Box(
@@ -232,46 +258,95 @@ fun AudioOnlyScreen(
                     icon = NpIcon.SkipNext,
                     contentDescription = "下一首",
                     onClick = { session.next() },
-                    size = 44.dp,
-                    iconSize = 24.dp,
-                    tint = ink.muted,
+                    size = 56.dp,
+                    iconSize = 26.dp,
+                    tint = ink.fg,
                     enabled = snapshot.hasNext,
                 )
+                NpIconButton(
+                    icon = NpIcon.List,
+                    contentDescription = "播放列表",
+                    onClick = onOpenEpisodes,
+                    size = 44.dp,
+                    iconSize = 22.dp,
+                    tint = ink.muted,
+                )
             }
-            // 工具 chips（设计稿 .audio-tools：收藏 / 切回视频 / 倍速 / 睡眠定时）
-            Row(
+            // 工具 chips（设计稿 .audio-tools：2 列网格、max 420、chip 居中）
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 26.dp, vertical = 4.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                ToolChip(icon = NpIcon.Film, label = "切回视频", onClick = onBack)
-                ToolChip(icon = NpIcon.Headphones, label = "后台播放中", onClick = {})
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    ToolChip(
+                        icon = NpIcon.Heart,
+                        label = if (favorited) "已收藏" else "收藏",
+                        on = favorited,
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.weight(1f),
+                    )
+                    ToolChip(
+                        icon = NpIcon.Film,
+                        label = "切回视频",
+                        onClick = onBack,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    ToolChip(
+                        icon = NpIcon.Speed,
+                        label = "倍速 $speedText",
+                        on = speedText != "1.0x",
+                        onClick = onOpenSpeed,
+                        modifier = Modifier.weight(1f),
+                    )
+                    // 设计稿此格是「睡眠定时」——该能力尚未落地，不做假动作：
+                    // 换成真实的后台播放状态指示（同一格的诚实替代）。
+                    ToolChip(
+                        icon = NpIcon.Headphones,
+                        label = "后台播放中",
+                        onClick = {},
+                        modifier = Modifier.weight(1f),
+                    )
+                }
             }
             Spacer(modifier = Modifier.height(32.dp))
         }
     }
 }
 
-/** 工具 chip（设计稿 .tool-chip：胶囊 + 图标 + 文字） */
+/** 工具 chip（设计稿 .tool-chip：胶囊 + 图标 + 文字；.on 转 accent） */
 @Composable
 private fun ToolChip(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
     onClick: () -> Unit,
+    on: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
+    val content = if (on) ink.accent else ink.muted
     Row(
-        modifier = Modifier
+        modifier = modifier
             .clip(RoundedCornerShape(NpRadius.chip))
-            .border(1.dp, ink.border, RoundedCornerShape(NpRadius.chip))
+            .background(if (on) ink.accentSoft else Color.Transparent)
+            .border(1.dp, if (on) ink.accentLine else ink.border, RoundedCornerShape(NpRadius.chip))
             .npPressScale(onClick = onClick, pressedScale = 0.96f)
             .padding(horizontal = 15.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(7.dp),
+        // 设计稿 .audio-tools .tool-chip{justify-content:center;width:100%}
+        horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
     ) {
-        Icon(imageVector = icon, contentDescription = null, tint = ink.muted, modifier = Modifier.size(16.dp))
-        Text(text = label, style = NpTypography.bodySmall, color = ink.muted)
+        Icon(imageVector = icon, contentDescription = null, tint = content, modifier = Modifier.size(16.dp))
+        Text(text = label, style = NpTypography.bodySmall, color = content)
     }
 }
 
