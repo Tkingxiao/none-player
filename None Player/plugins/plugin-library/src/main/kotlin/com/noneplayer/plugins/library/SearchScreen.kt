@@ -61,6 +61,7 @@ import com.noneplayer.core.ui.NpEyebrow
 import com.noneplayer.core.ui.NpFilterSelect
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
+import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpRadius
@@ -411,12 +412,13 @@ private fun SearchHead(
     onToggleAscending: (Boolean) -> Unit,
 ) {
     val ink = LocalNpInk.current
+    // 设计稿 `.sec-head{gap:12px}`，控件顺序 `sortMenu → viewToggle → 计数`
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(top = 14.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text(
             text = "搜索结果",
@@ -424,13 +426,6 @@ private fun SearchHead(
             color = ink.fg,
             maxLines = 1,
             modifier = Modifier.weight(1f),
-        )
-        NpSegmented(
-            options = listOf("grid", "list"),
-            selected = viewStyle,
-            icons = listOf(NpIcon.GridView, NpIcon.ListView),
-            itemWidth = 34.dp,
-            onSelect = onViewStyle,
         )
         NpFilterSelect(
             label = sortMode.label,
@@ -462,7 +457,14 @@ private fun SearchHead(
                 maxLines = 1,
             )
         }
-        Text(text = "$count 项", style = NpMonoSmall, color = ink.muted, maxLines = 1)
+        NpSegmented(
+            options = listOf("grid", "list"),
+            selected = viewStyle,
+            icons = listOf(NpIcon.GridView, NpIcon.ListView),
+            itemWidth = 34.dp,
+            onSelect = onViewStyle,
+        )
+        Text(text = "$count 项", style = NpMono, color = ink.muted, maxLines = 1)
     }
 }
 

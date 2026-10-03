@@ -74,7 +74,6 @@ import com.noneplayer.core.ui.NpCoverBox
 import com.noneplayer.core.ui.NpCoverPlaceholder
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEmptyState
-import com.noneplayer.core.ui.NpEyebrow
 import com.noneplayer.core.ui.NpFilterSelect
 import com.noneplayer.core.ui.NpFolderCard
 import com.noneplayer.core.ui.NpIcon
@@ -82,6 +81,7 @@ import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpListRow
 import com.noneplayer.core.ui.NpMediaCard
 import com.noneplayer.core.ui.NpMediaColor
+import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpOptRow
 import com.noneplayer.core.ui.NpPageScaffold
@@ -273,8 +273,10 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
         }
     }
 
-    val videos = remember(sortedItems) { sortedItems.filter { it.kind == MediaKind.VIDEO } }
-    val audios = remember(sortedItems) { sortedItems.filter { it.kind == MediaKind.AUDIO } }
+    // 一次 partition 得到两组（两次 filter 要全量扫两遍 sortedItems）
+    val (videos, audios) = remember(sortedItems) {
+        sortedItems.partition { it.kind == MediaKind.VIDEO }
+    }
     // 设计稿「最近添加」`videos.slice().reverse().slice(0,8)`：全库（含音频）按加入时间
     // 倒序取 8 条——排序偏好（名称/大小）不该改写这个区块的语义，所以独立计算。
     val recentItems = remember(items) { items.sortedByDescending { it.addedAtMs }.take(8) }
@@ -351,24 +353,30 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
                 Column(modifier = contentModifier.fillMaxSize()) {
                     when {
-                        sources.isEmpty() -> NpEmptyState(
-                            title = "还没有媒体",
-                            message = "安装媒体来源插件后，视频与音乐会出现在这里。",
-                        )
+                        sources.isEmpty() -> EmptyStage {
+                            NpEmptyState(
+                                title = "还没有媒体",
+                                message = "安装媒体来源插件后，视频与音乐会出现在这里。",
+                            )
+                        }
 
-                        missingPermission -> NpEmptyState(
-                            title = "需要媒体权限",
-                            message = "None Player 需要访问设备上的视频与音频，才能在这里展示和播放。",
-                            actionLabel = "授予媒体权限",
-                            onAction = { permissionLauncher.launch(permissionStrings.toTypedArray()) },
-                        )
+                        missingPermission -> EmptyStage {
+                            NpEmptyState(
+                                title = "需要媒体权限",
+                                message = "None Player 需要访问设备上的视频与音频，才能在这里展示和播放。",
+                                actionLabel = "授予媒体权限",
+                                onAction = { permissionLauncher.launch(permissionStrings.toTypedArray()) },
+                            )
+                        }
 
-                        folderUris.isEmpty() -> NpEmptyState(
-                            title = "选择要观看的文件夹",
-                            message = "选择一个媒体文件夹，None Player 只扫描你指定的位置（可在设置中添加多个）。",
-                            actionLabel = "选择媒体文件夹",
-                            onAction = { folderPicker.launch(null) },
-                        )
+                        folderUris.isEmpty() -> EmptyStage {
+                            NpEmptyState(
+                                title = "选择要观看的文件夹",
+                                message = "选择一个媒体文件夹，None Player 只扫描你指定的位置（可在设置中添加多个）。",
+                                actionLabel = "选择媒体文件夹",
+                                onAction = { folderPicker.launch(null) },
+                            )
+                        }
 
                         // 数据未就绪时**不渲染列表**，而是给它一块骨架。
                         //
@@ -380,14 +388,16 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                         !mediaLoaded && items.isEmpty() -> LoadingPlaceholder(compact = compact)
 
                         // E78：媒体已加载完但确实没有内容 → 空库。
-                        items.isEmpty() -> NpEmptyState(
-                            title = "媒体库是空的",
-                            message = "扫描所选文件夹中的媒体，建立你的媒体库。",
-                            actionLabel = if (requestedScan) null else "开始扫描",
-                            onAction = if (requestedScan) null else {
-                                { requestedScan = true; scanAll() }
-                            },
-                        )
+                        items.isEmpty() -> EmptyStage {
+                            NpEmptyState(
+                                title = "媒体库是空的",
+                                message = "扫描所选文件夹中的媒体，建立你的媒体库。",
+                                actionLabel = if (requestedScan) null else "开始扫描",
+                                onAction = if (requestedScan) null else {
+                                    { requestedScan = true; scanAll() }
+                                },
+                            )
+                        }
 
                         aggregate != null -> AggregateList(
                             mode = aggregate!!,
@@ -406,6 +416,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                             onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
                             onOpen = { openPlayer(navigator, it) },
                             onOpenEpisodes = { episodeSheet = it },
+                            onBack = { aggregate = null },
                         )
 
                         viewMode == LibraryView.FOLDERS -> FolderBrowser(
@@ -499,6 +510,31 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
 }
 
 /**
+ * 页面级空态的落位：在**可见内容区**垂直居中。
+ *
+ * 内容层是全高、且延伸到顶栏之下的（顶栏是覆盖式悬浮），若按顶对齐，空态会紧贴
+ * 顶栏底边——平板上尤其明显：下半屏整块空着，内容却挤在顶栏下面，像是被顶栏压住。
+ * 居中时先扣掉顶栏与底部条的高度，让居中点是"看得见的那块区域"的中点，
+ * 而不是整块（含被覆盖部分）的中点。
+ *
+ * 只用于**整页空态**（媒体库根页的四种空库情形）；列表/网格内联的空态
+ * （如某文件夹为空、某区块为空）仍按内容流排布，不进这里。
+ */
+@Composable
+private fun EmptyStage(content: @Composable () -> Unit) {
+    val topInset = LocalNpTopBarInset.current
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(
+                top = if (topInset == Dp.Unspecified) 0.dp else topInset,
+                bottom = LocalNpBottomInset.current,
+            ),
+        contentAlignment = Alignment.Center,
+    ) { content() }
+}
+
+/**
  * 首页的加载骨架：与真实区块同形状的灰条（设计稿 `.sk` 的 shimmer）。
  *
  * 它的职责不只是"看起来在加载"——见调用点注释，它同时把 LazyColumn 的
@@ -572,7 +608,12 @@ private fun HomeView(
 ) {
     val gutter = if (compact) 14.dp else 20.dp
     val progressMap = LocalPlaybackProgress.current
-    val unfinished = videos.filter { fractionOf(it, progressMap) in 0.01f..0.99f }
+    // 记忆化：此前这行 filter 直接写在组合体里，进度表每变化一次（播放页返回、
+    // 进度落盘）都要全量重扫一遍 videos；而它是"继续观看"轨道唯一的数据来源，
+    // 与 videos/progressMap 之外的重组无关。
+    val unfinished = remember(videos, progressMap) {
+        videos.filter { fractionOf(it, progressMap) in 0.01f..0.99f }
+    }
 
     // 区块存在性先算出来：`.block:first-child` 无上边框（设计稿 106），
     // 首个区块紧贴顶栏线时再画一条就是双线。
@@ -1188,7 +1229,10 @@ private fun ListFoot(
 }
 
 /**
- * 「存储位置」区块：eyebrow + rows（内部存储：剩余/总量）。
+ * 「存储位置」区块：sec-head 标题 + rows（内部存储：剩余/总量）。
+ *
+ * 设计稿这里是 `<div class="sec-head"><h2>存储位置</h2></div>`（19px h2），
+ * 与页面其它区块标题同级；此前误用 `.eyebrow`（accent 等宽小字），层级低了一档。
  *
  * 只报**内部存储卷**：SAF 授权目录可能落在任意卷上，但"这个卷还剩多少"只有
  * `Environment` 的路径能可靠问到；SD 卡一类的第二卷需要 StorageManager 的
@@ -1207,9 +1251,10 @@ private fun StorageSection(modifier: Modifier = Modifier) {
         }.getOrNull()
     } ?: return
     Column(modifier = modifier.fillMaxWidth()) {
-        Box(modifier = Modifier.padding(bottom = 2.dp)) {
-            NpEyebrow(text = "存储位置")
-        }
+        NpSectionHead(
+            title = "存储位置",
+            modifier = Modifier.padding(bottom = 6.dp),
+        )
         NpSettingRow(
             title = "内部存储",
             subtitle = storageText,
@@ -1231,6 +1276,7 @@ private fun FolderListHead(
     name: String,
     count: Int,
     onBack: (() -> Unit)?,
+    backLabel: String = "文件夹",
 ) {
     val ink = LocalNpInk.current
     Row(
@@ -1251,7 +1297,7 @@ private fun FolderListHead(
             ) {
                 Icon(
                     imageVector = NpIcon.ChevronRight,
-                    contentDescription = "返回上一层",
+                    contentDescription = "返回",
                     tint = ink.muted,
                     // 设计稿 `.listhead .back .xs{transform:rotate(180deg)}`：
                     // 同一个 chevron 转 180° 就是返回箭头
@@ -1260,7 +1306,7 @@ private fun FolderListHead(
                         .graphicsLayer { rotationZ = 180f },
                 )
                 Text(
-                    text = "文件夹",
+                    text = backLabel,
                     style = NpTypography.bodyMedium,
                     color = ink.muted,
                     maxLines = 1,
@@ -1280,7 +1326,8 @@ private fun FolderListHead(
         Spacer(modifier = Modifier.weight(1f))
         Text(
             text = "$count 项",
-            style = NpMonoSmall,
+            // 设计稿 `.listhead .cnt`：13px mono（与聚合头 `.val.mono` 同一口径）
+            style = NpMono,
             color = ink.muted,
             maxLines = 1,
         )
@@ -1418,14 +1465,7 @@ private fun ControlsRow(
             enabled = filterEnabled,
         )
         Spacer(modifier = Modifier.weight(1f))
-        // 设计稿 viewToggle：网格/列表切换（34dp 图标 seg）
-        NpSegmented(
-            options = listOf("grid", "list"),
-            selected = viewStyle,
-            icons = listOf(NpIcon.GridView, NpIcon.ListView),
-            itemWidth = 34.dp,
-            onSelect = onViewStyle,
-        )
+        // 设计稿 folderView 控件行顺序：filter → sort → view（视图切换排在排序之后）
         NpFilterSelect(
             label = sortMode.label,
             icon = NpIcon.Sort,
@@ -1456,6 +1496,14 @@ private fun ControlsRow(
                 maxLines = 1,
             )
         }
+        // 设计稿 viewToggle：网格/列表切换（34dp 图标 seg）
+        NpSegmented(
+            options = listOf("grid", "list"),
+            selected = viewStyle,
+            icons = listOf(NpIcon.GridView, NpIcon.ListView),
+            itemWidth = 34.dp,
+            onSelect = onViewStyle,
+        )
     }
 }
 
@@ -1487,6 +1535,7 @@ private fun AggregateList(
     onToggleAscending: (Boolean) -> Unit,
     onOpen: (MediaItem) -> Unit,
     onOpenEpisodes: (List<MediaItem>) -> Unit,
+    onBack: () -> Unit,
 ) {
     val ink = LocalNpInk.current
     val gutter = if (compact) 14.dp else 20.dp
@@ -1529,9 +1578,14 @@ private fun AggregateList(
     ) {
         item(key = "head", span = { GridItemSpan(maxLineSpan) }) {
             if (isLead) {
-                // listhead：标题 + N 项（返回动作由顶栏返回键承担，
-                // 这一行保留设计稿的"标题 + 计数"信息层）
-                FolderListHead(name = meta.first, count = shown.size, onBack = null)
+                // 设计稿 aggregateView 的 listhead：`‹ 返回` + 标题 + N 项
+                // （videos / audios 是从首页"查看全部"进来的，返回 = 回首页）
+                FolderListHead(
+                    name = meta.first,
+                    count = shown.size,
+                    onBack = onBack,
+                    backLabel = "返回",
+                )
             } else {
                 Row(
                     modifier = Modifier
@@ -1547,7 +1601,7 @@ private fun AggregateList(
                         maxLines = 1,
                         modifier = Modifier.weight(1f),
                     )
-                    Text(text = "${shown.size} 项", style = NpMonoSmall, color = ink.muted)
+                    Text(text = "${shown.size} 项", style = NpMono, color = ink.muted)
                 }
             }
         }
@@ -1645,12 +1699,20 @@ data class FolderNode(
     val directVideos: List<MediaItem>,
     val children: List<FolderNode>,
 ) {
-    /** 含所有子层级的媒体（角标与封面用），保持列表排序顺序 */
-    val allVideos: List<MediaItem> get() = directVideos + children.flatMap { it.allVideos }
-    val totalCount: Int get() = allVideos.size
+    /**
+     * 含所有子层级的媒体（角标与封面用），保持列表排序顺序。
+     *
+     * 在**构造期**算好而不是写成 `get()`：子树是自底向上构建的（`toNode` 先递归
+     * children 再建父节点），父节点构造时子节点的聚合已就绪，整棵树只算一遍。
+     * 此前是惰性 getter，而文件夹网格里每张卡都要读 `totalCount`/`videoCount`——
+     * 每张卡每次重组都重新递归整棵子树并分配中间列表，深目录 + 滚动时就是
+     * O(节点数 × 子树大小) 的重复分配。
+     */
+    val allVideos: List<MediaItem> = directVideos + children.flatMap { it.allVideos }
+    val totalCount: Int = allVideos.size
 
     /** 只数视频的条目数（设计稿 `.folder .pill` 的「N 个视频」口径） */
-    val videoCount: Int get() = allVideos.count { it.kind == MediaKind.VIDEO }
+    val videoCount: Int = allVideos.count { it.kind == MediaKind.VIDEO }
 }
 
 private class MutableFolderNode(val path: String) {
