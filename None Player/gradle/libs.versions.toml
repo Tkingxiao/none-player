@@ -38,9 +38,6 @@ androidxTest = "1.6.2"
 androidxTestExt = "1.2.1"
 # androidx-window 不在 compose BOM 内 → 必须自带版本项（§13.2）
 window = "1.5.0"
-# Haze：Compose backdrop blur（外壳玻璃材质 blur(22px) 的实现载体）。
-# 锁 1.2.x：1.6+ 要求 Compose 1.8+，本项目 BOM 2024.12.01（Compose 1.7.6）
-haze = "1.2.2"
 
 [libraries]
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -80,8 +77,6 @@ compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 compose-material3-window-size = { group = "androidx.compose.material3", name = "material3-window-size-class" }
 compose-material3-adaptive-navigation-suite = { group = "androidx.compose.material3", name = "material3-adaptive-navigation-suite" }
 androidx-window = { group = "androidx.window", name = "window", version.ref = "window" }
-haze-core = { group = "dev.chrisbanes.haze", name = "haze", version.ref = "haze" }
-haze-materials = { group = "dev.chrisbanes.haze", name = "haze-materials", version.ref = "haze" }
 compose-material-icons = { group = "androidx.compose.material", name = "material-icons-core" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
