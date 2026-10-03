@@ -15,6 +15,7 @@ import com.noneplayer.kernel.api.VideoPlayerFactory
 import com.noneplayer.kernel.api.register
 import com.noneplayer.kernel.ui.api.KernelHost
 import com.noneplayer.kernel.ui.api.ScreenProvider
+import com.noneplayer.kernel.ui.api.TabProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -141,9 +142,19 @@ class Kernel private constructor(
         services.register<ExtensionRegistry>(registry)
     }
 
-    /** 内核内置扩展：聚合设置页（设计文档 §8 的内核实现） */
+    /**
+     * 内核内置扩展：聚合设置页（设计文档 §8 的内核实现）。
+     *
+     * 按 **`TabProvider`** 注册而不是 `ScreenProvider`：设置是第四个顶层标签，
+     * 与首页/文件夹/我的同级（有选中态、标签栏常驻、无返回箭头）。
+     * 注册成 ScreenProvider 会让它成为压在栈上的二级页——打开时盖住标签栏，
+     * 顶部多一个返回箭头，读起来像"从设置里出去了"而不是"切到了设置"。
+     */
     private fun registerBuiltins() {
-        registry.register(ScreenProvider::class.java, KernelSettingsScreenProvider(this))
+        registry.register(TabProvider::class.java, KernelSettingsScreenProvider(this))
+        // 设置的两个下钻详情页（只读的应用自身信息）
+        registry.register(ScreenProvider::class.java, KernelAboutScreenProvider(this))
+        registry.register(ScreenProvider::class.java, KernelPluginsScreenProvider(this))
     }
 
     companion object {

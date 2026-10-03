@@ -23,6 +23,25 @@ interface TabProvider : ScreenProvider {
     /** 标签图标（ImageVector） */
     val icon: Any
 
-    /** 排序权重，越小越靠左 */
+    /**
+     * 选中态图标（ImageVector，设计稿 `.rail-btn.on .np-ico{fill}`）。
+     *
+     * 「Filled, not outlined」：选中从描边变实心是整套导航的核心信号。
+     * 默认 null = 未提供，外壳回退用 [icon]（只有变色，无填充切换）。
+     */
+    val selectedIcon: Any? get() = null
+
+    /** 排序权重，越小越靠左（横向）/ 越靠上（纵向） */
     val order: Int
+
+    /**
+     * 是否固定到导航栏末端。
+     *
+     * 设计稿把"设置"与另外三个目的地**在空间上分开**——紧凑档它排在最右、
+     * 平板 Rail 上它被推到最底部。这不是"第四个并列项"，而是"关于这个应用"的入口，
+     * 位置本身承载这个语义。
+     *
+     * 默认 false：绝大多数 Tab 是并列的内容区。
+     */
+    val pinnedToEnd: Boolean get() = false
 }

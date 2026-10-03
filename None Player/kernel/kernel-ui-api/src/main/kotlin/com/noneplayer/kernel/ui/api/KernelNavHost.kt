@@ -3,6 +3,7 @@ package com.noneplayer.kernel.ui.api
 import android.content.Intent
 
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -11,6 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavHostController
@@ -86,7 +88,11 @@ fun KernelNavHost(
     NavHost(
         navController = navController,
         startDestination = SHELL_ROUTE,
-        modifier = modifier,
+        // 主题底铺在**整个导航宿主**上，而不是只铺在 Shell 里：
+        // Tab 页由 KernelTabScaffold 自己画底，但**外层路由**（搜索页、播放页、
+        // 关于/插件页）不经过 Shell——不在这里铺底，它们会露出窗口默认背景
+        // （浅色系统主题下的白色），暗色主题下就是"顶栏黑、内容白"的断头效果。
+        modifier = modifier.background(MaterialTheme.colorScheme.background),
         // iOS push 式转场：新页自右轻滑入场，返回时反向滑出；进出伴随淡入淡出
         enterTransition = {
             fadeIn(tween(240)) + slideInHorizontally(tween(280)) { it / 4 }

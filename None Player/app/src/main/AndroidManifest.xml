@@ -1,11 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 声明由 PermissionProvider 扩展点聚合申请的权限 -->
+    <!-- 声明由 PermissionProvider 扩展点聚合申请的权限。
+         音频权限与视频并列：媒体库现在同时收录音频（LocalMediaSource 的
+         MediaStore.Audio 查询），只声明 READ_MEDIA_VIDEO 会让音频目录返回空。 -->
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Android 14+ 部分照片/视频访问：用户选择"仅 selected"时系统走此权限，
+         声明后媒体库仍能看到用户勾选的项（SelectedPhotoAccess） -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+
+    <!-- E51：多窗口/分屏/自由窗口适配声明——应用可在任意窗口尺寸下运行，
+         布局由 Compose 随窗口实时重算（NpWindowInfo 形态判定层） -->
+    <supports-screens
+        android:anyDensity="true"
+        android:largeScreens="true"
+        android:normalScreens="true"
+        android:resizeable="true"
+        android:smallScreens="true"
+        android:xlargeScreens="true" />
 
     <application
         android:name=".NonePlayerApplication"
@@ -16,12 +32,15 @@
         android:theme="@style/Theme.NonePlayer">
 
         <!-- configChanges：旋转/窗口尺寸变化由 Compose 直接响应，
-             不重建 Activity——避免旋转黑闪、播放状态与页面栈重置（E5） -->
+             不重建 Activity——避免旋转黑闪、播放状态与页面栈重置（E5）；
+             layoutDirection 补入（E51 余项）：RTL 切换同样不重建 -->
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale|layoutDirection"
             android:exported="true"
-            android:launchMode="singleTask">
+            android:launchMode="singleTask"
+            android:resizeableActivity="true"
+            android:supportsPictureInPicture="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

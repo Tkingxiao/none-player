@@ -1,9 +1,12 @@
 package com.noneplayer.plugins.library
 
+import androidx.navigation.compose.composable
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.PluginMarker
+import com.noneplayer.kernel.api.SearchProvider
 import com.noneplayer.kernel.api.register
+import com.noneplayer.kernel.ui.api.ScreenProvider
 import com.noneplayer.kernel.ui.api.TabProvider
 
 /**
@@ -23,9 +26,28 @@ class LibraryPlugin : Plugin {
     override suspend fun onInstall(registry: ExtensionRegistry) {
         registry.register(TabProvider::class.java, LibraryTabProvider())
         registry.register(TabProvider::class.java, FoldersTabProvider())
+        registry.register(ScreenProvider::class.java, SearchScreenProvider())
+        // 搜索扩展点的本地实现（此前是"已定义但零实现"的悬空扩展点）
+        registry.register(SearchProvider::class.java, LocalSearchProvider(registry))
     }
 
     override suspend fun onStart() = Unit
 
     override suspend fun onStop() = Unit
+}
+
+/** 搜索页路由挂载（顶栏搜索钮 → `navigator.navigate(SEARCH_ROUTE)`）。 */
+class SearchScreenProvider : ScreenProvider {
+
+    override val route: String = SEARCH_ROUTE
+    override val deepLinks: List<String> = listOf("noneplayer://search")
+
+    override fun register(
+        builder: androidx.navigation.NavGraphBuilder,
+        navigator: com.noneplayer.kernel.api.Navigator,
+    ) {
+        builder.composable(route) {
+            SearchScreen(navigator = navigator)
+        }
+    }
 }

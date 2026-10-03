@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 与 core:ui 的 BackgroundDark 一致 -->
-    <color name="np_window_background">#000000</color>
+    <!-- 与 core:ui 的 NpInkDark.bg 一致（设计稿 bg: oklch(0 0 0) = 纯黑） -->
+    <color name="np_window_background">#FF000000</color>
 </resources>

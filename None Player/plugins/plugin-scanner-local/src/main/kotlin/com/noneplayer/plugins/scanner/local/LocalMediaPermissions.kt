@@ -5,18 +5,24 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 
-/** 本地扫描所需的媒体权限（Android 13+ 细分媒体权限，旧版本存储权限） */
+/**
+ * 本地扫描所需的媒体权限（Android 13+ 细分媒体权限，旧版本存储权限）。
+ *
+ * 视频与音频**一起申请**：扫描器同时收录两类媒体，只申请视频权限会让
+ * `MediaStore.Audio` 查询静默返回空表（不抛异常，只是没数据）——
+ * 表现为"音频区块永远是空的"，很难归因到权限上。
+ */
 class LocalMediaPermissions : com.noneplayer.kernel.api.PermissionProvider {
 
     override val permissions: List<String> =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            listOf(Manifest.permission.READ_MEDIA_VIDEO)
+            listOf(Manifest.permission.READ_MEDIA_VIDEO, Manifest.permission.READ_MEDIA_AUDIO)
         } else {
             listOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
 
     override val rationale: String =
-        "None Player 需要访问设备上的视频文件，才能在媒体库中展示和播放它们。"
+        "None Player 需要访问设备上的视频与音频文件，才能在媒体库中展示和播放它们。"
 }
 
 /** 权限是否已全部授予 */

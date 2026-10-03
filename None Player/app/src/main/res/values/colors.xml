@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 与 core:ui 的 BackgroundLight 一致，避免启动窗口闪白 -->
-    <color name="np_window_background">#F2F2F7</color>
+    <!-- 与 core:ui 的 NpInkLight.bg 一致（设计稿页面底 oklch(1 0 0) = 纯白），
+         避免启动窗口与页面底色不一致时闪一下灰。 -->
+    <color name="np_window_background">#FFFFFFFF</color>
     <color name="ic_launcher_background">#1C1C1E</color>
 </resources>

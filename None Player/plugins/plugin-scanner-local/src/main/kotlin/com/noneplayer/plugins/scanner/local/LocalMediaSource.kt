@@ -47,15 +47,16 @@ data class LocalScanSummary(
 )
 
 /**
- * 本地媒体来源——基于 MediaStore 的设备视频扫描。
+ * 本地媒体来源——基于 MediaStore 的设备媒体扫描（视频 + 音频）。
  *
  * 门控策略：仅在用户通过 SAF 授权了扫描目录后才扫描（未选择目录时
  * scan 为空操作），目录列表由 [AppSettings.scanFolderUris] 持久化。
  *
- * 缩略图：扫描时把系统缩略图缓存到 cacheDir（已存在则复用），
- * 媒体卡直接读文件，避免大视频现场抽帧卡顿。
+ * 缩略图：视频在扫描时把系统缩略图缓存到 cacheDir（已存在则复用），
+ * 媒体卡直接读文件，避免大视频现场抽帧卡顿；音频没有系统缩略图，
+ * 改用相册封面 URI（见 [audioCoverUri]），取不到就留空由 UI 出占位图。
  *
- * 增删同步：注册 MediaStore ContentObserver，文件变化去抖 2s 后自动重扫。
+ * 增删同步：注册 MediaStore ContentObserver（视频与音频两个集合），文件变化去抖 2s 后自动重扫。
  */
 class LocalMediaSource(
     private val context: Context,
@@ -65,7 +66,7 @@ class LocalMediaSource(
 ) : MediaSourceProvider {
 
     override val sourceId: String = "local"
-    override val displayName: String = "本地视频"
+    override val displayName: String = "本地媒体"
 
     private val _media = MutableStateFlow<List<MediaItem>>(emptyList())
     override fun observeMedia(): Flow<List<MediaItem>> = _media.asStateFlow()
@@ -150,8 +151,8 @@ class LocalMediaSource(
         }
         val previousIds = _media.value.map { it.id }.toSet()
         val items = queryMediaStore(validScopes)
-        // B7：清理已删除视频对应的缩略图缓存
-        val validIds = items.map { it.id.removePrefix("ms-") }.toSet()
+        // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存，故只看 "ms-" 前缀）
+        val validIds = items.filter { it.id.startsWith("ms-") }.map { it.id.removePrefix("ms-") }.toSet()
         File(context.cacheDir, "video_thumbs")
             .listFiles()
             ?.forEach { f -> if (f.nameWithoutExtension !in validIds) f.delete() }
@@ -233,8 +234,11 @@ class LocalMediaSource(
     val isObserving: Boolean get() = contentObserver != null
 
     /**
-     * 监听 MediaStore 视频集合的变化（文件添加/删除），去抖后自动重扫。
+     * 监听 MediaStore 视频与音频集合的变化（文件添加/删除），去抖后自动重扫。
      * 由插件 onStart 调用；onStop 调用 [stopObserving]。
+     *
+     * 音频集合必须单独注册：两个集合的 URI 不同，只监听视频会漏掉"新增一首歌"
+     * 这类变更，音频要等下次手动重扫才出现。
      */
     fun startObserving() {
         if (contentObserver != null) return
@@ -249,6 +253,7 @@ class LocalMediaSource(
             }
         }
         context.contentResolver.registerContentObserver(videoCollection(), true, contentObserver!!)
+        context.contentResolver.registerContentObserver(audioCollection(), true, contentObserver!!)
     }
 
     fun stopObserving() {
@@ -266,32 +271,54 @@ class LocalMediaSource(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         }
 
-    /** 多目录查询：逐目录按授权范围过滤后按 id 去重合并（父/子目录重叠安全） */
+    /** MediaStore 音频集合（与 [videoCollection] 同规则，id 前缀 "msa-" 与其区分） */
+    private fun audioCollection(): Uri =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+        } else {
+            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+        }
+
+    /**
+     * 多目录查询：逐目录按授权范围过滤后按 id 去重合并（父/子目录重叠安全）。
+     * 视频与音频合入同一个列表、统一按加入时间倒序——UI 自己按 `MediaItem.kind`
+     * 分流，数据层不做分组，免得两处排序口径各说各话。
+     */
     private fun queryMediaStore(scopes: List<ScanScope>): List<MediaItem> {
         val merged = LinkedHashMap<String, MediaItem>()
-        scopes.forEach { scope -> queryScope(scope).forEach { merged[it.id] = it } }
+        scopes.forEach { scope ->
+            queryScope(scope).forEach { merged[it.id] = it }
+            queryAudioScope(scope).forEach { merged[it.id] = it }
+        }
         return merged.values.sortedByDescending { it.addedAtMs }
     }
 
-    private fun queryScope(scope: ScanScope): List<MediaItem> {
-        // E24：按授权范围构建过滤；Unresolvable 不应到达此处，防御性返回空
-        // E66 修复：relativePath/scope.name 来自 SAF tree docId 拆分，Android
-        // 文件夹名允许包含 '%'/'_'——不转义会被 SQLite LIKE 解释成通配符，使匹配范围
-        // 超出用户实际选择的目录，削弱"任何分支都不得回退全量扫描"的不变量。
-        // 下面所有 LIKE 子句统一转义 + 追加 ESCAPE '\'。
+    /**
+     * 授权范围 → MediaStore 过滤条件（E24/E66）。视频与音频共用同一套范围语义：
+     * 两者都在同一个 `MediaStore.MediaColumns` 表结构下，只有集合 URI 与
+     * `Video.*`/`Audio.*` 常量不同，逻辑抽一份可避免两个查询各写一遍、
+     * 日后再改动时只改了一边（"任何分支都不得回退全量扫描"的不变量被悄悄破坏）。
+     *
+     * E24：按授权范围构建过滤；Unresolvable 不应到达此处，防御性返回空
+     * E66 修复：relativePath/scope.name 来自 SAF tree docId 拆分，Android
+     * 文件夹名允许包含 '%'/'_'——不转义会被 SQLite LIKE 解释成通配符，使匹配范围
+     * 超出用户实际选择的目录，削弱"任何分支都不得回退全量扫描"的不变量。
+     * 下面所有 LIKE 子句统一转义 + 追加 ESCAPE '\'。
+     */
+    private fun scopeSelection(scope: ScanScope, relativePathColumn: String, dataColumn: String): Pair<String?, Array<String>?> {
         val selection: String?
         val selectionArgs: Array<String>?
         when (scope) {
-            is ScanScope.Unresolvable -> return emptyList()
+            is ScanScope.Unresolvable -> return null to null
             is ScanScope.Primary -> {
                 val relativePath = scope.relativePath
                 if (relativePath != null) {
                     val escaped = escapeLike(relativePath)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        selection = "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ? ESCAPE '\\'"
+                        selection = "$relativePathColumn LIKE ? ESCAPE '\\'"
                         selectionArgs = arrayOf("$escaped%")
                     } else {
-                        selection = "${MediaStore.Video.Media.DATA} LIKE ? ESCAPE '\\'"
+                        selection = "$dataColumn LIKE ? ESCAPE '\\'"
                         selectionArgs = arrayOf("%/$escaped/%")
                     }
                 } else {
@@ -306,7 +333,7 @@ class LocalMediaSource(
                     val relativePath = scope.relativePath
                     selection = if (relativePath != null) {
                         "${MediaStore.MediaColumns.VOLUME_NAME} = ? AND " +
-                            "${MediaStore.Video.Media.RELATIVE_PATH} LIKE ? ESCAPE '\\'"
+                            "$relativePathColumn LIKE ? ESCAPE '\\'"
                     } else {
                         "${MediaStore.MediaColumns.VOLUME_NAME} = ?"
                     }
@@ -319,7 +346,7 @@ class LocalMediaSource(
                     }
                 } else {
                     val root = "/storage/${escapeLike(scope.name)}"
-                    selection = "${MediaStore.Video.Media.DATA} LIKE ? ESCAPE '\\'"
+                    selection = "$dataColumn LIKE ? ESCAPE '\\'"
                     selectionArgs = arrayOf(
                         if (scope.relativePath != null) {
                             "$root/${escapeLike(scope.relativePath)}/%"
@@ -330,6 +357,16 @@ class LocalMediaSource(
                 }
             }
         }
+        return selection to selectionArgs
+    }
+
+    private fun queryScope(scope: ScanScope): List<MediaItem> {
+        val (selection, selectionArgs) = scopeSelection(
+            scope,
+            relativePathColumn = MediaStore.Video.Media.RELATIVE_PATH,
+            dataColumn = MediaStore.Video.Media.DATA,
+        )
+        if (scope is ScanScope.Unresolvable) return emptyList()
 
         val projection = arrayOf(
             MediaStore.Video.Media._ID,
@@ -345,6 +382,9 @@ class LocalMediaSource(
             // （播放本身正常，所以很难被发现）。RELATIVE_PATH 是 Q 起官方提供且始终可用的
             // 相对路径，优先用它；DATA 仅作旧版本兜底。
             MediaStore.Video.Media.RELATIVE_PATH,
+            // 分辨率：卡片 meta 的「1080P / 4K」档位（设计稿 `v.res`）由此得出
+            MediaStore.Video.Media.WIDTH,
+            MediaStore.Video.Media.HEIGHT,
         )
         val hasRelativePath = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
         val primaryRelativePath = (scope as? ScanScope.Primary)?.relativePath
@@ -372,6 +412,8 @@ class LocalMediaSource(
             } else {
                 -1
             }
+            val widthCol = cursor.getColumnIndex(MediaStore.Video.Media.WIDTH)
+            val heightCol = cursor.getColumnIndex(MediaStore.Video.Media.HEIGHT)
             while (cursor.moveToNext()) {
                 if (idCol < 0) continue
                 val id = cursor.getLong(idCol)
@@ -387,6 +429,103 @@ class LocalMediaSource(
                     sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
                     addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
                     coverUri = thumbnailFor(id, ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)),
+                    folder = folderOf(
+                        dataPath = dataPath,
+                        relativePath = if (relativeCol >= 0) {
+                            cursor.getString(relativeCol)
+                        } else {
+                            null
+                        },
+                    ),
+                    width = if (widthCol >= 0) cursor.getInt(widthCol) else 0,
+                    height = if (heightCol >= 0) cursor.getInt(heightCol) else 0,
+                )
+                items += item
+            }
+        }
+        return items
+    }
+
+    /**
+     * 音频集合查询——与 [queryScope] 同构：同一套授权范围过滤、同一套列缺失防御。
+     *
+     * id 用 "msa-" 前缀与视频的 "ms-" 区分：两个集合的 `_ID` 是彼此独立的自增序号，
+     * 不加前缀合并时同号记录会互相覆盖（一首歌被顶掉一个视频）。
+     *
+     * mimeType 必须是真实的音频 MIME（audio/ 开头）——[com.noneplayer.core.media.MediaItem.kind]
+     * 正是按它分流音频/视频，这里若回退成视频 MIME，UI 会把歌当视频排进播放列表。
+     */
+    private fun queryAudioScope(scope: ScanScope): List<MediaItem> {
+        val (selection, selectionArgs) = scopeSelection(
+            scope,
+            relativePathColumn = MediaStore.Audio.Media.RELATIVE_PATH,
+            dataColumn = MediaStore.Audio.Media.DATA,
+        )
+        if (scope is ScanScope.Unresolvable) return emptyList()
+
+        val projection = arrayOf(
+            MediaStore.Audio.Media._ID,
+            MediaStore.Audio.Media.DISPLAY_NAME,
+            MediaStore.Audio.Media.DURATION,
+            MediaStore.Audio.Media.SIZE,
+            MediaStore.Audio.Media.DATE_ADDED,
+            MediaStore.Audio.Media.MIME_TYPE,
+            MediaStore.Audio.Media.DATA,
+            MediaStore.Audio.Media.RELATIVE_PATH,
+            // 相册封面取 albumId（见 audioCoverUri）
+            MediaStore.Audio.Media.ALBUM_ID,
+            // ARTIST / IS_MUSIC 一并取出备查，但 MediaItem 本批不扩字段，且不按 IS_MUSIC
+            // 过滤：铃声、闹钟、录音、语音备忘录同样落在音频集合里，按 IS_MUSIC=1 过滤会让
+            // 它们从媒体库静默消失；"授权了哪些目录"已是用户的意图表达，不替他二次取舍。
+            MediaStore.Audio.Media.ARTIST,
+            MediaStore.Audio.Media.TITLE,
+            MediaStore.Audio.Media.IS_MUSIC,
+        )
+        val hasRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        val items = mutableListOf<MediaItem>()
+        context.contentResolver.query(
+            audioCollection(),
+            projection,
+            selection,
+            selectionArgs,
+            "${MediaStore.Audio.Media.DATE_ADDED} DESC",
+        )?.use { cursor ->
+            // 与视频一致：异常 OEM 实现下缺失的列不中止整次扫描，
+            // 统一 getColumnIndex + 安全默认值；只有 _ID 缺失时该行跳过。
+            val idCol = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
+            val nameCol = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
+            val durationCol = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION)
+            val sizeCol = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
+            val addedCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
+            val mimeCol = cursor.getColumnIndex(MediaStore.Audio.Media.MIME_TYPE)
+            val dataCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
+            val relativeCol = if (hasRelativePath) {
+                cursor.getColumnIndex(MediaStore.Audio.Media.RELATIVE_PATH)
+            } else {
+                -1
+            }
+            val titleCol = cursor.getColumnIndex(MediaStore.Audio.Media.TITLE)
+            val albumCol = cursor.getColumnIndex(MediaStore.Audio.Media.ALBUM_ID)
+            while (cursor.moveToNext()) {
+                if (idCol < 0) continue
+                val id = cursor.getLong(idCol)
+                val dataPath = if (dataCol >= 0) cursor.getString(dataCol).orEmpty() else ""
+                // TITLE 才是"歌名"（DISPLAY_NAME 是文件名，常带艺人前缀与扩展名）；
+                // 两者都空时才落占位文案。
+                val title = (if (titleCol >= 0) cursor.getString(titleCol) else null)
+                    .orEmpty()
+                    .ifBlank { (if (nameCol >= 0) cursor.getString(nameCol) else null).orEmpty() }
+                    .ifBlank { "未命名音频" }
+                val item = MediaItem(
+                    id = "msa-$id",
+                    sourceId = sourceId,
+                    title = title,
+                    uri = ContentUris.withAppendedId(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id).toString(),
+                    mimeType = (if (mimeCol >= 0) cursor.getString(mimeCol) else null) ?: "audio/mpeg",
+                    durationMs = if (durationCol >= 0) cursor.getLong(durationCol) else 0L,
+                    sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
+                    addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
+                    coverUri = audioCoverUri(if (albumCol >= 0) cursor.getLong(albumCol) else 0L),
                     folder = folderOf(
                         dataPath = dataPath,
                         relativePath = if (relativeCol >= 0) {
@@ -449,6 +588,20 @@ class LocalMediaSource(
         if (file.exists() && file.length() > 0) file.absolutePath else null
     }.getOrNull()
 
+    /**
+     * 音频封面：Android 没有音频系统缩略图接口，只能走相册封面 URI。
+     *
+     * 这里**只给 URI、不落盘**——与视频缩略图不同，媒体库大多只有一张专辑图，
+     * 扫描期为每首歌各存一份完全相同的 JPEG 纯属浪费空间。
+     * albumId<=0（无专辑信息）时返回 null，由 UI 出占位图。
+     */
+    private fun audioCoverUri(albumId: Long): String? =
+        if (albumId > 0) {
+            ContentUris.withAppendedId(ALBUM_ART_URI.toUri(), albumId).toString()
+        } else {
+            null
+        }
+
     /** 旧系统无系统缩略图时的兜底：MediaMetadataRetriever 抽首帧 */
     private fun createFrameFallback(videoUri: Uri): Bitmap? = runCatching {
         val retriever = MediaMetadataRetriever()
@@ -462,6 +615,12 @@ class LocalMediaSource(
 }
 
 private const val TAG = "LocalMediaSource"
+
+/**
+ * 相册封面集合 URI。系统未公开常量（`MediaStore.Audio.Albums.ALBUM_ART` 不是它），
+ * 但这是 MediaProvider 长期稳定的公开约定地址，读相册图只能用它。
+ */
+private const val ALBUM_ART_URI = "content://media/external/audio/albumart"
 
 /** E67：scan() 命中并发守卫时的最长等待时长与轮询间隔 */
 private const val SCAN_WAIT_TIMEOUT_MS = 10_000L

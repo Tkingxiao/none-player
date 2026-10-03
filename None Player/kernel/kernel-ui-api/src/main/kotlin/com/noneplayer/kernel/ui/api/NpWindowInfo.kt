@@ -1,5 +1,6 @@
 package com.noneplayer.kernel.ui.api
 
+import android.annotation.SuppressLint
 import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
@@ -65,6 +66,12 @@ data class NpWindowInfo(
 
     /** 扩展档：Rail/三栏 + 列表详情并列 */
     val isExpanded: Boolean get() = widthClass == WindowWidthSizeClass.Expanded
+
+    /**
+     * 页面 gutter（设计稿 `.content{padding:0 20px}` / compact `14px`）。
+     * 各页统一消费此值，不再各自写一个横边距。
+     */
+    val pageGutter: Dp get() = if (isCompact) 14.dp else 20.dp
 }
 
 /**
@@ -132,9 +139,17 @@ internal fun buildNpWindowInfo(
         smallestScreenWidthDp >= TABLET_SMALLEST_WIDTH_DP -> NpFormFactor.TABLET
         else -> NpFormFactor.PHONE
     }
-    // "类 PC"：窗口足够宽且横向——平板横屏、桌面窗口都属于这一类（§13.4）
     val aspect = if (screenHeightDp > 0) screenWidthDp.toFloat() / screenHeightDp else 1f
+    // "类 PC"：窗口足够宽、**高度也够**、且横向——平板横屏与桌面窗口属于这一类（§13.4）。
+    //
+    // 为什么必须带 heightClass 这一条（真机/模拟器实测得出）：
+    // 现代手机横屏的宽度普遍 ≥840dp（Pixel 10 Pro 横屏是 952×427dp），只看"宽度
+    // Expanded + 宽高比 > 1.4"会把**手机横屏**也判成类 PC，于是播放页不再走
+    // §4.2 的横屏全屏，而是被塞进"嵌入 + 底部集中控制"的桌面版式——这正是把
+    // §13.1 的"手机横屏（高 < 480dp）"一行读漏的后果。高度档 Compact 即
+    // "手机横屏"的判据，故类 PC 要求高度至少 Medium。
     val isDesktopLike = sizeClass.widthSizeClass == WindowWidthSizeClass.Expanded &&
+        sizeClass.heightSizeClass != WindowHeightSizeClass.Compact &&
         isLandscape && aspect > DESKTOP_LIKE_ASPECT
     return NpWindowInfo(
         widthClass = sizeClass.widthSizeClass,
@@ -151,7 +166,7 @@ internal fun buildNpWindowInfo(
 private fun maxContentWidthFor(widthClass: WindowWidthSizeClass): Dp = when (widthClass) {
     WindowWidthSizeClass.Compact -> Dp.Unspecified
     WindowWidthSizeClass.Medium -> 840.dp
-    else -> 1200.dp
+    else -> 1100.dp
 }
 
 /** 平板判据：最小宽度 ≥ 600dp（Android 官方 sw600dp 分界） */
@@ -161,6 +176,9 @@ private const val TABLET_SMALLEST_WIDTH_DP = 600
 private const val DESKTOP_LIKE_ASPECT = 1.4f
 
 /** 桌面平台（ChromeOS / Android PC 模式） */
+// FEATURE_PC 常量自 API 27 才进入 SDK，但 String 常量编译期内联，
+// hasSystemFeature 在 API 26 上同样可用——抑制 InlinedApi。
+@SuppressLint("InlinedApi")
 private fun isDesktopPlatform(context: Context): Boolean = runCatching {
     context.packageManager.hasSystemFeature(PackageManager.FEATURE_PC)
 }.getOrDefault(false)

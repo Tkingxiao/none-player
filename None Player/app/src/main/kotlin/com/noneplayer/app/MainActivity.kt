@@ -24,6 +24,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -46,6 +47,7 @@ import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.rememberNpWindowInfo
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.launch
 
 /**
  * 唯一 Activity：承载 Compose 根，注入 [LocalKernel]。
@@ -83,6 +85,26 @@ class MainActivity : ComponentActivity() {
             // 经 LocalNpWindowInfo 下发；各页面一律消费它，不得各自读 LocalConfiguration
             // 做档位分支（唯一例外是"窗口是否横向"，见 NpWindowInfo 文档注释）。
             val windowInfo = rememberNpWindowInfo(activity = this@MainActivity)
+            val settings = remember { app.kernel.services.get<AppSettings>() }
+            val scope = rememberCoroutineScope()
+            // B6：Rail 底部「主题」按钮的二态语义——按"当前实际是否暗色"翻转：
+            // 暗 → 浅色、亮 → 深色（跟随系统视为"当前生效值"的翻转，
+            // 切换后即固化为显式选择；完整三态仍在设置页"外观"区块）
+            val isDarkNow = when (themeMode) {
+                ThemeMode.SYSTEM -> isSystemInDarkTheme()
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+            }
+            val themeToggle = remember(isDarkNow) {
+                com.noneplayer.kernel.ui.api.NpThemeToggle(
+                    isDark = isDarkNow,
+                    onToggle = {
+                        scope.launch {
+                            settings.setThemeMode(if (isDarkNow) ThemeMode.LIGHT else ThemeMode.DARK)
+                        }
+                    },
+                )
+            }
             NonePlayerTheme(
                 darkTheme = when (themeMode) {
                     ThemeMode.SYSTEM -> isSystemInDarkTheme()
@@ -102,6 +124,11 @@ class MainActivity : ComponentActivity() {
                         BootState.Running -> CompositionLocalProvider(
                             LocalKernel provides kernel,
                             LocalNpWindowInfo provides windowInfo,
+                            com.noneplayer.kernel.ui.api.LocalNpThemeToggle provides themeToggle,
+                            // 设计稿 2.7 的 hover 效果统一关在 `@media (hover:hover) and
+                            // (pointer:fine)` 里——把"是否有指针设备"（实查鼠标/触控板）
+                            // 下发给 core:ui 的卡片组件，触屏不会留下粘住的 hover 态
+                            com.noneplayer.core.ui.LocalNpHoverEnabled provides windowInfo.isHoverable,
                         ) {
                             PermissionRequester(kernel)
                             KernelNavHost(deepLinkIntents = deepLinkIntents)
@@ -117,22 +144,23 @@ class MainActivity : ComponentActivity() {
 /** 启动画面：签名标记 + 应用名，安静等待内核就绪 */
 @Composable
 private fun LaunchScreen() {
+    val ink = com.noneplayer.core.ui.LocalNpInk.current
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
+            .background(ink.bg),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         NoneMark(
             modifier = Modifier.size(56.dp),
-            color = MaterialTheme.colorScheme.primary,
+            color = ink.accent,
             strokeWidth = 5.dp,
         )
         Text(
             text = "None Player",
             style = MaterialTheme.typography.titleLarge,
-            color = MaterialTheme.colorScheme.onBackground,
+            color = ink.fg,
             modifier = Modifier.padding(top = 16.dp),
         )
     }

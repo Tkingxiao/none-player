@@ -3,10 +3,8 @@ package com.noneplayer.plugins.scanner.local
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -15,7 +13,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.noneplayer.core.ui.NpListRow
+import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.NpDimens
+import com.noneplayer.core.ui.NpIcon
+import com.noneplayer.core.ui.NpIconButton
+import com.noneplayer.core.ui.NpSettingRow
+import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.kernel.ui.api.SettingsProvider
 import kotlinx.coroutines.launch
 
@@ -34,6 +37,7 @@ class LocalScannerSettings(private val source: LocalMediaSource) : SettingsProvi
     @Composable
     override fun Render() {
         val context = LocalContext.current
+        val ink = LocalNpInk.current
         val scope = rememberCoroutineScope()
         val scanning by source.scanning.collectAsStateWithLifecycle()
         val last by source.lastScan.collectAsStateWithLifecycle()
@@ -66,50 +70,60 @@ class LocalScannerSettings(private val source: LocalMediaSource) : SettingsProvi
 
         folderUris.forEach { uriStr ->
             val path = describeTree(uriStr) ?: "所选目录"
-            NpListRow(
+            NpSettingRow(
                 title = path.substringAfterLast('/'),
                 subtitle = path,
+                icon = NpIcon.Folder,
                 trailing = {
-                    Text(
-                        text = "移除",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.clickable(enabled = !scanning) {
-                            scope.launch { source.removeScanFolder(uriStr) }
-                        },
+                    // `.opt-tile.danger` 的语义：移除是**危险动作**，但它是行内次要操作，
+                    // 所以只给图标与色，不铺一整块红底——一个红按钮在设置页里太吵。
+                    NpIconButton(
+                        icon = NpIcon.Trash,
+                        contentDescription = "移除目录",
+                        onClick = { scope.launch { source.removeScanFolder(uriStr) } },
+                        size = NpDimens.touchTarget,
+                        iconSize = 20.dp,
+                        tint = ink.danger,
+                        enabled = !scanning,
                     )
                 },
             )
         }
-        NpListRow(
+        NpSettingRow(
             title = if (folderUris.isEmpty()) "选择扫描目录" else "添加扫描目录",
-            subtitle = if (folderUris.isEmpty()) "未选择（选择后才会扫描该目录下的视频）" else null,
-            modifier = Modifier.clickable(enabled = !scanning) { folderPicker.launch(null) },
+            subtitle = if (folderUris.isEmpty()) "未选择（选择后才会扫描该目录下的媒体）" else null,
+            icon = NpIcon.Search,
+            onClick = if (scanning) null else ({ folderPicker.launch(null) }),
             trailing = {
+                // 行本身已经可点，这里只重复一次"可以加"的信号；命中区仍是行级的 56dp
                 Text(
                     text = "添加",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.primary,
+                    style = NpTypography.labelLarge,
+                    color = if (scanning) ink.muted else ink.accent,
                 )
             },
         )
-        NpListRow(
+        NpSettingRow(
             title = "重新扫描",
             subtitle = last?.let { summary ->
                 buildString {
-                    append("上次：新增 ${summary.added}，移除 ${summary.removed}，共 ${summary.total} 个视频")
+                    append("上次：新增 ${summary.added}，移除 ${summary.removed}，共 ${summary.total} 个媒体")
                     summary.note?.let { append("（$it）") }
                 }
-            } ?: if (folderUris.isNotEmpty()) "扫描所选目录中的视频" else null,
-            modifier = Modifier.clickable(enabled = !scanning && folderUris.isNotEmpty()) {
-                scope.launch { source.scan() }
+            } ?: if (folderUris.isNotEmpty()) "扫描所选目录中的媒体" else null,
+            icon = NpIcon.Rotate,
+            onClick = if (scanning || folderUris.isEmpty()) {
+                null
+            } else {
+                ({ scope.launch { source.scan() } })
             },
+            showDivider = false,
             trailing = {
                 if (scanning) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = ink.accent,
                     )
                 }
             },
