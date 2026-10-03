@@ -250,6 +250,22 @@ private fun ProfileScreen(navigator: Navigator) {
                     }
                 }
 
+                // 设计稿 mineView 的第三段：`<h2>播放列表</h2>` + 列表行。
+                // 本应用尚无播放列表存储，按"不编造数据"原则给一个诚实的空态
+                // （与"最近播放"无记录时同款），而不是三行演示稿的假列表。
+                item(key = "playlists") {
+                    Column(modifier = Modifier.padding(top = 20.dp)) {
+                        Box(modifier = Modifier.padding(horizontal = gutter)) {
+                            NpSectionHead(title = "播放列表")
+                        }
+                        Spacer(modifier = Modifier.height(14.dp))
+                        NpEmptyState(
+                            title = "还没有播放列表",
+                            message = "播放列表功能尚未接入，之后自定义列表会出现在这里。",
+                        )
+                    }
+                }
+
                 // 「设置 / 关于 / 插件 / 应用 / 运行环境」**都不在这里**。
                 //
                 // "我的"页是**用户内容**的归属地（历史/收藏/播放列表），
