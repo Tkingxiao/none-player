@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 后台播放：前台媒体服务 + 媒体通知（通知权限在 Android 13+ 由 PermissionProvider 聚合申请） -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -8,10 +9,13 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application>
+        <!-- exported 是 media3 MediaSessionService 的硬性要求：媒体按键 / MediaController
+             绑定经由该 intent-filter，加 permission 会让系统媒体会话失联——刻意豁免。 -->
         <service
             android:name=".PlaybackService"
             android:exported="true"
-            android:foregroundServiceType="mediaPlayback">
+            android:foregroundServiceType="mediaPlayback"
+            tools:ignore="ExportedService">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>

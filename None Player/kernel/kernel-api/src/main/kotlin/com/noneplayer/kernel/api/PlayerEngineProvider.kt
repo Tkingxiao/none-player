@@ -4,6 +4,26 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
+ * 循环模式（设计稿 fs-panel / more sheet 的四态）。
+ *
+ * 映射到 media3：OFF=顺序播放、ONE=单集循环、ALL=列表循环、
+ * SHUFFLE=随机播放（列表循环 + shuffle 队列）。
+ */
+enum class NpLoopMode {
+    /** 顺序播放：播完队列即停 */
+    OFF,
+
+    /** 单集循环 */
+    ONE,
+
+    /** 列表循环 */
+    ALL,
+
+    /** 随机播放 */
+    SHUFFLE,
+}
+
+/**
  * 视频播放器抽象——内核对播放能力的统一契约。
  *
  * 具体实现由 PlayerEngineProvider 扩展点提供（ExoPlayer 插件、FFmpeg 插件），
@@ -43,6 +63,14 @@ interface VideoPlayer {
      */
     val cues: StateFlow<List<SubtitleCue>>
         get() = MutableStateFlow(emptyList())
+
+    /**
+     * 起播探测给出的"提示胶囊"文案（C21）：如"该视频仅有软件解码器，可能发热/掉帧"。
+     * null = 无提示。默认实现恒为 null（引擎不做前置探测）。
+     * UI 只负责展示，判定与措辞归引擎（它是唯一知道解码器实际选择的一方）。
+     */
+    val decodeNotice: StateFlow<String?>
+        get() = MutableStateFlow(null)
 
     /**
      * 当前播放队列（同文件夹连播的来源）。默认空——不支持队列的引擎退化为单曲播放。
@@ -95,6 +123,15 @@ interface VideoPlayer {
 
     /** 设置播放倍速（0.25–4.0）；实现不支持时为空操作 */
     fun setSpeed(speed: Float) {}
+
+    /**
+     * 当前循环模式；不支持的引擎默认 [NpLoopMode.OFF]（顺序播放）。
+     */
+    val loopMode: StateFlow<NpLoopMode>
+        get() = MutableStateFlow(NpLoopMode.OFF)
+
+    /** 设置循环模式（顺序/单集循环/列表循环/随机）；不支持时为空操作 */
+    fun setLoopMode(mode: NpLoopMode) {}
 
     /** 挂载外挂字幕文件（file 的 content uri）；传入 null 清除；不支持时为空操作 */
     fun setSubtitle(uri: String?) {}

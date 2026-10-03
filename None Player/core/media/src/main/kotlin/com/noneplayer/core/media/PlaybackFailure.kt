@@ -38,7 +38,14 @@ data class PlaybackFailure(
             reason = "没有解析到受支持的视频编码（常见于 WMV / VC-1 / RealVideo 等旧编码）。",
         )
 
-        /** 本设备没有该视频编码的解码器（或档次/特性不受支持） */
+        /**
+         * 本设备没有该视频编码的解码器（或档次/特性不受支持）。
+         *
+         * 两条来源共用这条文案：起播前探测（平台 MediaCodec 与内置 FFmpeg 软解都不认该编码）
+         * 与运行期解码错误（[com.noneplayer.core.media.PlaybackFailure] 的调用方按错误码映射）。
+         * 因此只陈述"没有可用解码器"这一事实，不再断言"未内置软解"——内置 FFmpeg 软解
+         * 只覆盖固定编码表，是否覆盖该文件由调用方判定。
+         */
         fun videoCodecUnsupported(
             container: String?,
             videoCodec: String?,
@@ -47,7 +54,7 @@ data class PlaybackFailure(
             container = container,
             videoCodec = videoCodec,
             audioCodec = audioCodec,
-            reason = "本设备没有该视频编码可用的解码器（或解码器不支持该文件的编码档次/特性），None Player 也未内置视频软解。",
+            reason = "本设备没有该视频编码可用的解码器（或解码器不支持该文件的编码档次/特性）。",
         )
 
         /**
@@ -77,7 +84,7 @@ data class PlaybackFailure(
                     append(deviceProfiles)
                     append("」")
                 }
-                append("。此类文件会在解码第一帧时失败，None Player 也未内置视频软解。")
+                append("。此类文件会在解码第一帧时失败。")
             },
         )
 

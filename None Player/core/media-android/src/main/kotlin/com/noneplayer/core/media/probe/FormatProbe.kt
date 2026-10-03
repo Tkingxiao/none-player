@@ -13,16 +13,18 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultDataSource
 import androidx.media3.extractor.DefaultExtractorInput
-import androidx.media3.extractor.DefaultExtractorsFactory
 import androidx.media3.extractor.DiscardingTrackOutput
 import androidx.media3.extractor.Extractor
 import androidx.media3.extractor.ExtractorOutput
+import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.PositionHolder
 import androidx.media3.extractor.SeekMap
 import android.net.Uri
 import androidx.media3.extractor.TrackOutput
+import com.homesoft.exo.extractor.AviExtractorsFactory
 import com.noneplayer.core.media.MediaNames
 import com.noneplayer.core.media.PlaybackFailure
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -32,9 +34,16 @@ import kotlin.math.max
  * 起播前格式预探测（E39，§12.2 ①）——首批覆盖两类"必然失败"：
  *
  * 1. **容器无解封装支持**：任何 media3 Extractor 都无法 sniff（RMVB / WMV 等）；
- * 2. **视频编码无解**：容器可读但没有平台解码器（WMV3 / VC-1 / 无损旧编码等）。
+ * 2. **视频编码无解**：容器可读，但**平台 MediaCodec、内置 FFmpeg 软解与 AVI MJPEG 位图软解
+ *    都不认这个编码**（WMV2 / VC-1 / RealVideo 等旧编码）。
  *
- * 探测用与播放相同的 media3 Extractor 链 + 平台 `MediaCodecList`，
+ * 探测用与播放相同的 media3 Extractor 链，解码器查询则同时看三条链：
+ * 平台 `MediaCodecList`（硬解/平台软解）+ NextLib 的 `FfmpegLibrary`（内置 FFmpeg 软解）
+ * + AVI MJPEG 的 `BitmapFactoryVideoRenderer`（位图软解）。
+ * 只查平台会把"平台没有、FFmpeg 能解"的编码（AV1 / MPEG-1/2 等）与"平台没有、MJPEG
+ * 位图渲染器能解"的 AVI 误判为不可播——播放侧明明是 `EXTENSION_RENDERER_MODE_ON`
+ * （平台不支持就落 FFmpeg），且末端还挂着 MJPEG 位图渲染器，两边必须一致。
+ *
  * 结论只用于"提前给出可读失败原因"，避免 3–8s 白转圈；
  * 拿不准（远程流 / 读取异常 / 超预算）一律 [Result.Unknown] 放行给引擎。
  */
@@ -50,6 +59,12 @@ object FormatProbe {
             val container: String?,
             val videoCodec: String?,
             val audioCodec: String?,
+            /**
+             * 该媒体只有**软件解码器**可用（§C21 软解前置提示）。
+             * 软件解码可以播，但高分辨率/高码率下会掉帧、发热、耗电——
+             * UI 据此在起播前给一条 warn 胶囊，而不是让用户自己发现"为什么卡"。
+             */
+            val softwareVideoOnly: Boolean = false,
         ) : Result
 
         /** 无法给出结论——照常交给播放引擎 */
@@ -82,6 +97,21 @@ object FormatProbe {
     private const val MAX_READS = 400
     private const val LENGTH_HINT = 8L * 1024 * 1024
     private const val MIME_MP4V = "video/mp4v-es"
+    private const val MIME_MJPEG = "video/mjpeg"
+
+    /**
+     * 探测用的 Extractor 链——**必须与播放链同源**（E39 的一致性前提）。
+     *
+     * AVI 交给 Media3Avi 的增强解封装器（OpenDML/AVIX + indx/ix 索引、MP42/MP43、
+     * MJPEG、更多 H.264 fourCC），其余容器仍是 media3 默认链；这与播放侧的
+     * `DefaultMediaSourceFactory(context, AviExtractorsFactory())` 是同一套。
+     * 两边不同源就会出现自相矛盾的结论：探测说"没有视频轨"而播放能出画，
+     * 或探测放行而播放黑屏。
+     *
+     * 工厂本身无状态，每次 `createExtractors()` 产出全新的 Extractor 实例
+     * （Extractor 有内部游标，不能跨文件复用），因此可以常驻单例。
+     */
+    private val AVI_EXTRACTORS: ExtractorsFactory = AviExtractorsFactory()
 
     /** profile 判读只需头部字节；截留上限（VOS/VOL/GOV 头远小于此） */
     private const val HEAD_CAP = 4 * 1024
@@ -97,7 +127,7 @@ object FormatProbe {
             dataSource.open(DataSpec(uri))
             var input = DefaultExtractorInput(dataSource, 0, totalLength ?: LENGTH_HINT)
 
-            val extractors = DefaultExtractorsFactory().createExtractors(uri, emptyMap())
+            val extractors = AVI_EXTRACTORS.createExtractors(uri, emptyMap())
             var matched: Extractor? = null
             var sniffThrew = false
             for (extractor in extractors) {
@@ -307,14 +337,28 @@ object FormatProbe {
             if (video == null) {
                 return Result.Unplayable(PlaybackFailure.unknownVideoCodec(containerName, audioName))
             }
-            if (!hasPlatformDecoder(video)) {
+            // 解码能力 = 平台解码器 或 内置 FFmpeg 软解 或 AVI MJPEG 位图软解
+            // （播放链是"硬解优先 + 扩展兜底 + MJPEG 位图兜底"，三段的顺序与来源见
+            //  plugin-player-exo 的 NpRenderersFactory）
+            val platformVideo = hasPlatformDecoder(video)
+            val ffmpegVideo = ffmpegSupports(video.sampleMimeType)
+            val bitmapVideo = bitmapRendererSupports(video.sampleMimeType)
+            if (!platformVideo && !ffmpegVideo && !bitmapVideo) {
                 return Result.Unplayable(
                     PlaybackFailure.videoCodecUnsupported(containerName, videoName, audioName),
                 )
             }
             // §12.9.4：有解码器，但档次可能不被设备解码器支持（mp4v ASP vs Simple-only）
             profileMismatch(video, containerName, videoName, audioName)?.let { return it }
-            return Result.Playable(containerName, videoName, audioName)
+            return Result.Playable(
+                container = containerName,
+                videoCodec = videoName,
+                audioCodec = audioName,
+                // 平台没有该编码的解码器、只能靠 FFmpeg 或 MJPEG 位图出画时，同样是"仅软解可用"，
+                // 也要给 C21 前置提示（否则用户只会觉得"莫名其妙很卡/很烫"）
+                softwareVideoOnly = onlySoftwareDecoder(video) ||
+                    (!platformVideo && (ffmpegVideo || bitmapVideo)),
+            )
         }
 
         /**
@@ -385,6 +429,30 @@ object FormatProbe {
         else -> "0x${Integer.toHexString(profile)}"
     }
 
+    /**
+     * 是否**只有软件解码器**可用（C21）：默认解码器被系统标记为非硬件加速时为真。
+     *
+     * 保守取"默认解码器"的判断而不是枚举全部：`findDecoderForFormat` 返回的就是
+     * 播放器实际会用的那一个；枚举全表再取"有没有硬解"会与真实选择脱节
+     * （有硬解但默认选了软解的设备确实存在）。
+     * `isHardwareAccelerated` 需要 API 29；更低版本返回 false（不给提示）。
+     */
+    private fun onlySoftwareDecoder(format: Format): Boolean {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return false
+        val mime = format.sampleMimeType ?: return false
+        return runCatching {
+            val platform = PlatformMediaFormat.createVideoFormat(
+                mime,
+                max(format.width, 1),
+                max(format.height, 1),
+            )
+            val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+            val decoderName = list.findDecoderForFormat(platform) ?: return@runCatching false
+            val info = list.codecInfos.firstOrNull { it.name == decoderName } ?: return@runCatching false
+            !info.isHardwareAccelerated
+        }.getOrDefault(false)
+    }
+
     /** 平台解码器查询：与系统同源（MediaCodecList），尺寸缺失时按常见档位查询 */
     private fun hasPlatformDecoder(format: Format): Boolean {
         val mime = format.sampleMimeType ?: return true
@@ -397,4 +465,33 @@ object FormatProbe {
             MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(platform) != null
         }.getOrDefault(true)
     }
+
+    /**
+     * 内置 FFmpeg（NextLib）能否软解该编码。
+     *
+     * 覆盖范围以库内的编解码表为准（视频 h264 / hevc / av1 / mpeg1 / mpeg2 / vp8 / vp9，
+     * 音频 aac / mp3 / ac3 / eac3 / dts / truehd / flac / alac / opus / vorbis / amr / pcm）。
+     * **不含** mpeg4(Xvid/DivX)、wmv2/vc1、mjpeg——所以 ASP 拦截走 [profileMismatch]，
+     * AVI 的 MJPEG 走 [bitmapRendererSupports]，都不受这里影响。
+     *
+     * 首次调用会触发 `System.loadLibrary("media3ext")`；ABI 缺失或加载失败时
+     * [FfmpegLibrary.isAvailable] 为 false、本方法返回 false（fail-open 到平台判定）。
+     */
+    private fun ffmpegSupports(mime: String?): Boolean {
+        if (mime == null) return false
+        return runCatching { FfmpegLibrary.supportsFormat(mime) }.getOrDefault(false)
+    }
+
+    /**
+     * AVI 内嵌 MJPEG 能否由播放链解出。
+     *
+     * MJPEG 既不在平台 `MediaCodec` 表里，也不在 NextLib 的 FFmpeg 编解码表里，
+     * 但播放链末端挂了 `BitmapFactoryVideoRenderer`（见 plugin-player-exo 的
+     * `NpRenderersFactory`），它认领 `video/mjpeg`、用 BitmapFactory 逐帧软解。
+     * 探测若不认这条链，会把**实际能播**的 MJPEG AVI 误判为"没有可用解码器"。
+     *
+     * 只认 `video/mjpeg` 这一个 mime——渲染器的认领范围以 Media3Avi 的
+     * `BitmapFactoryVideoRenderer` 为准（其内部仅匹配该 mime）。
+     */
+    private fun bitmapRendererSupports(mime: String?): Boolean = mime == MIME_MJPEG
 }

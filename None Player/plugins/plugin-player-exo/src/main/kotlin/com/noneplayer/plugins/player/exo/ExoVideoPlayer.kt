@@ -25,6 +25,7 @@ import com.noneplayer.core.media.probe.FormatProbe
 import com.noneplayer.kernel.api.CuePlacement
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.SubtitleCue
+import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.VideoPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 
 /**
  * ExoPlayer 播放器实现——基于 [MediaController] 与后台 [PlaybackService] 会话。
@@ -71,6 +73,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private val _cues = MutableStateFlow<List<SubtitleCue>>(emptyList())
     override val cues: StateFlow<List<SubtitleCue>> = _cues.asStateFlow()
+
+    /** C21：起播探测的"仅软解可用"提示（null = 无） */
+    private val _decodeNotice = MutableStateFlow<String?>(null)
+    override val decodeNotice: StateFlow<String?> = _decodeNotice.asStateFlow()
 
     // ---- 队列（§8.2）：写入 media3 会话后，通知 ⏮⏭ 与"播完自动下一集"由框架免费提供 ----
     private val _queue = MutableStateFlow<List<com.noneplayer.core.media.MediaItem>>(emptyList())
@@ -205,6 +211,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         while (currentCoroutineContext().isActive) {
             val position = c.currentPosition.coerceAtLeast(0)
             if (_positionMs.value != position) _positionMs.value = position
+            // seek 落实（位置收敛到目标）后清掉挂起值：它只该服务"媒体装载完成前
+            // 到达的 seek"（E39）。不清理的话会一直留到下一次媒体项重建
+            // （切字幕等触发 applyMedia），被当成"恢复位置"用，把已播到的位置
+            // 拉回上一次 seek 的目标（位置回退）。
+            pendingSeekMs?.let { pending -> if (abs(position - pending) <= SEEK_SETTLE_MS) pendingSeekMs = null }
             val duration = c.duration
             if (duration > 0 && _durationMs.value != duration) _durationMs.value = duration
             delay(250)
@@ -232,23 +243,38 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     /**
      * 准备播放（E39）：先做格式预探测——"容器无解封装"或"视频编码无解码器"时
      * 直接进入结构化失败态（省掉 3–8s 白转圈）；探测通过/无结论才装载媒体。
-     *
-     * E58 修复配套（二次防御）：即便 FormatProbe.probe 已正确区分取消异常
-     * （见 FormatProbe.kt），这里仍为每次 prepare() 打一个单调递增的世代号。
-     * 快速切换 A→B 时，A 的探测协程即便在极端调度下"取消晚了一步"跑完，
-     * 落地前也会先核对世代号——不是最新一次就直接丢弃，不会覆盖 B 的状态。
      */
     override fun prepare(uri: String, mimeType: String, title: String, artworkUri: String?) {
         currentMediaUri = uri
         currentMimeType = mimeType
         currentTitle = title
         currentArtworkUri = artworkUri
+        probeThenLoad(uri) { applyMedia(uri) }
+    }
+
+    /**
+     * 起播前探测的统一入口（E80：**每条装载路径都必须过探测**）。
+     *
+     * [prepare] / [setQueue] / [selectQueueIndex] 三个入口最终都收敛到这里：
+     *
+     * ① 取消上一轮探测并把失败闩（[terminalFailure]）放下——它是"Error 是终态"的
+     *    闩锁，media3 的后续回调都会被它挡掉；不在这里复位，从错误态切到可播媒体时
+     *    状态永远停在旧 Error，错误面板不消、页头也不刷新；
+     * ② 状态**同步**落到非终态 [PlaybackState.Buffering]（并清掉上一条的软解提示）：
+     *    探测是异步的，不覆盖的话探测窗口内 UI 读到的仍是上一条媒体的 Ended / Error，
+     *    会先闪一屏"播放结束"或旧错误再开始播；
+     * ③ 世代号（E58 二次防御）：快速切换 A→B 时，A 的探测协程即便在极端调度下
+     *    "取消晚了一步"跑完，落地前也会先核对世代号——不是最新一次就直接丢弃。
+     */
+    private fun probeThenLoad(uri: String, apply: () -> Unit) {
         prepareJob?.cancel()
         terminalFailure = false
+        _state.value = PlaybackState.Buffering
+        _decodeNotice.value = null
         val myGeneration = ++prepareGeneration
         prepareJob = scope.launch {
             val probe = FormatProbe.probe(appContext, uri)
-            if (myGeneration != prepareGeneration) return@launch // 已有更新的 prepare()，丢弃
+            if (myGeneration != prepareGeneration) return@launch // 已有更新的装载，丢弃
             when (probe) {
                 is FormatProbe.Result.Unplayable -> {
                     appliedUri = null
@@ -257,6 +283,12 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     probedAudioCodec = probe.failure.audioCodec
                     // 先停掉会话里可能还在播的上一个媒体，再落终态失败
                     runCatching { controller?.stop() }
+                    // 连同**上一条媒体的进度残留**一起清掉：media3 的 stop() 不重置
+                    // 播放位置/时长（上一条停在 1:03 就还是 1:03），不清的话错误面板
+                    // 背後与迷你条会把"什么都没装载"显示成"快播完了"。
+                    runCatching { controller?.clearMediaItems() }
+                    _positionMs.value = 0L
+                    _durationMs.value = 0L
                     terminalFailure = true
                     _state.value = PlaybackState.Error(probe.failure.reason, probe.failure)
                 }
@@ -264,9 +296,18 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     probedContainer = probe.container
                     probedVideoCodec = probe.videoCodec
                     probedAudioCodec = probe.audioCodec
-                    applyMedia(uri)
+                    // C21：仅软解可用时给前置提示（能播，但可能发热/掉帧）
+                    _decodeNotice.value = if (probe.softwareVideoOnly) {
+                        "该视频仅有软件解码器可用，高码率下可能掉帧或发热"
+                    } else {
+                        null
+                    }
+                    apply()
                 }
-                FormatProbe.Result.Unknown -> applyMedia(uri)
+                FormatProbe.Result.Unknown -> {
+                    _decodeNotice.value = null
+                    apply()
+                }
             }
         }
     }
@@ -291,17 +332,14 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         startIndex: Int,
         startPositionMs: Long,
     ) {
-        val c = controller ?: return
+        if (controller == null) return
         if (items.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, items.lastIndex)
         _queue.value = items
         _currentIndex.value = safeIndex
-        // 队列装载即覆盖当前媒体：重置世代号，避免上一次探测结果回写
-        prepareJob?.cancel()
-        terminalFailure = false
         pendingSeekMs = startPositionMs.takeIf { it > 0 }
 
-        // E80 修复：**队列路径也必须过起播前探测**。
+        // E80 修复：**队列路径也必须过起播前探测**（详细缘由见 [probeThenLoad]）。
         //
         // 批次 1 引入队列后，播放页改走 setQueue()，而 setQueue 直接 setMediaItems +
         // c.prepare()，**绕过了 prepare() 里的 FormatProbe**。后果是 E39 的"体面失败"
@@ -310,30 +348,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // 播完 4 秒音频并显示"播放结束"，用户只看到**纯黑屏**，无从知道是编码不支持。
         //
         // 这里对**即将播放的那一项**做探测：不可解则不装载队列，直接落结构化失败态。
-        val target = items[safeIndex]
-        val myGeneration = ++prepareGeneration
-        prepareJob = scope.launch {
-            val probe = FormatProbe.probe(appContext, target.uri)
-            if (myGeneration != prepareGeneration) return@launch // 已有更新的装载，丢弃
-            when (probe) {
-                is FormatProbe.Result.Unplayable -> {
-                    appliedUri = null
-                    probedContainer = probe.failure.container
-                    probedVideoCodec = probe.failure.videoCodec
-                    probedAudioCodec = probe.failure.audioCodec
-                    runCatching { controller?.stop() }
-                    terminalFailure = true
-                    _state.value = PlaybackState.Error(probe.failure.reason, probe.failure)
-                }
-                is FormatProbe.Result.Playable -> {
-                    probedContainer = probe.container
-                    probedVideoCodec = probe.videoCodec
-                    probedAudioCodec = probe.audioCodec
-                    applyQueue(mediaItemsOf(items), safeIndex, startPositionMs)
-                }
-                FormatProbe.Result.Unknown -> applyQueue(mediaItemsOf(items), safeIndex, startPositionMs)
-            }
-        }
+        probeThenLoad(items[safeIndex].uri) { applyQueue(mediaItemsOf(items), safeIndex, startPositionMs) }
     }
 
     /** setQueue 成功路径的装载体（探测通过后调用），保持与探测前的行为一致 */
@@ -352,15 +367,23 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private fun mediaItemsOf(items: List<com.noneplayer.core.media.MediaItem>): List<MediaItem> =
         items.map { it.toMediaItem() }
 
+    /**
+     * 选集/自动切集的落点：**同样是一条装载路径**，因此与 setQueue 走同一条探测闸。
+     *
+     * 曾经的实现只做 `seekToDefaultPosition(index)`：从失败项（Error 终态 + 闩锁）
+     * 切到正常项时，闩锁不复位、media3 回调被挡，错误面板就永远盖在画面上；
+     * 切到不可解项时又会绕过 E80 的探测，黑屏把音轨播完。
+     *
+     * 改用 `setMediaItems(items, index)` 整表重设而非仅 seek：队列可能因上一次
+     * 探测失败**根本没进 media3**（setQueue 失败时 applyQueue 未执行），
+     * 此时对旧播放列表 seek 会指到别的媒体甚至越界。
+     */
     override fun selectQueueIndex(index: Int) {
-        val c = controller ?: return
+        if (controller == null) return
         val items = _queue.value
         if (index !in items.indices) return
         _currentIndex.value = index
-        // seekToDefaultPosition(index) 由 media3 负责装载目标项；
-        // 预载源命中时这一步几乎无缓冲（L2 的收益点）
-        c.seekToDefaultPosition(index)
-        c.play()
+        probeThenLoad(items[index].uri) { applyQueue(mediaItemsOf(items), index, 0L) }
     }
 
     override fun playNext() {
@@ -403,6 +426,36 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun setSpeed(speed: Float) {
         controller?.playbackParameters = PlaybackParameters(speed)
         _speed.value = speed
+    }
+
+    private val _loopMode = MutableStateFlow(NpLoopMode.OFF)
+    override val loopMode: StateFlow<NpLoopMode> = _loopMode.asStateFlow()
+
+    /**
+     * 循环模式 → media3：OFF/ONE/ALL 直接映射 repeatMode；
+     * SHUFFLE = 列表循环 + shuffleModeEnabled（media3 按默认 ShuffleOrder 洗牌队列）。
+     */
+    override fun setLoopMode(mode: NpLoopMode) {
+        val c = controller ?: return
+        when (mode) {
+            NpLoopMode.OFF -> {
+                c.repeatMode = Player.REPEAT_MODE_OFF
+                c.shuffleModeEnabled = false
+            }
+            NpLoopMode.ONE -> {
+                c.repeatMode = Player.REPEAT_MODE_ONE
+                c.shuffleModeEnabled = false
+            }
+            NpLoopMode.ALL -> {
+                c.repeatMode = Player.REPEAT_MODE_ALL
+                c.shuffleModeEnabled = false
+            }
+            NpLoopMode.SHUFFLE -> {
+                c.repeatMode = Player.REPEAT_MODE_ALL
+                c.shuffleModeEnabled = true
+            }
+        }
+        _loopMode.value = mode
     }
 
     /**
@@ -499,6 +552,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private companion object {
         const val MAX_ARTWORK_BYTES = 512 * 1024
+
+        /** seek 落定判据：位置与挂起目标相差在此之内即视为 seek 已落实 */
+        const val SEEK_SETTLE_MS = 1_500L
     }
 
     override fun release() {

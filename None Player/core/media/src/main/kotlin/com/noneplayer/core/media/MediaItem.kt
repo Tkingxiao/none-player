@@ -25,4 +25,37 @@ data class MediaItem(
     val coverUri: String? = null,
     /** 所属文件夹的相对路径（如 "DCIM/Camera"），用于按文件夹分组；未知为 null */
     val folder: String? = null,
+    /** 视频像素宽（未知为 0；音频恒 0）——卡片 meta 的「分辨率」来源 */
+    val width: Int = 0,
+    /** 视频像素高（未知为 0；音频恒 0） */
+    val height: Int = 0,
 )
+
+/** 媒体种类：由 mimeType 判定（音频/视频），UI 用它决定角标、图标与分组 */
+enum class MediaKind { VIDEO, AUDIO }
+
+/** 由 [MediaItem.mimeType] 判定媒体种类；未知/视频一律视为 VIDEO */
+val MediaItem.kind: MediaKind
+    get() = if (mimeType.startsWith("audio/", ignoreCase = true)) MediaKind.AUDIO else MediaKind.VIDEO
+
+/**
+ * 卡片 meta 的「分辨率 / 质量」标签（设计稿 `v.res`：1080P / 4K / 无损）。
+ *
+ * 视频按像素高归档；音频只有"无损"这一档可从 MIME 判定，
+ * 有损音频拿不到真实码率（MediaStore 的 BITRATE 在旧版本不可靠），
+ * 宁可不显示也不编造「320kbps」——如实返回空串由调用方省略该段。
+ */
+val MediaItem.resolutionLabel: String
+    get() = when {
+        kind == MediaKind.AUDIO -> when (mimeType.substringBefore(';').trim().lowercase()) {
+            "audio/flac", "audio/x-flac", "audio/wav", "audio/x-wav", "audio/ape", "audio/alac" -> "无损"
+            else -> ""
+        }
+        height >= 2160 -> "4K"
+        height >= 1440 -> "1440P"
+        height >= 1080 -> "1080P"
+        height >= 720 -> "720P"
+        height >= 480 -> "480P"
+        height > 0 -> "${height}P"
+        else -> ""
+    }

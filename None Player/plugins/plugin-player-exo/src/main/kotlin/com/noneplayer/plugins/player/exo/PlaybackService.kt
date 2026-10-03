@@ -2,9 +2,9 @@ package com.noneplayer.plugins.player.exo
 
 import android.app.PendingIntent
 import android.content.Intent
-import android.net.Uri
 import android.os.Bundle
 import androidx.annotation.OptIn
+import androidx.core.net.toUri
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -12,6 +12,7 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
 import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
 import androidx.media3.session.MediaSession
@@ -20,6 +21,7 @@ import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.homesoft.exo.extractor.AviExtractorsFactory
 
 /** 擦洗命令：UI 拖动进度条时切换 seek 精度（会话侧 API 不在 MediaController 暴露） */
 internal const val SCRUB_COMMAND = "np.scrub"
@@ -43,7 +45,11 @@ private const val PRELOAD_WINDOW_FORWARD = 3
  * 播放器实例驻留本服务：UI 退到后台（甚至销毁）后音频继续，
  * 系统媒体通知自动提供播放/暂停/进度控制（锁屏、通知中心一致）。
  * ExoVideoPlayer 通过 MediaController 与本会话通信。
+ *
+ * media3 的预载/会话连接 API 仍处于 @UnstableApi 面：成员级 @OptIn 对属性类型
+ * 引用不生效（lint 只认外层声明链），故在类与嵌套回调类上统一 opt-in。
  */
+@OptIn(UnstableApi::class)
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
@@ -52,7 +58,6 @@ class PlaybackService : MediaSessionService() {
      * L2（§11.2）下一集预载管理器。与 [mediaSession] 同在服务作用域，
      * 会话寿命 = 播放器寿命，退页不释放（L0 的另一半）。
      */
-    @OptIn(UnstableApi::class)
     private var preloadManager: DefaultPreloadManager? = null
 
     /**
@@ -64,13 +69,31 @@ class PlaybackService : MediaSessionService() {
     @Volatile
     private var currentPlayingIndex = 0
 
-    @OptIn(UnstableApi::class)
+    /**
+     * 已经注册进 [preloadManager] 的窗口（按队列顺序）。
+     *
+     * 用于把 [syncPreloadQueue] 变成**增量**同步——见该方法内注释。
+     */
+    private var preloadedWindow: List<MediaItem> = emptyList()
+
     override fun onCreate() {
         super.onCreate()
-        // E21 兜底链路：解码器失败自动换下一个（软解/低档位）；倍速经 AudioTrack 原生处理
-        val renderersFactory = DefaultRenderersFactory(this)
+        // E21 兜底链路：解码器失败自动换下一个（软解/低档位）；倍速经 AudioTrack 原生处理。
+        // NpRenderersFactory = 平台硬解 + NextLib 的 FFmpeg 软解 + AVI MJPEG 位图软解
+        // （三段来源与顺序见该类注释）。
+        // EXTENSION_RENDERER_MODE_ON：硬解优先，平台解码器不支持该编码时才落到 FFmpeg 软解——
+        // 这就是"软硬解自适应"的全部含义（不做运行期解码器切换，原因见 NpRenderersFactory 注释）。
+        val renderersFactory = NpRenderersFactory(this)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setEnableDecoderFallback(true)
             .setEnableAudioTrackPlaybackParams(true)
+        // AVI 交给 Media3Avi 的增强解封装器（OpenDML/AVIX + indx/ix 索引、MP42/MP43、MJPEG、
+        // 更多 H.264 fourCC），其余容器仍是 media3 默认链。必须与 FormatProbe 的探测链同源
+        // （见 FormatProbe.AVI_EXTRACTORS 注释）：不同源会让"探测结论"与"实际能否出画"分叉。
+        // 同理，FormatProbe 的"有没有解码器"也必须把上面这条链算全：FFmpeg 软解
+        // （FormatProbe.ffmpegSupports）与末端的 MJPEG 位图软解（FormatProbe.bitmapRendererSupports），
+        // 否则会把"能软解"的文件误判为不可播。
+        val mediaSourceFactory = DefaultMediaSourceFactory(this, AviExtractorsFactory())
         val loadControl = buildLoadControl()
         // L1/L2（§11.2）：预载管理器与播放器必须出自**同一个 builder**——
         // `buildExoPlayer` 会把同一个 MediaSource.Factory / RenderersFactory / LoadControl
@@ -78,8 +101,12 @@ class PlaybackService : MediaSessionService() {
         val preloadManagerBuilder = DefaultPreloadManager.Builder(this, targetPreloadStatusControl())
             .setLoadControl(loadControl)
             .setRenderersFactory(renderersFactory)
+            // 预载管理器自己也要建 MediaSource：不喂同一个工厂，它预载出来的源
+            // 与播放器认的源就不是一套（AVI 会在预载侧解析失败/被丢弃，白预载）
+            .setMediaSourceFactory(mediaSourceFactory)
         val player = preloadManagerBuilder.buildExoPlayer(
             ExoPlayer.Builder(this, renderersFactory)
+                .setMediaSourceFactory(mediaSourceFactory)
                 // 音频焦点：与其他 App（语音、音乐）抢占式协调；拔耳机自动暂停
                 .setAudioAttributes(
                     androidx.media3.common.AudioAttributes.Builder()
@@ -121,20 +148,37 @@ class PlaybackService : MediaSessionService() {
      * 只喂当前项附近的一个窗口（前 1、后 3）：本地播放下把整个大文件夹（可能 80+ 项）
      * 全部注册进预载只会白白创建一堆 MediaSource 并干扰优先级排序，
      * 而 [targetPreloadStatusControl] 本身也只对距离 ≤ 2 的项给出非零目标。
+     *
+     * **必须增量同步**（§4.5 缓冲停摆的根因之一）：`BasePreloadManager.add()` 内部是
+     * `map.put(MediaItem → holder)`——对同一个 MediaItem 再 add 只会把旧 holder 从表里
+     * 挤掉、**不会释放**它；旧 holder 的 `PreloadMediaSource` 若已在预载，其 loader
+     * 与文件句柄就成了孤儿继续跑。本方法挂在 `onTimelineChanged` 上，而缓冲期 timeline
+     * 会变化多次，整窗重加会不断堆积孤儿预载源，与前台读取抢 I/O，表现为"缓冲中 seek
+     * 后位置不再前进"。所以只对差集增删，窗口没变时仅更新当前下标。
      */
-    @OptIn(UnstableApi::class)
     private fun syncPreloadQueue(player: ExoPlayer) {
         val manager = preloadManager ?: return
         val count = player.mediaItemCount
-        if (count == 0) return
+        if (count == 0) {
+            if (preloadedWindow.isNotEmpty()) {
+                manager.removeMediaItems(preloadedWindow)
+                preloadedWindow = emptyList()
+            }
+            return
+        }
         val current = player.currentMediaItemIndex.coerceAtLeast(0)
         currentPlayingIndex = current
         val from = (current - PRELOAD_WINDOW_BACK).coerceAtLeast(0)
         val to = (current + PRELOAD_WINDOW_FORWARD).coerceAtMost(count - 1)
         if (to < from) return
         val items = (from..to).map { player.getMediaItemAt(it) }
-        val ranking = (from..to).toList()
-        manager.addMediaItems(items, ranking)
+        val stale = preloadedWindow.filter { it !in items }
+        if (stale.isNotEmpty()) manager.removeMediaItems(stale)
+        val fresh = items.filter { it !in preloadedWindow }
+        if (fresh.isNotEmpty()) {
+            manager.addMediaItems(fresh, fresh.map { items.indexOf(it) + from })
+        }
+        preloadedWindow = items
         manager.setCurrentPlayingIndex(current)
     }
 
@@ -145,7 +189,6 @@ class PlaybackService : MediaSessionService() {
      * 起点值按 §11.2 表：起播缓冲门槛 2.5s → 1s、回缓冲 5s → 2s，
      * 并开 `prioritizeTimeOverSizeThresholds`（大文件下按时长而非字节数判充分）。
      */
-    @OptIn(UnstableApi::class)
     private fun buildLoadControl(): DefaultLoadControl = DefaultLoadControl.Builder()
         .setBufferDurationsMs(
             /* minBufferMs = */ 15_000,
@@ -167,7 +210,6 @@ class PlaybackService : MediaSessionService() {
      *
      * 只用公开的工厂方法构造 [DefaultPreloadManager.PreloadStatus]——它的构造函数是 private。
      */
-    @OptIn(UnstableApi::class)
     private fun targetPreloadStatusControl(): TargetPreloadStatusControl<Int, DefaultPreloadManager.PreloadStatus> =
         TargetPreloadStatusControl { index ->
             when (kotlin.math.abs(index - currentPlayingIndex)) {
@@ -202,7 +244,7 @@ class PlaybackService : MediaSessionService() {
             ?: Intent(Intent.ACTION_MAIN).setPackage(packageName)
         val intent = Intent(base).apply {
             action = Intent.ACTION_VIEW
-            data = Uri.parse("noneplayer://player")
+            data = "noneplayer://player".toUri()
                 .buildUpon()
                 .appendQueryParameter("uri", uri)
                 .build()
@@ -223,6 +265,7 @@ class PlaybackService : MediaSessionService() {
      * 松手恢复常规精确 seek。MediaController 无法直接调用 setScrubbingModeEnabled，
      * 必须经会话侧转发。
      */
+    @OptIn(UnstableApi::class)
     private class ScrubAwareCallback(
         private val player: ExoPlayer,
     ) : MediaSession.Callback {
@@ -240,7 +283,6 @@ class PlaybackService : MediaSessionService() {
                 .build()
         }
 
-        @OptIn(UnstableApi::class)
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
