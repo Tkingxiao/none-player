@@ -17,6 +17,20 @@ lifecycle = "2.8.7"
 coreKtx = "1.15.0"
 datastore = "1.1.1"
 media3 = "1.11.1"
+# Media3Avi（dburckh/Media3Avi）：为 media3 补齐 AVI 解封装（OpenDML/AVIX + indx/ix 索引、
+# MP42/MP43、MJPEG、更多 H.264 fourCC）并提供 MJPEG 软解渲染器。
+# 仅 JitPack 有产物（无 Maven Central）；其 AAR 编译基线是 media3 1.7.1，
+# 但所用 API（Extractor/TrackOutput/DecoderVideoRenderer 等）在 1.11.1 上未变，
+# 且本项目的 media3 版本更高 → Gradle 版本仲裁取 1.11.1。
+media3avi = "2.7.1"
+# NextLib（anilbeesetti/nextlib）：为 media3 提供 FFmpeg 扩展渲染器（硬解优先、硬解不支持时回退软解）
+# 与运行期解码器切换（DecoderManager）。版本号格式为 `<media3 版本>-<nextlib 版本>`，
+# 1.11.1-0.16.0 与本项目 media3 1.11.1 精确对应（改 media3 版本时必须同步改这里）。
+# ⚠ 该库为 GPL-3.0；其捆绑的 FFmpeg 为 LGPL-3.0（configure 未开 --enable-gpl）。
+# 视频解码器仅 h264/hevc/mpeg2video/mpegvideo/vp8/vp9/av1(libdav1d)，
+# 音频为 vorbis/opus/flac/alac/mp3/aac/ac3/eac3/dca/mlp/truehd 等；
+# 不含 mpeg4(Xvid/DivX)、wmv2/vc1、mjpeg —— 与 §12.9.3 的专利结论一致（VC-1/WMV2 不引入）。
+nextlib = "1.11.1-0.16.0"
 coil = "2.7.0"
 junit = "4.13.2"
 # 插桩测试（androidTest）——§12.9.2 QPel 探测 harness 使用
@@ -24,6 +38,9 @@ androidxTest = "1.6.2"
 androidxTestExt = "1.2.1"
 # androidx-window 不在 compose BOM 内 → 必须自带版本项（§13.2）
 window = "1.5.0"
+# Haze：Compose backdrop blur（外壳玻璃材质 blur(22px) 的实现载体）。
+# 锁 1.2.x：1.6+ 要求 Compose 1.8+，本项目 BOM 2024.12.01（Compose 1.7.6）
+haze = "1.2.2"
 
 [libraries]
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }
@@ -39,6 +56,10 @@ media3-exoplayer = { group = "androidx.media3", name = "media3-exoplayer", versi
 media3-session = { group = "androidx.media3", name = "media3-session", version.ref = "media3" }
 media3-extractor = { group = "androidx.media3", name = "media3-extractor", version.ref = "media3" }
 media3-datasource = { group = "androidx.media3", name = "media3-datasource", version.ref = "media3" }
+# AVI 解封装增强（AviExtractorsFactory）+ MJPEG 软解渲染器（MjpegRenderersFactory）
+media3avi = { group = "com.github.dburckh", name = "Media3Avi", version.ref = "media3avi" }
+# FFmpeg 扩展渲染器（NextRenderersFactory）+ 运行期解码器切换（DecoderManager）
+nextlib-media3ext = { group = "io.github.anilbeesetti", name = "nextlib-media3ext", version.ref = "nextlib" }
 
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }
 coil-video = { group = "io.coil-kt", name = "coil-video", version.ref = "coil" }
@@ -59,6 +80,8 @@ compose-material3 = { group = "androidx.compose.material3", name = "material3" }
 compose-material3-window-size = { group = "androidx.compose.material3", name = "material3-window-size-class" }
 compose-material3-adaptive-navigation-suite = { group = "androidx.compose.material3", name = "material3-adaptive-navigation-suite" }
 androidx-window = { group = "androidx.window", name = "window", version.ref = "window" }
+haze-core = { group = "dev.chrisbanes.haze", name = "haze", version.ref = "haze" }
+haze-materials = { group = "dev.chrisbanes.haze", name = "haze-materials", version.ref = "haze" }
 compose-material-icons = { group = "androidx.compose.material", name = "material-icons-core" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }

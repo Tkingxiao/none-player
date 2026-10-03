@@ -31,6 +31,12 @@ dependencies {
     implementation(libs.media3.common)
     implementation(libs.media3.extractor)
     implementation(libs.media3.datasource)
+    // AVI 解封装增强（AviExtractorsFactory）：探测链必须与播放链同源，
+    // 否则"探测说没视频轨、播放却能出画"（或反之）——见 FormatProbe 注释
+    implementation(libs.media3avi)
+    // 内置 FFmpeg 软解（NextLib）：探测"有没有解码器"时必须把这条软解链算进去，
+    // 否则 AV1 / MPEG-1/2 这类平台无解码器、FFmpeg 可解的编码会被误判为不可播
+    implementation(libs.nextlib.media3ext)
 
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)

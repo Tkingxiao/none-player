@@ -30,6 +30,10 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.media3.exoplayer)
     implementation(libs.media3.session)
+    // AVI：AviExtractorsFactory（解封装）+ MjpegRenderersFactory（MJPEG 软解渲染）
+    implementation(libs.media3avi)
+    // FFmpeg 扩展渲染器（NextRenderersFactory）+ DecoderManager：硬解优先、硬解不支持时软解兜底
+    implementation(libs.nextlib.media3ext)
     implementation(libs.kotlinx.coroutines.core)
 
     // 编译期插件发现：由 kernel-ksp 生成 ExoPlayerPluginIndex

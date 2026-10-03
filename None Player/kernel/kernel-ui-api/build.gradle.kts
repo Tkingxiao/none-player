@@ -37,4 +37,8 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     // hinge 避让（折叠屏）用的 WindowInfoTracker 只在实现内使用，不必外泄
     implementation(libs.androidx.window)
+    // 外壳玻璃条（tabbar / chrome 槽位）的 backdrop blur（设计稿 blur(22px)）。
+    // 只在实现侧使用（NpGlassStyle 经 core:ui 下发），不 api 出去。
+    implementation(libs.haze.core)
+    implementation(libs.haze.materials)
 }

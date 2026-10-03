@@ -25,6 +25,15 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // Media3Avi（AVI 解封装增强 + MJPEG 软解渲染器）只有 JitPack 产物，
+        // 官方 README 明示 2.3.0 起改用 jitpack.io。用内容过滤把它限定在本仓库，
+        // 避免 Gradle 对其他依赖也去 JitPack 探一遍。
+        maven {
+            url = uri("https://jitpack.io")
+            content {
+                includeGroup("com.github.dburckh")
+            }
+        }
     }
 }
 
