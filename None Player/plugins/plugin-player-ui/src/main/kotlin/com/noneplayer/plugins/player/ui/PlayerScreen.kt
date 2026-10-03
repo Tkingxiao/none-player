@@ -3,7 +3,9 @@ package com.noneplayer.plugins.player.ui
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.graphics.Point
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import android.view.SurfaceView
 import android.view.WindowManager
@@ -49,12 +51,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -146,7 +146,6 @@ import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.rememberReduceMotion
 import com.noneplayer.core.ui.npPressScale
-import com.noneplayer.core.ui.npTopHairline
 import com.noneplayer.core.ui.rememberNpToastState
 import com.noneplayer.core.ui.silkSpring
 import com.noneplayer.kernel.api.ExtensionRegistry
@@ -185,6 +184,10 @@ private const val SCRUB_PREVIEW_INTERVAL_MS = 200L
 /** 播放页自动隐藏控制层延时 */
 private const val CONTROLS_AUTO_HIDE_MS = 3500L
 
+/** 等系统把方向落地的最长时限 / 轮询间隔（转屏动画 + 配置下发） */
+private const val ORIENTATION_CONFIRM_TIMEOUT_MS = 1200L
+private const val ORIENTATION_CONFIRM_POLL_MS = 150L
+
 /**
  * 播放页方向锁（E48）：UI 只表达**意图**，窗口方向由一个 effect 单点落地，
  * 避免多处命令式 `requestedOrientation` 互相覆盖。
@@ -193,15 +196,53 @@ private enum class OrientationLock(val requestedOrientation: Int) {
     /** 不干预：跟随系统"自动旋转"设置（横过来即横向，即全屏） */
     FollowSensor(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED),
 
-    /** 用户点「全屏」：锁横向，直到显式退出 */
-    Landscape(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE),
+    /**
+     * 用户点「全屏」：请求横向，直到显式退出。
+     *
+     * 请求**不等于生效**：系统有权不转屏，转不过去时把应用信箱化成屏幕中间一条
+     * 横向小带（平板 1600x2560 上实测退化成 1600x1200，画面凭空小一圈、上下全黑，
+     * `SENSOR_*` 与固定 `LANDSCAPE` 都会）。所以这里只负责表达意图，
+     * 生效与否由 [awaitLandscapeApplied] 事后核对，不成立就收回请求。
+     */
+    Landscape(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE),
 
     /** 用户点「退出全屏」：锁竖向，窗口转竖后立刻交还 [FollowSensor] */
-    Portrait(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT),
+    Portrait(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT),
 }
 
 /**
- * 播放页三种形态版式共享的**只读状态快照**。
+ * 横向请求是否真的换来了一个铺满的横向窗口。
+ *
+ * 两种"没生效"都要认出来：系统直接忽略请求（屏幕还竖着，窗口也竖着），
+ * 以及系统不转屏改为**信箱化**（屏幕还竖着，应用窗口却被压成一条横向带）。
+ * 两者共同点都是"屏幕仍是竖向"，于是窗口形状是否横向并不重要——
+ * 只有屏幕真的横过来、且应用窗口也横向，才算全屏成立。
+ */
+@Suppress("DEPRECATION")
+private fun landscapeApplied(activity: ComponentActivity): Boolean {
+    val displaySize = Point()
+    activity.windowManager.defaultDisplay.getRealSize(displaySize)
+    if (displaySize.x <= displaySize.y) return false
+    val configuration = activity.resources.configuration
+    return configuration.screenWidthDp > configuration.screenHeightDp
+}
+
+/** 轮询到系统把方向落地为止；超时返回最后一次判定结果。 */
+private suspend fun awaitLandscapeApplied(activity: ComponentActivity): Boolean {
+    val deadline = SystemClock.elapsedRealtime() + ORIENTATION_CONFIRM_TIMEOUT_MS
+    while (SystemClock.elapsedRealtime() < deadline) {
+        if (landscapeApplied(activity)) return true
+        delay(ORIENTATION_CONFIRM_POLL_MS)
+    }
+    return landscapeApplied(activity)
+}
+
+/** 系统「自动旋转」开关是否关着——决定被驳回时该给用户哪句可操作提示。 */
+private fun rotationLocked(activity: ComponentActivity): Boolean =
+    Settings.System.getInt(activity.contentResolver, Settings.System.ACCELEROMETER_ROTATION, 1) == 0
+
+/**
+ * 播放页两种形态版式共享的**只读状态快照**。
  *
  * 为什么要把状态打包：`PlayerScreen` 曾把三种版式（横屏全屏 / 类 PC / 竖屏）与
  * 三个弹层全部内联在同一个组合函数里，编译出的 `PlayerScreen` 方法达到
@@ -473,13 +514,19 @@ fun PlayerScreen(
     val configuration = LocalConfiguration.current
     val windowIsPortrait = configuration.screenHeightDp >= configuration.screenWidthDp
     // E48 余项 / §13.4：形态分派走 LocalNpWindowInfo（全局唯一判定层）。
-    // **类 PC（平板横屏 / 桌面自由窗口）不玩旋转与沉浸**：窗口本来就很宽，
-    // 视频按可用宽度嵌入渲染、系统栏常驻、控制层底部集中且不自动隐藏——
-    // "全屏"语义只存在於"手机式"形态。
+    // **全屏 ≡ 窗口横向**，类 PC（平板横屏 / 桌面自由窗口）不另起一种"嵌入"版式：
+    // 它同样是横向窗口，画面一样铺满可用区域。形态差异只留在两处——系统栏是否
+    // 沉浸隐藏（[isImmersive]）、控制层是否自动隐藏（见下方 autoHide 分支）。
+    // 旧写法把类 PC 排除在全屏之外、再套一层 760dp 限宽列：平板横屏里 16:9 只渲染到
+    // 窗口面积的 53%，且这一版式里根本没有全屏入口，用户没有任何办法把画面放大。
     val windowInfo = LocalNpWindowInfo.current
     val isDesktopLike = windowInfo.isDesktopLike
-    val isFullscreen = !windowIsPortrait && !isDesktopLike
+    val isFullscreen = !windowIsPortrait
+    /** 隐藏系统栏的手机式沉浸——类 PC 形态系统栏常驻，不抢用户的状态栏 */
+    val isImmersive = isFullscreen && !isDesktopLike
     var orientationLock by rememberSaveable { mutableStateOf(OrientationLock.FollowSensor) }
+    // 弹层提示的状态位提前到这里：方向请求被系统驳回时要靠它说清楚原因
+    val toast = rememberNpToastState()
 
     fun setFullscreen(fullscreen: Boolean) {
         orientationLock = if (fullscreen) OrientationLock.Landscape else OrientationLock.Portrait
@@ -487,11 +534,18 @@ fun PlayerScreen(
 
     // 方向只在用户显式操作时锁定；FollowSensor 用 UNSPECIFIED 而非 SENSOR，
     // 前者尊重系统"自动旋转"开关，用户关掉它就不该替他转。
-    // 类 PC 形态完全不碰 requestedOrientation（§13.4：不得因"视频是横的"自动转屏，
-    // 也不因"进了播放页"锁定方向）。
-    LaunchedEffect(orientationLock, isDesktopLike) {
-        if (!isDesktopLike) {
-            activity?.requestedOrientation = orientationLock.requestedOrientation
+    // 进入播放页不预设方向（E48）：orientationLock 的初值就是 FollowSensor，
+    // 这里只会落地"点全屏 / 退全屏"这类用户意图，不会因为"视频是横的"自动转屏。
+    LaunchedEffect(orientationLock) {
+        val act = activity ?: return@LaunchedEffect
+        act.requestedOrientation = orientationLock.requestedOrientation
+        // 请求发出去不等于屏幕真的转了：不转就收回，否则用户拿到一条信箱化的窄带
+        if (orientationLock == OrientationLock.Landscape && !awaitLandscapeApplied(act)) {
+            orientationLock = OrientationLock.FollowSensor
+            toast.show(
+                if (rotationLocked(act)) "方向已被系统锁定，无法横屏"
+                else "系统未允许横屏，把设备横过来即可全屏",
+            )
         }
     }
     // 手动退出全屏：锁竖屏把窗口转过去，到位后立刻交还传感器——
@@ -505,14 +559,76 @@ fun PlayerScreen(
     DisposableEffect(Unit) {
         onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     }
-    // 全屏时返回键先退出全屏（业界一致语义）；第二次返回才离开播放页
-    BackHandler(enabled = isFullscreen) { setFullscreen(false) }
+    // 全屏时返回键先退出全屏（业界一致语义）；第二次返回才离开播放页。
+    //
+    // **"退出全屏"必须能真的退掉**，否则返回键会被无限吞掉。两个坑叠在一起：
+    // ① `setFullscreen(false)` 只是**请求**竖向，系统未必照办（用户锁了自动旋转）；
+    // ② 平板/横屏终端的**自然方向就是横向**，压根不存在"回竖向"这一步——
+    //    而 `isFullscreen`（= 窗口横向）在平板上恒为 true，`BackHandler` 恒使能。
+    // 于是每次返回都只发一个不会生效的方向请求、页面纹丝不动。实测连按 6 次仍停在
+    // 播放页，用户被关在里面出不去（竖屏/手机横屏不会命中，因为它们的窗口能真转）。
+    //
+    // 语义：请求竖向并**确认窗口真的转了**，才算"退出了全屏"；转不过去就把这次返回
+    // 交给导航栈（离开播放页），保证用户总能出去。
+    //
+    // 为什么是"确认"而不是"直接 pop"：手机上点视频不会强制转屏（E48），横屏只可能来自
+    // 两种情况——用户点了「全屏」，或把设备横了过来。前者有"退出全屏"这一步，返回键应当
+    // 先退全屏而不是直接离开播放页（业界一致语义，也是本项目既有验收项）。
+    // 判据只能是"竖向请求有没有兑现"：`requestedOrientation` 是请求不是事实，系统可能拒绝
+    // （用户锁了自动旋转），平板/横屏终端的自然方向更是本来就横向、压根没有竖向可回，
+    // 此时若还认自己"退出了全屏"，`isFullscreen` 恒为 true、`BackHandler` 恒使能，
+    // 返回键就被无限吞掉（实测平板横屏连按 6 次仍停在播放页，用户被关在里面）。
+    //
+    // 「返回键该不该先退出全屏」的判据：**这次横向是不是用户自己点「全屏」要来的**。
+    //
+    // 不能用"等窗口真的转竖了"作判据（曾这样实现，实测两种机型都会把用户关死）：方向请求
+    // 只是意图，系统可以不照办，且有两种失败形态：
+    //   ① 平板 / 横屏终端的自然方向本就是横向 → 没有竖向可回，窗口纹丝不动；
+    //   ② 手机横持且开着自动旋转 → PORTRAIT 请求短暂生效后立刻被传感器拉回横向。
+    // 两种情况下 `isFullscreen`（= 窗口横向）都恒为 true、`BackHandler` 恒使能，
+    // 每次返回都重复同一个不留结果的动作——实测连按 6 次都退不出播放页。
+    //
+    // 改用 `orientationLock`（用户意图，页面自己持有、可见）判定：
+    //   · `Landscape` = 用户点了「全屏」→ 这次返回退全屏（请求竖向并留在播放页）；
+    //   · 其余（`FollowSensor` / `Portrait`）= 横向来自设备姿态或系统 → **没有全屏可退**，
+    //     这次返回直接离开播放页。
+    // 两条路都必然推进：即使竖向请求被系统拒绝，`orientationLock` 也已被改成 `Portrait`，
+    // 下一次返回落到"其余"分支 ⇒ 最多两下必定出得去，不存在空转死循环。
+    LaunchedEffect(isFullscreen) {
+        if (!isFullscreen) orientationLock = OrientationLock.FollowSensor
+    }
 
-    // 系统栏随全屏状态联动：全屏沉浸（滑动呼出），非全屏显示系统栏
-    DisposableEffect(isFullscreen) {
+    /**
+     * 「返回类」出口（系统返回键 / Esc / 左上角返回箭头）：**保证能出去**。
+     * 有全屏可退 → 退全屏留在播放页；否则 → 离开播放页。
+     */
+    fun exitFullscreenOrLeave() {
+        if (orientationLock != OrientationLock.Landscape) {
+            navigator.popBackStack()
+            return
+        }
+        // 用户点过「全屏」：这一次返回用于退出全屏（请求竖向，成功与否都不吞掉下次返回）
+        setFullscreen(false)
+    }
+
+    /**
+     * 「切换类」出口（控制层右下角的「全屏切换」按钮）：**只表达意图，不带走用户**。
+     *
+     * 它与返回键的区别正是"用户想不想离开这一页"：点全屏图标的人想换一种观看版式，
+     * 不想被丢回媒体库。所以在没有竖向可退的终端上（平板自然方向就是横向）
+     * 它只是无从生效——保持现状即可，绝不能用 popBackStack 把用户弹出播放页。
+     * 真正的离页出口始终由返回键承担，因此这里不会造成"出不去"。
+     */
+    fun requestExitFullscreen() {
+        setFullscreen(false)
+    }
+    BackHandler(enabled = isFullscreen) { exitFullscreenOrLeave() }
+
+    // 系统栏随沉浸状态联动：手机式横屏沉浸（滑动呼出），其余形态显示系统栏
+    DisposableEffect(isImmersive) {
         val window = activity?.window
         val controller = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
-        if (isFullscreen) {
+        if (isImmersive) {
             controller?.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             controller?.hide(WindowInsetsCompat.Type.systemBars())
@@ -643,13 +759,21 @@ fun PlayerScreen(
 
     // ---- 设计稿播放器交互面（sheet / fs-panel / 仅听音频 / 循环模式）----
     val ink0 = LocalNpInk.current
-    val toast = rememberNpToastState()
     val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
     val loopMode by session.loopMode.collectAsStateWithLifecycle()
-    var speedSheetVisible by remember { mutableStateOf(false) }
+    var speedPickerVisible by remember { mutableStateOf(false) }
     var subtitleSheetVisible by remember { mutableStateOf(false) }
     var moreSheetVisible by remember { mutableStateOf(false) }
     var fsPanelVisible by remember { mutableStateOf(false) }
+
+    /** 选倍速：落到播放器 + 持久化 + 回执，并收起选择条 */
+    fun pickSpeed(preset: Float) {
+        player.setSpeed(preset)
+        scope.launch { settings.setPlaybackSpeed(preset) }
+        toast.show("倍速：" + speedLabel(preset))
+        speedPickerVisible = false
+    }
+
     // C18：文件信息卡（标题/大小/分辨率/编码/文件夹/时长 的真实值）
     var fileInfoVisible by remember { mutableStateOf(false) }
     // C18：允许屏幕截图（FLAG_SECURE 取反）。默认关闭 = 允许截图，
@@ -728,12 +852,11 @@ fun PlayerScreen(
     }
 
     // ================= 形态分派（E48 余项 / §13.4）=================
-    // 三种形态各有一套版式，但共用同一份会话状态与同一套控制件：
-    //   ① 横屏全屏（手机横置）——整页视频 + 覆盖式控制层
-    //   ② 类 PC 嵌入（平板横屏 / 桌面窗口）——视频嵌入 + 控制层底部集中、常驻
-    //   ③ 竖屏（手机竖持 / 平板竖屏）——上视频 + 下信息区（B 站式）
+    // 两种形态各有一套版式，但共用同一份会话状态与同一套控制件：
+    //   ① 横向全屏（手机横置 + 平板横屏 / 桌面窗口）——整页视频 + 覆盖式控制层
+    //   ② 竖屏（手机竖持 / 平板竖屏）——上视频 + 下信息区（B 站式）
     //
-    // C19：键盘（空格/←→/Esc）从根节点统一处理——三种形态都吃到，
+    // C19：键盘（空格/←→/Esc）从根节点统一处理——各形态都吃到，
     // 类 PC 形态（外接键盘/桌面窗口）尤其需要。onPreviewKeyEvent 取 KeyUp，
     // 免得长按被系统重复投递成连点。
     //
@@ -763,7 +886,8 @@ fun PlayerScreen(
                     }
                     Key.Escape -> {
                         // Esc 逐层退：全屏 → 退全屏；否则 → 返回媒体库
-                        if (isFullscreen) setFullscreen(false) else navigator.popBackStack()
+                        // 与返回键同一出口：退不掉全屏时直接离开播放页，不做空转
+                        if (isFullscreen) exitFullscreenOrLeave() else navigator.popBackStack()
                         true
                     }
                     else -> false
@@ -785,13 +909,16 @@ fun PlayerScreen(
                     favorited = !favorited
                     toast.show(if (favorited) "已加入收藏" else "已取消收藏")
                 },
-                onOpenSpeed = { speedSheetVisible = true },
+                onOpenSpeed = { speedPickerVisible = !speedPickerVisible },
+                speed = speed,
+                speedPickerVisible = speedPickerVisible,
+                onPickSpeed = ::pickSpeed,
                 onOpenEpisodes = { episodePanelVisible = true },
                 speedText = speedText,
             )
         } else {
         when {
-            // ---------------- 形态①：横屏全屏 ----------------
+            // ---------------- 形态①：横向全屏（手机横屏 + 平板横屏 / 类 PC）----------------
             isFullscreen -> {
                 // 版式拆成局部组合函数：内联进 PlayerScreen 会把该方法撑到
                 // 253 寄存器 / 18256 码元，ART 校验器直接 VerifyError 拒绝加载
@@ -855,76 +982,43 @@ fun PlayerScreen(
                         text = gestureHint,
                         modifier = Modifier.align(Alignment.Center),
                     )
-                    // 右上 fs-opt 胶囊组（设计稿 .fs-opt）：当前倍速 / ⋯（选项抽屉）/ 选集。
-                    // **跟随控制层显隐**——它是顶栏的一部分，不是常驻悬浮物：控制层收起时
-                    // 画面要干净（实测此前常驻，暂停/播放时都挂在右上角，与顶栏不同步）。
-                    AnimatedVisibility(
-                        visible = controlsVisible,
-                        enter = fadeIn(animationSpec = silkSpring(Motion.Overlay)) +
-                            slideInVertically(animationSpec = silkSpring(Motion.Overlay)) { -it },
-                        exit = fadeOut(animationSpec = silkSpring(Motion.OverlayExit)) +
-                            slideOutVertically(animationSpec = silkSpring(Motion.OverlayExit)) { -it },
-                        modifier = Modifier.align(Alignment.TopEnd),
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .windowInsetsPadding(
-                                    WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.End),
-                                )
-                                .padding(16.dp)
-                                .clip(RoundedCornerShape(NpRadius.button))
-                                .background(Color.Black.copy(alpha = 0.45f))
-                                .padding(horizontal = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(9.dp))
-                                    .clickable { speedSheetVisible = true }
-                                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                            ) {
-                                Text(
-                                    text = speedText,
-                                    style = NpMonoSmall,
-                                    color = if (speed != 1f) MaterialTheme.colorScheme.primary else Color.White,
-                                )
-                            }
-                            androidx.compose.material3.IconButton(onClick = { fsPanelVisible = !fsPanelVisible }) {
-                                androidx.compose.material3.Icon(
-                                    imageVector = NpIcon.Dots,
-                                    contentDescription = "播放选项",
-                                    tint = Color.White,
-                                )
-                            }
-                            if (queue.size > 1) {
-                                androidx.compose.material3.IconButton(onClick = { episodePanelVisible = true }) {
-                                    androidx.compose.material3.Icon(
-                                        imageVector = NpIcon.List,
-                                        contentDescription = "选集",
-                                        tint = Color.White,
-                                    )
-                                }
-                            }
-                        }
-                    }
                     PlayerTopBar(
                         visible = controlsVisible,
                         title = headerTitle,
                         // 全屏形态的返回 = **退出全屏**（与系统返回键、Esc 同一语义），
-                        // 不是退出播放页——此前直接 popBackStack，点左上角会一路回到首页。
+                        // 不是退出播放页。走与返回键相同的出口：设备自然方向就是横向时
+                        // （平板）没有"退出全屏"这一步，直接离开播放页——否则这一点会变成
+                        // 一个永远点不动的死键。
                         onBack = {
-                            setFullscreen(false)
+                            exitFullscreenOrLeave()
                             controlsVisible = true
                         },
                         applyInsets = true,
+                        // 右上：⋯（选项抽屉）/ 选集。**图标直接摆在顶栏里**，和底栏同一
+                        // 材质、同一条 scrim、随控制层一起显隐——原先它们套在一个圆角
+                        // 黑框里，像个独立贴在画面上的悬浮物。倍速不在这里出现：
+                        // 底栏已有倍速钮，右上角再放一份是重复。
+                        trailing = {
+                            BarCtlButton(
+                                icon = NpIcon.Dots,
+                                contentDescription = "播放选项",
+                                onClick = { fsPanelVisible = !fsPanelVisible },
+                                active = fsPanelVisible,
+                            )
+                            if (queue.size > 1) {
+                                BarCtlButton(
+                                    icon = NpIcon.List,
+                                    contentDescription = "选集",
+                                    onClick = { episodePanelVisible = true },
+                                )
+                            }
+                        },
                         modifier = Modifier.align(Alignment.TopCenter),
                     )
                     PlayerBottomControls(
                         visible = controlsVisible,
-                        onVideo = true,
                         applyInsets = true,
                         showTransport = true,
-                        showFullscreen = true,
                         positionMs = positionMs,
                         durationMs = durationMs,
                         dragPositionMs = dragPositionMs,
@@ -939,15 +1033,21 @@ fun PlayerScreen(
                         isPlaying = state == PlaybackState.Playing,
                         hasPrevious = hasPrevious,
                         hasNext = hasNext,
-                        speedActive = speed != 1f,
+                        speed = speed,
+                        speedPickerVisible = speedPickerVisible,
+                        onToggleSpeedPicker = {
+                            controlsVisible = true
+                            speedPickerVisible = !speedPickerVisible
+                        },
+                        onPickSpeed = ::pickSpeed,
                         subtitleLoaded = subtitleLoaded,
                         onPrevious = { session.previous() },
                         onTogglePlay = ::togglePlay,
                         onNext = { session.next() },
-                        onCycleSpeed = { speedSheetVisible = true },
                         onPickSubtitle = { subtitleSheetVisible = true },
                         onToggleFullscreen = {
-                            setFullscreen(false)
+                            // 切换类出口：只换版式，不把用户弹出播放页
+                            requestExitFullscreen()
                             controlsVisible = true
                         },
                         modifier = Modifier.align(Alignment.BottomCenter),
@@ -974,7 +1074,11 @@ fun PlayerScreen(
                                 NpLoopMode.SHUFFLE -> "随机播放"
                             })
                         },
-                        onSpeed = { speedSheetVisible = true },
+                        onSpeed = {
+                            fsPanelVisible = false
+                            controlsVisible = true
+                            speedPickerVisible = true
+                        },
                         onSubtitle = { subtitleSheetVisible = true },
                         onEpisodes = { episodePanelVisible = true; fsPanelVisible = false },
                         onBrightness = ::setBrightnessPercent,
@@ -991,109 +1095,7 @@ fun PlayerScreen(
                 FullscreenForm()
             }
 
-            // ---------------- 形态②：类 PC 嵌入（§13.4） ----------------
-            // 不沉浸、不旋转：系统栏常驻；控制层从"顶部+底部"改为**底部集中**
-            // （鼠标/触控皆近），且不自动隐藏（见上方 autoHide 的 isDesktopLike 分支）。
-            isDesktopLike -> {
-                @Composable fun DesktopForm() {
-                // C13（设计稿 tier-* 的桌面版式）：黑底铺满整窗，**内容列**（视频 + 控制层）
-                // 收在 760dp 内并居中——超宽窗口里把 16:9 视频拉满整屏会让控制层与画面
-                // 相距过远（鼠标要跨越整个屏幕才能碰到进度条），760dp 是"电影感"与
-                // "操作可达"的平衡点。黑底留在外层：两侧是影院式留边，不是空白。
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .background(Color.Black),
-                    contentAlignment = Alignment.TopCenter,
-                ) {
-                Column(
-                    modifier = Modifier
-                        .widthIn(max = 760.dp)
-                        .fillMaxSize()
-                        .safeDrawingPadding(),
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                    ) {
-                        VideoStage(
-                            player = player,
-                            videoAspectRatio = videoAspectRatio,
-                            cues = cues,
-                            overlays = overlays,
-                            overlayMedia = overlayMedia,
-                            navigator = navigator,
-                            state = state,
-                            userDragging = userDragging,
-                            modifier = Modifier.fillMaxSize(),
-                        )
-                        CenterResumeButton(
-                            visible = state == PlaybackState.Paused && !userDragging,
-                            onPlay = ::togglePlay,
-                            modifier = Modifier.align(Alignment.Center),
-                        )
-                        if (state == PlaybackState.Ended && mediaOpened) {
-                            EndedOverlay(
-                                onReplay = {
-                                    player.seekTo(0L)
-                                    player.play()
-                                },
-                                hasNext = queueIndex >= 0 && queueIndex < queue.size - 1,
-                                onNext = { session.next() },
-                                modifier = Modifier.align(Alignment.Center),
-                            )
-                        }
-                        SpeedPill(speed = speed, modifier = Modifier.align(Alignment.TopStart))
-                        GestureHintPill(
-                            text = gestureHint,
-                            modifier = Modifier.align(Alignment.Center),
-                        )
-                        PlayerTopBar(
-                            visible = true,
-                            title = headerTitle,
-                            onBack = navigator::popBackStack,
-                            applyInsets = false,
-                            modifier = Modifier.align(Alignment.TopCenter),
-                        )
-                    }
-                    PlayerBottomControls(
-                        visible = true,
-                        onVideo = false,
-                        applyInsets = false,
-                        showTransport = true,
-                        showFullscreen = false,
-                        positionMs = positionMs,
-                        durationMs = durationMs,
-                        dragPositionMs = dragPositionMs,
-                        userDragging = userDragging,
-                        displayPosition = displayPosition,
-                        maxPosition = maxPosition,
-                        onScrubChange = {
-                            onScrubStart()
-                            onScrubProgress(it)
-                        },
-                        onScrubEnd = ::onScrubEnd,
-                        isPlaying = state == PlaybackState.Playing,
-                        hasPrevious = hasPrevious,
-                        hasNext = hasNext,
-                        speedActive = speed != 1f,
-                        subtitleLoaded = subtitleLoaded,
-                        onPrevious = { session.previous() },
-                        onTogglePlay = ::togglePlay,
-                        onNext = { session.next() },
-                        onCycleSpeed = { speedSheetVisible = true },
-                        onPickSubtitle = { subtitleSheetVisible = true },
-                        onToggleFullscreen = {},
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-                }
-                }
-                DesktopForm()
-            }
-
-            // ---------------- 形态③：竖屏（上视频 + 下信息区，§4.1）----------------
+            // ---------------- 形态②：竖屏（上视频 + 下信息区，§4.1）----------------
             // 不使用沉浸（系统状态栏常驻）；顶部**常驻玻璃 playerbar**（设计稿
             // `.playerbar`：返回 + 标题 + mono 副标题，不随控制层自动隐藏），
             // 控制层只在视频区内自动隐；标题/元数据/主操作/选集在下方信息区，可滚动。
@@ -1204,10 +1206,8 @@ fun PlayerScreen(
                             // 顶栏已上移为常驻 playerbar，舞台内不再放返回键
                             PlayerBottomControls(
                                 visible = controlsVisible,
-                                onVideo = true,
                                 applyInsets = false,
                                 showTransport = false,
-                                showFullscreen = true,
                                 positionMs = positionMs,
                                 durationMs = durationMs,
                                 dragPositionMs = dragPositionMs,
@@ -1222,12 +1222,17 @@ fun PlayerScreen(
                                 isPlaying = state == PlaybackState.Playing,
                                 hasPrevious = hasPrevious,
                                 hasNext = hasNext,
-                                speedActive = speed != 1f,
+                                speed = speed,
+                                speedPickerVisible = speedPickerVisible,
+                                onToggleSpeedPicker = {
+                                    controlsVisible = true
+                                    speedPickerVisible = !speedPickerVisible
+                                },
+                                onPickSpeed = ::pickSpeed,
                                 subtitleLoaded = subtitleLoaded,
                                 onPrevious = { session.previous() },
                                 onTogglePlay = ::togglePlay,
                                 onNext = { session.next() },
-                                onCycleSpeed = { speedSheetVisible = true },
                                 onPickSubtitle = { subtitleSheetVisible = true },
                                 onToggleFullscreen = {
                                     setFullscreen(true)
@@ -1519,59 +1524,8 @@ fun PlayerScreen(
             )
         }
 
-        // ---- 底部弹层（设计稿 .sheet 体系）：倍速 / 字幕 / 播放选项 ----
-        if (speedSheetVisible) {
-            NpSheet(
-                onDismiss = { speedSheetVisible = false },
-                title = "播放倍速",
-            ) {
-                // 设计稿 `.speeds`：3 列网格，`@media(max-width:400px)` 落到 2 列
-                val speedColumns = if (LocalConfiguration.current.screenWidthDp <= 400) 2 else 3
-                SPEED_PRESETS.chunked(speedColumns).forEach { row ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        row.forEach { preset ->
-                            val on = kotlin.math.abs(preset - speed) < 0.001f
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .heightIn(min = 44.dp)
-                                    .clip(RoundedCornerShape(11.dp))
-                                    .background(if (on) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                    .border(
-                                        1.dp,
-                                        if (on) MaterialTheme.colorScheme.primary else ink0.border,
-                                        RoundedCornerShape(11.dp),
-                                    )
-                                    .npPressScale(onClick = {
-                                        player.setSpeed(preset)
-                                        scope.launch { settings.setPlaybackSpeed(preset) }
-                                        toast.show("倍速：" + speedLabel(preset))
-                                        speedSheetVisible = false
-                                    }, pressedScale = 0.97f)
-                                    .padding(vertical = 12.dp),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(
-                                    text = speedLabel(preset),
-                                    style = NpMono,
-                                    color = if (on) MaterialTheme.colorScheme.onPrimary else ink0.fg,
-                                )
-                            }
-                        }
-                        repeat(speedColumns - row.size) { Spacer(modifier = Modifier.weight(1f)) }
-                    }
-                }
-                // ExoPlayer 经 Sonic 变速默认保音调（PlaybackService.setEnableAudioTrackPlaybackParams）
-                NpOptRow(
-                    text = "保持音调不变",
-                    selected = true,
-                    onClick = { toast.show("当前引擎默认保持音调") },
-                )
-            }
-        }
+        // ---- 底部弹层（设计稿 .sheet 体系）：字幕 / 播放选项 ----
+        // 倍速不在这里：它改成贴在倍速钮上方的选择条（SpeedChoiceRow）。
         if (subtitleSheetVisible) {
             NpSheet(
                 onDismiss = { subtitleSheetVisible = false },
@@ -1671,7 +1625,8 @@ fun PlayerScreen(
                     add(
                         QuickTileSpec(NpIcon.Speed, "倍速") {
                             moreSheetVisible = false
-                            speedSheetVisible = true
+                            controlsVisible = true
+                            speedPickerVisible = true
                         },
                     )
                     // 库侧删除尚未落地（与收藏同一批数据层缺口），
@@ -2075,14 +2030,10 @@ private fun PlaybackThumb(dragging: Boolean) {
 /** B 站式进度条轨道：细线圆角，拖动时略加粗；fill 比例与滑块位置由 Slider 保证一致 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PlaybackTrack(sliderState: SliderState, dragging: Boolean, onVideo: Boolean = true) {
+private fun PlaybackTrack(sliderState: SliderState, dragging: Boolean) {
     val activeColor = MaterialTheme.colorScheme.primary
-    // 压在视频上：未播段用白色半透明；独立面板上：用主题描边色（浅色主题下白线会消失）
-    val inactiveColor = if (onVideo) {
-        Color.White.copy(alpha = 0.28f)
-    } else {
-        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.20f)
-    }
+    // 压在视频上：未播段用白色半透明
+    val inactiveColor = Color.White.copy(alpha = 0.28f)
     val range = sliderState.valueRange.endInclusive - sliderState.valueRange.start
     val fraction = if (range > 0f) {
         ((sliderState.value - sliderState.valueRange.start) / range).coerceIn(0f, 1f)
@@ -2119,7 +2070,6 @@ private fun PlaybackTrackRow(
     displayPosition: Float,
     maxPosition: Float,
     userDragging: Boolean,
-    onVideo: Boolean,
     onScrubChange: (Float) -> Unit,
     onScrubEnd: () -> Unit,
     modifier: Modifier = Modifier,
@@ -2131,7 +2081,7 @@ private fun PlaybackTrackRow(
         valueRange = 0f..maxPosition,
         thumb = { PlaybackThumb(dragging = userDragging) },
         track = { sliderState ->
-            PlaybackTrack(sliderState, dragging = userDragging, onVideo = onVideo)
+            PlaybackTrack(sliderState, dragging = userDragging)
         },
         modifier = modifier.fillMaxWidth(),
     )
@@ -2150,12 +2100,8 @@ private fun BarCtlButton(
     icon: ImageVector,
     contentDescription: String,
     onClick: () -> Unit,
-    onVideo: Boolean,
     active: Boolean = false,
 ) {
-    // 压在视频上取白（设计稿 `.bar-ctl{color:#fff}`）；独立面板变体取主题字色，
-    // 否则白图标落在浅色面板上会整片消失。
-    val idleTint = if (onVideo) Color.White else MaterialTheme.colorScheme.onSurface
     Box(
         modifier = Modifier
             .size(38.dp)
@@ -2166,24 +2112,141 @@ private fun BarCtlButton(
         Icon(
             imageVector = icon,
             contentDescription = contentDescription,
-            tint = if (active) MaterialTheme.colorScheme.primary else idleTint,
+            tint = if (active) MaterialTheme.colorScheme.primary else Color.White,
             modifier = Modifier.size(20.dp),
         )
     }
 }
 
 /**
- * 底部控制层（进度 + 传输件），两种材质变体：
- * - [onVideo] = true：压在视频上，用上下渐变 scrim + 白字（横屏全屏 / 竖屏视频区）；
- * - [onVideo] = false：独立面板（类 PC 底部集中区），用 surface2 实底 + 顶边高光 + 主题字色。
+ * 连播传输键（上一集 / 播放暂停 / 下一集，§8.2）。
+ *
+ * 无上/下一集时按钮**禁用而非隐藏**：位置固定，避免误触。按钮走 session
+ * （与迷你条、通知栏同一份队列状态）。倍速/字幕/选集不在这里重复——它们归控制条。
+ */
+@Composable
+private fun TransportGroup(
+    isPlaying: Boolean,
+    hasPrevious: Boolean,
+    hasNext: Boolean,
+    onPrevious: () -> Unit,
+    onTogglePlay: () -> Unit,
+    onNext: () -> Unit,
+) {
+    val tint = Color.White
+    val disabledTint = tint.copy(alpha = 0.35f)
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        IconButton(
+            onClick = onPrevious,
+            enabled = hasPrevious,
+            modifier = Modifier.size(NpDimens.transportButton),
+        ) {
+            Icon(
+                imageVector = NpIcon.SkipPrevious,
+                contentDescription = "上一集",
+                tint = if (hasPrevious) tint else disabledTint,
+            )
+        }
+        AnimatedContent(
+            targetState = isPlaying,
+            transitionSpec = {
+                (fadeIn(animationSpec = silkSpring(Motion.Field)) +
+                    scaleIn(initialScale = 0.7f))
+                    .togetherWith(
+                        fadeOut(animationSpec = silkSpring(Motion.Field)) +
+                            scaleOut(targetScale = 0.7f),
+                    )
+            },
+            label = "playPause",
+        ) { playing ->
+            IconButton(
+                onClick = onTogglePlay,
+                modifier = Modifier.size(NpDimens.transportButton),
+            ) {
+                if (playing) {
+                    PauseGlyph(tint = tint)
+                } else {
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = "播放",
+                        tint = tint,
+                        modifier = Modifier.size(30.dp),
+                    )
+                }
+            }
+        }
+        IconButton(
+            onClick = onNext,
+            enabled = hasNext,
+            modifier = Modifier.size(NpDimens.transportButton),
+        ) {
+            Icon(
+                imageVector = NpIcon.SkipNext,
+                contentDescription = "下一集",
+                tint = if (hasNext) tint else disabledTint,
+            )
+        }
+    }
+}
+
+/**
+ * 倍速选择条：点倍速钮后**贴在钮上方**列出可选倍速。
+ *
+ * 不用底部弹层——调速只有一排选项，弹层会把整个画面盖住，用户还得把手指
+ * 挪到屏幕底下。容器用主题实底（不是半透明），这样压在视频上、
+ * 以及浅色主题的仅听音频页里都读得清。
+ */
+@Composable
+internal fun SpeedChoiceRow(
+    speed: Float,
+    onPick: (Float) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ink = LocalNpInk.current
+    Column(
+        modifier = modifier
+            .clip(RoundedCornerShape(NpRadius.button))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .border(1.dp, ink.border, RoundedCornerShape(NpRadius.button))
+            .padding(6.dp),
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            SPEED_PRESETS.forEach { preset ->
+                val on = kotlin.math.abs(preset - speed) < 0.001f
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(if (on) MaterialTheme.colorScheme.primary else Color.Transparent)
+                        .clickable { onPick(preset) }
+                        .padding(horizontal = 9.dp, vertical = 7.dp),
+                ) {
+                    Text(
+                        text = speedLabel(preset),
+                        style = NpMono.copy(fontSize = 12.sp),
+                        color = if (on) MaterialTheme.colorScheme.onPrimary else ink.fg,
+                    )
+                }
+            }
+        }
+        // ExoPlayer 经 Sonic 变速默认保音调（PlaybackService.setEnableAudioTrackPlaybackParams）
+        Text(
+            text = "变速保持音调",
+            style = NpMono.copy(fontSize = 11.sp),
+            color = ink.muted,
+            modifier = Modifier.padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
+        )
+    }
+}
+
+/**
+ * 底部控制层（进度 + 传输件）：压在视频上，用上下渐变 scrim + 白字
+ * （横向全屏与竖屏视频区共用）。
  */
 @Composable
 private fun PlayerBottomControls(
     visible: Boolean,
-    onVideo: Boolean,
     applyInsets: Boolean,
     showTransport: Boolean,
-    showFullscreen: Boolean,
     positionMs: Long,
     durationMs: Long,
     dragPositionMs: Float,
@@ -2195,23 +2258,19 @@ private fun PlayerBottomControls(
     isPlaying: Boolean,
     hasPrevious: Boolean,
     hasNext: Boolean,
-    speedActive: Boolean,
+    speed: Float,
+    speedPickerVisible: Boolean,
+    onToggleSpeedPicker: () -> Unit,
+    onPickSpeed: (Float) -> Unit,
     subtitleLoaded: Boolean,
     onPrevious: () -> Unit,
     onTogglePlay: () -> Unit,
     onNext: () -> Unit,
-    onCycleSpeed: () -> Unit,
     onPickSubtitle: () -> Unit,
     onToggleFullscreen: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val ink = LocalNpInk.current
-    val panelColor = MaterialTheme.colorScheme.surfaceContainerHigh
-    val idleColor = if (onVideo) {
-        Color.White.copy(alpha = 0.9f)
-    } else {
-        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f)
-    }
+    val idleColor = Color.White.copy(alpha = 0.9f)
     val content: @Composable () -> Unit = {
         Column(
             modifier = Modifier
@@ -2229,180 +2288,134 @@ private fun PlayerBottomControls(
                 )
                 .padding(horizontal = NpSpace.lg),
         ) {
-            if (!onVideo) {
-                // 面板变体：顶边 1px 高光（玻璃面板的核心那条线）
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(1.dp)
-                        .background(ink.border),
-                )
-            }
             // 行 1：进度条独占一行（设计稿 `.track`）
             PlaybackTrackRow(
                 displayPosition = displayPosition,
                 maxPosition = maxPosition,
                 userDragging = userDragging,
-                onVideo = onVideo,
                 onScrubChange = onScrubChange,
                 onScrubEnd = onScrubEnd,
                 modifier = Modifier.padding(top = 6.dp),
             )
-            // 行 2：时间行（设计稿 `.time-row`）——
-            // 当前时间 | 撑开 | 字幕钮 · 倍速钮 · 总时长 · 全屏钮。
-            // 拖动中时间码变 accent 实底胶囊，明确"这是目标位置"。
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = formatTimestamp(if (userDragging) dragPositionMs.toLong() else positionMs),
-                    // 设计稿 `.time-row{font-size:12px}`——比 NpMono 默认 13sp 小一号，
-                    // 与下方 pinfo 的 mono 行视觉同级（时间码不该比元数据更抢眼）。
-                    style = NpMono.copy(fontSize = 12.sp),
-                    color = if (userDragging) MaterialTheme.colorScheme.onPrimary else idleColor,
-                    modifier = if (userDragging) {
-                        Modifier
-                            .clip(RoundedCornerShape(NpRadius.chip))
-                            .background(MaterialTheme.colorScheme.primary)
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    } else {
-                        Modifier
-                    },
-                )
-                Box(modifier = Modifier.weight(1f))
-                BarCtlButton(
-                    icon = NpIcon.Subtitle,
-                    contentDescription = "字幕",
-                    onClick = onPickSubtitle,
-                    onVideo = onVideo,
-                    active = subtitleLoaded,
-                )
-                BarCtlButton(
-                    icon = NpIcon.Speed,
-                    contentDescription = "倍速播放",
-                    onClick = onCycleSpeed,
-                    onVideo = onVideo,
-                    active = speedActive,
-                )
-                Text(
-                    text = formatTimestamp(durationMs),
-                    style = NpMono,
-                    color = idleColor,
-                )
-                if (showFullscreen) {
-                    BarCtlButton(
-                        icon = NpIcon.Expand,
-                        contentDescription = "全屏切换",
-                        onClick = onToggleFullscreen,
-                        onVideo = onVideo,
-                    )
-                }
-            }
-            if (showTransport) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(bottom = 12.dp),
-                    horizontalArrangement = Arrangement.Center,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    // 上一集 / 播放暂停 / 下一集——连播的操作面（§8.2）。
-                    // 无上/下一集时按钮禁用而非隐藏：位置固定，避免误触。
-                    // 按钮走 session（与迷你条、通知栏同一份队列状态）。
-                    // 倍速/字幕/选集不再重复出现在这里——它们已归时间行与选集面板。
-                    val tint = if (onVideo) Color.White else MaterialTheme.colorScheme.onSurface
-                    val disabledTint = tint.copy(alpha = 0.35f)
-                    IconButton(
-                        onClick = onPrevious,
-                        enabled = hasPrevious,
-                        modifier = Modifier.size(NpDimens.transportButton),
-                    ) {
-                        Icon(
-                            imageVector = NpIcon.SkipPrevious,
-                            contentDescription = "上一集",
-                            tint = if (hasPrevious) tint else disabledTint,
-                        )
-                    }
-                    AnimatedContent(
-                        targetState = isPlaying,
-                        transitionSpec = {
-                            (fadeIn(animationSpec = silkSpring(Motion.Field)) +
-                                scaleIn(initialScale = 0.7f))
-                                .togetherWith(
-                                    fadeOut(animationSpec = silkSpring(Motion.Field)) +
-                                        scaleOut(targetScale = 0.7f),
-                                )
-                        },
-                        label = "playPause",
-                    ) { playing ->
-                        IconButton(
-                            onClick = onTogglePlay,
-                            modifier = Modifier.size(NpDimens.transportButton),
-                        ) {
-                            if (playing) {
-                                PauseGlyph(tint = tint)
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Filled.PlayArrow,
-                                    contentDescription = "播放",
-                                    tint = tint,
-                                    modifier = Modifier.size(30.dp),
-                                )
-                            }
-                        }
-                    }
-                    IconButton(
-                        onClick = onNext,
-                        enabled = hasNext,
-                        modifier = Modifier.size(NpDimens.transportButton),
-                    ) {
-                        Icon(
-                            imageVector = NpIcon.SkipNext,
-                            contentDescription = "下一集",
-                            tint = if (hasNext) tint else disabledTint,
-                        )
-                    }
-                }
-            } else {
-                Box(modifier = Modifier.height(NpSpace.sm))
-            }
-        }
-    }
-
-    Box(modifier = modifier) {
-        if (onVideo) {
+            // 倍速选择条：贴在倍速钮上方展开（替代原底部弹层——调速不该
+            // 把整个画面盖住，也不该让用户的手从控制条跑到屏幕底下）。
             AnimatedVisibility(
-                visible = visible,
+                visible = speedPickerVisible,
                 enter = fadeIn(animationSpec = silkSpring(Motion.Overlay)) +
                     slideInVertically(animationSpec = silkSpring(Motion.Overlay)) { it },
                 exit = fadeOut(animationSpec = silkSpring(Motion.OverlayExit)) +
                     slideOutVertically(animationSpec = silkSpring(Motion.OverlayExit)) { it },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f)),
-                        ),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    SpeedChoiceRow(
+                        speed = speed,
+                        onPick = onPickSpeed,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+            }
+            // 行 2：控制条——时间码 | 居中的传输键 | 字幕·倍速·总时长·全屏。
+            // **三组共用一条垂直中心线**：传输键原先自成一排，比右侧图标低半格，
+            // 播放栏因此白白多占一行高（横屏上视频本就吃紧，控制层越薄越好）。
+            // 左右两个等权槽把中间那组顶到真居中——横向窗口最窄也有 ~500dp，
+            // 容得下右侧图标组，不会出现等权槽不够宽而裁切的情况。
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = formatTimestamp(if (userDragging) dragPositionMs.toLong() else positionMs),
+                        // 设计稿 `.time-row{font-size:12px}`——比 NpMono 默认 13sp 小一号，
+                        // 与下方 pinfo 的 mono 行视觉同级（时间码不该比元数据更抢眼）。
+                        style = NpMono.copy(fontSize = 12.sp),
+                        color = if (userDragging) MaterialTheme.colorScheme.onPrimary else idleColor,
+                        modifier = if (userDragging) {
+                            Modifier
+                                .clip(RoundedCornerShape(NpRadius.chip))
+                                .background(MaterialTheme.colorScheme.primary)
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        } else {
+                            Modifier
+                        },
+                    )
+                }
+                if (showTransport) {
+                    TransportGroup(
+                        isPlaying = isPlaying,
+                        hasPrevious = hasPrevious,
+                        hasNext = hasNext,
+                        onPrevious = onPrevious,
+                        onTogglePlay = onTogglePlay,
+                        onNext = onNext,
+                    )
+                }
+                Box(
+                    modifier = Modifier.weight(1f),
+                    contentAlignment = Alignment.CenterEnd,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        BarCtlButton(
+                            icon = NpIcon.Subtitle,
+                            contentDescription = "字幕",
+                            onClick = onPickSubtitle,
+                            active = subtitleLoaded,
+                        )
+                        BarCtlButton(
+                            icon = NpIcon.Speed,
+                            contentDescription = "倍速播放",
+                            onClick = onToggleSpeedPicker,
+                            active = speed != 1f || speedPickerVisible,
+                        )
+                        Text(
+                            text = formatTimestamp(durationMs),
+                            style = NpMono,
+                            color = idleColor,
+                        )
+                        BarCtlButton(
+                            icon = NpIcon.Expand,
+                            contentDescription = "全屏切换",
+                            onClick = onToggleFullscreen,
+                        )
+                    }
+                }
+            }
+            Box(modifier = Modifier.height(NpSpace.sm))
+        }
+    }
+
+    Box(modifier = modifier) {
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(animationSpec = silkSpring(Motion.Overlay)) +
+                slideInVertically(animationSpec = silkSpring(Motion.Overlay)) { it },
+            exit = fadeOut(animationSpec = silkSpring(Motion.OverlayExit)) +
+                slideOutVertically(animationSpec = silkSpring(Motion.OverlayExit)) { it },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.65f)),
                     ),
-            ) {
-                content()
-            }
-        } else {
-            // 面板变体常驻（类 PC：控制层不自动隐藏）
-            Box(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .background(panelColor)
-                    .npTopHairline(ink),
-            ) {
-                content()
-            }
+                ),
+        ) {
+            content()
         }
     }
 }
 
-/** 顶部控制层：返回 + 标题，压在视频上（渐变 scrim + 白字） */
+/**
+ * 顶部控制层：返回 + 标题（+ 可选右侧图标），压在视频上（渐变 scrim + 白字）。
+ *
+ * [trailing] 的图标与底栏右端图标**同一条竖基线**（都用 NpSpace.lg 收边），
+ * 这样上下两栏读起来是一套控件，而不是两块各自为政的悬浮物。
+ */
 @Composable
 private fun PlayerTopBar(
     visible: Boolean,
@@ -2410,6 +2423,7 @@ private fun PlayerTopBar(
     onBack: () -> Unit,
     applyInsets: Boolean,
     modifier: Modifier = Modifier,
+    trailing: @Composable () -> Unit = {},
 ) {
     AnimatedVisibility(
         visible = visible,
@@ -2437,7 +2451,7 @@ private fun PlayerTopBar(
                         Modifier
                     },
                 )
-                .padding(horizontal = 8.dp),
+                .padding(start = 8.dp, end = NpSpace.lg),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack, modifier = Modifier.size(NpDimens.transportButton)) {
@@ -2455,6 +2469,7 @@ private fun PlayerTopBar(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            trailing()
         }
     }
 }
@@ -2699,7 +2714,7 @@ private fun PlayingBars(modifier: Modifier = Modifier) {
 
 /**
  * 视频舞台：画面 + 字幕层 + 覆盖层扩展点 + 缓冲指示。
- * 三种形态共用——形态差异只在"舞台外"的版式，不重复实现播放链路。
+ * 两种形态共用——形态差异只在"舞台外"的版式，不重复实现播放链路。
  */
 @Composable
 private fun VideoStage(
@@ -2714,11 +2729,16 @@ private fun VideoStage(
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        // 视频画面：按视频分辨率比例渲染，黑边交给布局而非拉伸
+        // 视频画面：按视频分辨率比例渲染，黑边交给布局而非拉伸。
+        // 竖向片（比例 < 1）改「先匹配高度」：横向窗口里默认的先宽后高会被
+        // 容器高度上限截断，宽度却仍按容器给，画面被压扁（平板横屏放 9:16 实测如此）。
         Box(
             modifier = Modifier.then(
                 if (videoAspectRatio > 0f) {
-                    Modifier.aspectRatio(videoAspectRatio)
+                    Modifier.aspectRatio(
+                        videoAspectRatio,
+                        matchHeightConstraintsFirst = videoAspectRatio < 1f,
+                    )
                 } else {
                     Modifier.fillMaxSize()
                 },

@@ -72,6 +72,9 @@ fun AudioOnlyScreen(
     favorited: Boolean = false,
     onToggleFavorite: () -> Unit = {},
     onOpenSpeed: () -> Unit = {},
+    speed: Float = 1f,
+    speedPickerVisible: Boolean = false,
+    onPickSpeed: (Float) -> Unit = {},
     onOpenEpisodes: () -> Unit = {},
     speedText: String = "1.0x",
     modifier: Modifier = Modifier,
@@ -304,7 +307,7 @@ fun AudioOnlyScreen(
                     ToolChip(
                         icon = NpIcon.Speed,
                         label = "倍速 $speedText",
-                        on = speedText != "1.0x",
+                        on = speed != 1f || speedPickerVisible,
                         onClick = onOpenSpeed,
                         modifier = Modifier.weight(1f),
                     )
@@ -315,6 +318,18 @@ fun AudioOnlyScreen(
                         label = "后台播放中",
                         onClick = {},
                         modifier = Modifier.weight(1f),
+                    )
+                }
+                // 倍速选择条：与播放页同一交互（点钮 → 钮下列表），不走底部弹层
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = speedPickerVisible,
+                    enter = androidx.compose.animation.fadeIn(),
+                    exit = androidx.compose.animation.fadeOut(),
+                ) {
+                    SpeedChoiceRow(
+                        speed = speed,
+                        onPick = onPickSpeed,
+                        modifier = Modifier.padding(top = 10.dp),
                     )
                 }
             }
