@@ -24,6 +24,9 @@ kotlin {
 
 dependencies {
     api(project(":kernel:kernel-api"))
+    // Rail 顶部的品牌块复用设计系统里的 NoneMark（⊘ 签名标记），
+    // 与启动图 / 空态 / 关于页保持同一个记号。仅在实现内使用，不外泄。
+    implementation(project(":core:ui"))
 
     api(platform(libs.compose.bom))
     api(libs.compose.ui)
@@ -37,8 +40,4 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     // hinge 避让（折叠屏）用的 WindowInfoTracker 只在实现内使用，不必外泄
     implementation(libs.androidx.window)
-    // 外壳玻璃条（tabbar / chrome 槽位）的 backdrop blur（设计稿 blur(22px)）。
-    // 只在实现侧使用（NpGlassStyle 经 core:ui 下发），不 api 出去。
-    implementation(libs.haze.core)
-    implementation(libs.haze.materials)
 }

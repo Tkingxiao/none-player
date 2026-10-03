@@ -15,6 +15,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -59,8 +60,12 @@ fun KernelNavHost(
     val tabs by remember { kernel.registry.observe<TabProvider>() }
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<TabProvider>())
 
-    val duplicateRoutes = (screens.map { it.route } + tabs.map { it.route })
-        .groupBy { it }.filterValues { it.size > 1 }.keys
+    // 路由冲突校验只随 screens/tabs 变化重算：此前写在组合体内，任何一次重组都要
+    // 重新 map/groupBy/filter 分配三个中间集合，而这些结果在列表不变时是常量。
+    val duplicateRoutes = remember(screens, tabs) {
+        (screens.map { it.route } + tabs.map { it.route })
+            .groupBy { it }.filterValues { it.size > 1 }.keys
+    }
     require(duplicateRoutes.isEmpty()) {
         "路由冲突: $duplicateRoutes。route 必须全局唯一，请以插件 id 为前缀。"
     }
@@ -79,6 +84,22 @@ fun KernelNavHost(
      * 提升到外层后实例跨导航存活，内层返回栈与 `rememberSaveable` 归属都不变。
      */
     val tabNavController = rememberNavController()
+
+    // 导航图的构建块**必须是稳定引用**：`NavHost` 内部以
+    // `remember(route, startDestination, builder)` 缓存导航图，`builder` 的 lambda
+    // 身份一旦每次重组都变，整张图就会被重建（所有目的地重新注册）。
+    // 这里按 screens/navigator 记忆——列表不变时切页只是换目的地，不再重建图。
+    val graphBuilder: NavGraphBuilder.() -> Unit = remember(screens, navigator, tabNavController) {
+        {
+            // 主界面 = 底部标签栏 Shell（B 站式信息架构）；Tab 由各插件贡献
+            composable(SHELL_ROUTE) {
+                KernelTabScaffold(navigator = navigator, tabNavController = tabNavController)
+            }
+            screens.forEach { screen ->
+                screen.register(builder = this, navigator = navigator)
+            }
+        }
+    }
 
     // 热启动深链：Activity 复用实例时系统不会重建导航图，必须显式转发给 NavController
     LaunchedEffect(navController, deepLinkIntents) {
@@ -102,15 +123,8 @@ fun KernelNavHost(
         popExitTransition = {
             fadeOut(tween(180)) + slideOutHorizontally(tween(280)) { it / 4 }
         },
-    ) {
-        // 主界面 = 底部标签栏 Shell（B 站式信息架构）；Tab 由各插件贡献
-        composable(SHELL_ROUTE) {
-            KernelTabScaffold(navigator = navigator, tabNavController = tabNavController)
-        }
-        screens.forEach { screen ->
-            screen.register(builder = this, navigator = navigator)
-        }
-    }
+        builder = graphBuilder,
+    )
 }
 
 /**

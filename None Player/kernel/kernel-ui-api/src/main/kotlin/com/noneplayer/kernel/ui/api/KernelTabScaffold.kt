@@ -4,6 +4,9 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -52,23 +55,20 @@ import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.currentBackStackEntryAsState
+import com.noneplayer.core.ui.NoneMark
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
-import dev.chrisbanes.haze.hazeSource
+
 
 /**
  * 内核设置页的固定路由。
@@ -118,17 +118,7 @@ val LocalNpTabSwitcher: androidx.compose.runtime.ProvidableCompositionLocal<(Str
     androidx.compose.runtime.staticCompositionLocalOf { { } }
 
 /**
- * 外壳玻璃 backdrop-blur 的取样通道（Haze [HazeState]）。
- *
- * 内容层挂 `hazeSource`、玻璃条（tabbar / 迷你条 chrome 槽位）挂 `hazeEffect`，
- * 两者必须共享同一个 state 才能取到"玻璃后面的内容"。迷你条在插件里渲染，
- * 经本通道拿到外壳的 state；外壳之外（播放页等）为 null——玻璃退化为半透明底。
- */
-val LocalNpShellHazeState: ProvidableCompositionLocal<HazeState?> =
-    staticCompositionLocalOf { null }
-
-/**
- * 底部玻璃条（迷你条 + tabbar）覆盖在内容之上的总高度。
+ * 底部条（迷你条 + tabbar）覆盖在内容之上的总高度。
  *
  * 设计稿的内容层是**延伸到玻璃条之下**的（`.mini{position:fixed}` / `.tabbar{position:fixed}`），
  * 所以各页的滚动容器不再被 Scaffold 内边距截断，而是自己把本值加进
@@ -174,21 +164,25 @@ fun KernelTabScaffold(
     // E22：响应式收集——插件启用/停用后底栏随注册表更新，无需重启。
     val tabs by remember { kernel.registry.observe<TabProvider>() }
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<TabProvider>())
-    val sortedTabs = tabs.sortedBy { it.order }
     require(tabs.isNotEmpty()) {
         "未注册任何 TabProvider，主界面无内容。请在插件中实现 TabProvider 并注册。"
     }
-    val duplicateIds = tabs.groupBy { it.tabId }.filterValues { it.size > 1 }.keys
-    require(duplicateIds.isEmpty()) { "TabProvider tabId 冲突: $duplicateIds" }
-    val duplicateRoutes = tabs.groupBy { it.route }.filterValues { it.size > 1 }.keys
-    require(duplicateRoutes.isEmpty()) { "TabProvider 路由冲突: $duplicateRoutes" }
+    // 排序与冲突校验都**只随 tabs 变化重算**：此前它们写在组合体内，每次重组
+    // （含每次切 Tab 的导航状态变化）都要重新 groupBy/sortedBy 分配中间集合。
+    val sortedTabs = remember(tabs) {
+        val dupIds = tabs.groupBy { it.tabId }.filterValues { it.size > 1 }.keys
+        require(dupIds.isEmpty()) { "TabProvider tabId 冲突: $dupIds" }
+        val dupRoutes = tabs.groupBy { it.route }.filterValues { it.size > 1 }.keys
+        require(dupRoutes.isEmpty()) { "TabProvider 路由冲突: $dupRoutes" }
+        tabs.sortedBy { it.order }
+    }
 
     val backStackEntry by tabNavController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
 
     val chromes by remember { kernel.registry.observe<BottomChromeProvider>() }
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<BottomChromeProvider>())
-    val sortedChromes = chromes.sortedBy { it.order }
+    val sortedChromes = remember(chromes) { chromes.sortedBy { it.order } }
 
     // 切 Tab：栈内永远只保留一个 Tab（E53），状态靠 saveState/restoreState 成对保留。
     fun selectTab(route: String) {
@@ -206,22 +200,37 @@ fun KernelTabScaffold(
         }
     }
 
-    val navHost: @Composable (Modifier) -> Unit = { modifier ->
-        NavHost(
-            navController = tabNavController,
-            startDestination = sortedTabs.first().route,
-            modifier = modifier,
-        ) {
+    // 内层导航图的构建块**必须是稳定引用**：`NavHost` 以
+    // `remember(route, startDestination, builder)` 缓存图，`builder` 的 lambda 身份
+    // 一旦每次重组都变（本骨架会随每次 Tab 切换重组），整张 Tab 图就会被重建——
+    // 表现为"切一次标签重新注册一次所有目的地"。按 sortedTabs/navigator 记忆后，
+    // 切 Tab 只是换目的地，图不变。
+    val tabGraph: NavGraphBuilder.() -> Unit = remember(sortedTabs, navigator) {
+        {
             sortedTabs.forEach { tab ->
                 tab.register(builder = this, navigator = navigator)
             }
         }
     }
 
+    val navHost: @Composable (Modifier) -> Unit = { modifier ->
+        NavHost(
+            navController = tabNavController,
+            startDestination = sortedTabs.first().route,
+            modifier = modifier,
+            // Tab 之间是**平级目的地**，不做方向性滑动，只做一次短交叉淡入。
+            // 必须显式声明：NavHost 默认转场是 `tween(700)`，切一次标签要 0.7s
+            // 才"到位"，是整壳里最慢的一处响应（见 SHELL_TAB_SWAP_MS）。
+            enterTransition = { fadeIn(tween(SHELL_TAB_SWAP_MS)) },
+            exitTransition = { fadeOut(tween(SHELL_TAB_SWAP_MS)) },
+            popEnterTransition = { fadeIn(tween(SHELL_TAB_SWAP_MS)) },
+            popExitTransition = { fadeOut(tween(SHELL_TAB_SWAP_MS)) },
+            builder = tabGraph,
+        )
+    }
+
     val windowInfo = LocalNpWindowInfo.current
-    // 玻璃 blur 的取样 state：内容层 hazeSource，玻璃条 hazeEffect（见 LocalNpShellHazeState）
-    val hazeState = remember { HazeState() }
-    // 底部玻璃条实测高度：内容层延伸到玻璃之下后，各页靠它做最后一屏的 contentPadding
+    // 底部条实测高度：内容层延伸到条之下后，各页靠它做最后一屏的 contentPadding
     var bottomBarPx by remember { mutableIntStateOf(0) }
     val bottomInset = with(LocalDensity.current) { bottomBarPx.toDp() }
 
@@ -243,12 +252,11 @@ fun KernelTabScaffold(
         // 页面内"跳到另一个 Tab"的通道（见 [LocalNpTabSwitcher]）
         CompositionLocalProvider(
             LocalNpTabSwitcher provides ::selectTab,
-            LocalNpShellHazeState provides hazeState,
             LocalNpBottomInset provides bottomInset,
         ) {
     if (windowInfo.isCompact) {
-        // 紧凑：底部玻璃 Tab 栏 + Chrome（迷你条）贴上沿。内容层**不再被 innerPadding
-        // 截断**——它延伸到玻璃条之下（设计稿 `.mini/.tabbar{position:fixed}`），
+        // 紧凑：底部 Tab 栏 + Chrome（迷你条）贴上沿。内容层**不再被 innerPadding
+        // 截断**——它延伸到条之下（设计稿 `.mini/.tabbar{position:fixed}`），
         // 各页用 LocalNpBottomInset 在自己的 contentPadding 里做最后一屏避让。
         Scaffold(
             bottomBar = {
@@ -260,16 +268,15 @@ fun KernelTabScaffold(
                         tabs = sortedTabs,
                         currentRoute = currentRoute,
                         onSelect = ::selectTab,
-                        hazeState = hazeState,
                     )
                 }
             },
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
         ) { _ ->
-            navHost(Modifier.fillMaxSize().hazeSource(hazeState))
+            navHost(Modifier.fillMaxSize())
         }
     } else {
-        // 中/扩展：左侧玻璃 Rail。内容列占满、Chrome **悬浮在内容列底部**
+        // 中/扩展：左侧 Rail。内容列占满、Chrome **悬浮在内容列底部**
         // （设计稿 `.mini{position:absolute;bottom:0}`），同样通过
         // LocalNpBottomInset 让各页避让。Rail 消费左侧/竖向安全区，
         // 内容列消费右侧/底部——横屏刘海、手势导航条在哪一侧都不遮挡。
@@ -289,7 +296,7 @@ fun KernelTabScaffold(
                         ),
                     ),
             ) {
-                navHost(Modifier.fillMaxSize().hazeSource(hazeState))
+                navHost(Modifier.fillMaxSize())
                 Column(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -306,11 +313,9 @@ fun KernelTabScaffold(
     }
 }
 
-// ---- 玻璃配方（投影无法表达的 alpha 常量，集中一处）----
-// 数值逐条取自设计稿：--glass = bg@78%（暗）/ surface@74%（亮）、
-// --accent-soft = accent @ 16%、--edge = #fff @ 8%（暗）/ 55%（亮）、Tab 栏描边 = --border。
-private const val SHELL_GLASS_ALPHA_DARK = 0.78f
-private const val SHELL_GLASS_ALPHA_LIGHT = 0.74f
+// ---- 条配方（投影无法表达的 alpha 常量，集中一处）----
+// 数值逐条取自设计稿：--accent-soft = accent @ 16%、
+// --edge = #fff @ 8%（暗）/ 55%（亮）、Tab 栏描边 = --border。
 private const val SHELL_ACCENT_SOFT_ALPHA = 0.16f
 private const val SHELL_EDGE_ALPHA_DARK = 0.08f
 private const val SHELL_EDGE_ALPHA_LIGHT = 0.55f
@@ -319,58 +324,39 @@ private const val SHELL_EDGE_ALPHA_LIGHT = 0.55f
 private const val SHELL_STIFFNESS = 3200f
 
 /**
- * GPU 模糊可信度：模拟器（ranchu/generic/sdk_gphone）上 RenderEffect.createBlurEffect
- * 静默输出空（gfxstream 缺陷，Pixel 10 Pro AVD 实测），一律退化用底色；真机不受影响。
- * 与 :core:ui 的同名探测各持一份——kernel-ui-api 与 core:ui 之间无依赖边（§13.2）。
+ * Tab 内容交叉淡入时长（ms）。
+ *
+ * NavHost 默认转场是 `tween(700)`——切一次标签要 0.7s 才到位，是整壳里最慢的
+ * 一处响应。Tab 之间是平级目的地，不做方向性滑动，只做一次短交叉淡入即可。
+ * 180ms 落在"用户可感知即时"（≤150ms 反馈 + 少量过渡）的区间内。
  */
-private fun isGpuBlurUnreliable(): Boolean =
-    android.os.Build.FINGERPRINT.contains("generic") ||
-        android.os.Build.FINGERPRINT.contains("emulator") ||
-        android.os.Build.HARDWARE.contains("ranchu") ||
-        android.os.Build.PRODUCT.contains("sdk_gphone")
+private const val SHELL_TAB_SWAP_MS = 180
 
 /**
- * `.tabbar`：底部玻璃 Tab 栏。
+ * `.tabbar`：底部 Tab 栏（**不透明**）。
  *
  * 设计稿的关键取舍：**文字标签常驻**，选中只改颜色 + 换成实心图标。
  * 隐藏未选中的文字会让用户失去"这一栏是什么"的线索；用 11sp 的小字表达克制，
  * 而不是用"藏起来"表达克制。
+ *
+ * 底改不透明后，原先的 `backdrop-filter:blur(22px)` 已无可见效果，一并移除——
+ * 它曾是滚动时每帧一次全屏离屏采样（掉帧主因）。层次改由顶边 1px 发丝线承担。
  */
 @Composable
 private fun NpBottomTabBar(
     tabs: List<TabProvider>,
     currentRoute: String?,
     onSelect: (String) -> Unit,
-    hazeState: HazeState?,
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     val edge = Color.White.copy(alpha = if (isDark) SHELL_EDGE_ALPHA_DARK else SHELL_EDGE_ALPHA_LIGHT)
-    val glassAlpha = if (isDark) SHELL_GLASS_ALPHA_DARK else SHELL_GLASS_ALPHA_LIGHT
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .then(
-                if (hazeState != null && !isGpuBlurUnreliable()) {
-                    // 玻璃条：blur(22px) + 表面着色（设计稿 `backdrop-filter:blur(22px)` +
-                    // `background:var(--glass)`）。API 31+ 真实模糊，之下退化用底色。
-                    Modifier.hazeEffect(
-                        state = hazeState,
-                        style = HazeStyle(
-                            backgroundColor = MaterialTheme.colorScheme.background,
-                            tints = listOf(
-                                HazeTint(MaterialTheme.colorScheme.surface.copy(alpha = glassAlpha)),
-                            ),
-                            blurRadius = 22.dp,
-                            fallbackTint = HazeTint(MaterialTheme.colorScheme.surface),
-                        ),
-                    )
-                } else {
-                    Modifier.background(MaterialTheme.colorScheme.surface.copy(alpha = glassAlpha))
-                },
-            ),
+            .background(MaterialTheme.colorScheme.background),
     ) {
         // 顶边：1px 发丝描边 + 高光。设计稿 `.tabbar{border-top:1px solid var(--border)}`
         // 与 `.topbar::after` 是同一套"玻璃有边"的语言。
@@ -435,6 +421,7 @@ private fun NpNavRail(
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     // pinnedToEnd 的项（设置）被一个 weight 推到底部——空间上的分离承载
     // "它不是并列的内容区，而是关于这个应用"这层语义（设计稿 `.rail .spacer`）。
     val (pinned, main) = tabs.partition { it.pinnedToEnd }
@@ -465,20 +452,25 @@ private fun NpNavRail(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            // 品牌块：44dp、14dp 圆角、accent-soft 底 + accent 字
+            // 品牌块：44dp、14dp 圆角、中性底 + 应用签名标记（⊘）。
+            //
+            // 标记用**纯黑 / 纯白两套**随深浅主题切换，容器底也从 accent-soft 换成中性：
+            // 橙色在本应用里是"选中 / 主操作"的颜色，品牌块再占一支，Rail 上就会出现
+            // 两个同等强度的橙色焦点，真正的选中项反而压不住。
             Box(
                 modifier = Modifier
                     .padding(bottom = 14.dp)
                     .size(44.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(accent.copy(alpha = SHELL_ACCENT_SOFT_ALPHA)),
+                    .background(
+                        MaterialTheme.colorScheme.onBackground.copy(alpha = 0.08f),
+                    ),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
-                    text = "N",
-                    color = accent,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.Bold,
+                NoneMark(
+                    modifier = Modifier.size(24.dp),
+                    color = if (isDark) Color.White else Color.Black,
+                    strokeWidth = 2.5.dp,
                 )
             }
             main.forEach { tab ->
@@ -561,7 +553,7 @@ private fun NpRailItem(
         ),
         label = "railBg",
     )
-    val scale by animateFloatAsState(
+    val scale = animateFloatAsState(
         targetValue = if (selected) 1f else 0.98f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
@@ -572,7 +564,7 @@ private fun NpRailItem(
     // 按压缩放（设计稿 `.rail-btn:active{transform:scale(.94)}`）
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
+    val pressScale = animateFloatAsState(
         targetValue = if (pressed) 0.94f else 1f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
@@ -604,8 +596,8 @@ private fun NpRailItem(
                 modifier = Modifier
                     .size(24.dp)
                     .graphicsLayer {
-                        scaleX = scale * pressScale
-                        scaleY = scale * pressScale
+                        scaleX = scale.value * pressScale.value
+                        scaleY = scale.value * pressScale.value
                     },
             )
         }
@@ -641,7 +633,7 @@ private fun NpTabItem(
     // 按压缩放（设计稿 `:active` 语言的 tabbar 版本，取 chip 的 .96 档）
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
+    val pressScale = animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
         animationSpec = spring(
             dampingRatio = Spring.DampingRatioNoBouncy,
@@ -662,8 +654,8 @@ private fun NpTabItem(
             )
             .padding(vertical = 4.dp)
             .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
+                scaleX = pressScale.value
+                scaleY = pressScale.value
             },
     ) {
         if (shownIcon != null) {
