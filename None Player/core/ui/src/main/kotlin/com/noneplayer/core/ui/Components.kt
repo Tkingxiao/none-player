@@ -43,7 +43,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -60,7 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import dev.chrisbanes.haze.hazeSource
+
 
 /**
  * None Player 组件库——设计稿里**反复出现的原子件**，一处实现、全项目复用。
@@ -75,7 +74,15 @@ import dev.chrisbanes.haze.hazeSource
  *
  * 用 [NpEasing.Silk] 的 spring 回弹且**不过冲**：列表卡片上的果冻回弹显得廉价；
  * 过冲只留给开关与滑块 thumb（表达"物理开关"）。
+ *
+ * **写成 `@Composable` 扩展而不是 `Modifier.composed{}`**：后者会为每个元素额外
+ * 建一个组合节点，在 LazyList 的每个卡片上都挂一层是官方点名的滚动期开销。
+ *
+ * 动画状态**不在组合期解包**：`scale.value` 读在 `graphicsLayer` 的 lambda 里，
+ * 状态变化只让该绘制层失效（draw 阶段重跑），不触发重组。此前用 `by` 在组合期读，
+ * 按下的 160ms 里每帧都要重组一次卡片——列表里几十张卡片同时被按下就是掉帧。
  */
+@Composable
 fun Modifier.npPressScale(
     onClick: () -> Unit,
     pressedScale: Float = 0.96f,
@@ -85,18 +92,18 @@ fun Modifier.npPressScale(
      * 传入后本函数不再自建。为空时自建（绝大多数按钮/图标的用法）。
      */
     interactionSource: MutableInteractionSource? = null,
-): Modifier = composed {
+): Modifier {
     val source = interactionSource ?: remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
     // reduced-motion：砍掉位移/缩放，点击路径保持不变
     val reduceMotion = rememberReduceMotion()
-    val scale by silkFloat(
+    val scale = silkFloat(
         target = if (pressed && enabled && !reduceMotion) pressedScale else 1f,
         durationMs = Motion.Press,
         label = "npPressScale",
     )
-    this
-        .graphicsLayer { scaleX = scale; scaleY = scale }
+    return this
+        .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
         .clickable(
             interactionSource = source,
             indication = null,
@@ -128,32 +135,37 @@ val LocalNpHoverEnabled: androidx.compose.runtime.ProvidableCompositionLocal<Boo
  * [enabled] 传 [LocalNpHoverEnabled]：无指针设备时整体关闭（触屏不会误触发）。
  * reduced-motion 下退化为不位移（颜色类反馈不受影响）。
  */
+@Composable
 fun Modifier.npHoverLift(
     hovered: Boolean,
     enabled: Boolean = true,
     distance: Dp = 2.dp,
-): Modifier = composed {
+): Modifier {
+    // 无指针设备：hover 态永远不会成立。**直接短路**，不建动画状态——
+    // 否则每张卡片都要背一个 Animatable 与随动协程，只为追一个恒为 0 的目标。
+    if (!enabled) return this
     val reduceMotion = rememberReduceMotion()
-    val lift by silkDp(
-        target = if (hovered && enabled && !reduceMotion) distance else 0.dp,
+    // 同 [npPressScale]：状态读在 graphicsLayer 的 lambda 里，悬停上浮只走绘制层，
+    // 不重组卡片。
+    val lift = silkDp(
+        target = if (hovered && !reduceMotion) distance else 0.dp,
         durationMs = Motion.Panel,
         label = "npHoverLift",
     )
-    graphicsLayer { translationY = -lift.toPx() }
+    return graphicsLayer { translationY = -lift.value.toPx() }
 }
 
 /** 无涟漪点击（列表行、图标按钮）——Material 涟漪与设计稿的干净按压不是一套语言。 */
+@Composable
 fun Modifier.npClickable(
     enabled: Boolean = true,
     onClick: () -> Unit,
-): Modifier = composed {
-    clickable(
-        interactionSource = remember { MutableInteractionSource() },
-        indication = null,
-        enabled = enabled,
-        onClick = onClick,
-    )
-}
+): Modifier = clickable(
+    interactionSource = remember { MutableInteractionSource() },
+    indication = null,
+    enabled = enabled,
+    onClick = onClick,
+)
 
 /**
  * `.iconbtn`：44dp 命中区 / 12dp 圆角 / 未选 muted、选中 accent + accentSoft 底。
@@ -671,13 +683,14 @@ fun NoneMark(
 }
 
 /**
- * 页面外壳：顶栏玻璃 + 内容最大宽度 + 两侧安全区，三件每个页面都要重复的事收在一处。
+ * 页面外壳：顶栏 + 内容最大宽度 + 两侧安全区，三件每个页面都要重复的事收在一处。
  *
  * 设计稿里 `.topbar` 是 **sticky 玻璃**（内容从它下面滚过时呈毛玻璃），
- * `.content{max-width:1100px}` 是全局约定。所以本外壳是**覆盖式布局**：
- * 内容层占满全高、延伸到顶栏之下（玻璃 blur 的取样源），顶栏悬浮其上；
+ * `.content{max-width:1100px}` 是全局约定。本外壳保留**覆盖式布局**：
+ * 内容层占满全高、延伸到顶栏之下，顶栏悬浮其上；但顶栏底是**不透明的**
+ * （见 [npGlassChrome]）——滚动内容从它下面经过而不是透出来，省掉逐帧背后取样。
  * 页面在自己的滚动容器 `contentPadding.top` 里消费 [LocalNpTopBarInset]
- * 做首屏避让，`contentPadding.bottom` 里消费外壳下发的底部玻璃条高度。
+ * 做首屏避让，`contentPadding.bottom` 里消费外壳下发的底部条高度。
  *
  * 底部留白**不在这里**：各页用 `LazyColumn(contentPadding = …)` 自己声明，
  * 因为滚动容器比外壳更清楚"最后一行下面该留多少"（网格与列表的留白本来就不同）。
@@ -694,7 +707,6 @@ fun NpPageScaffold(
     content: @Composable (Modifier) -> Unit,
 ) {
     val ink = LocalNpInk.current
-    val hazeState = remember { dev.chrisbanes.haze.HazeState() }
     var topBarPx by remember { mutableIntStateOf(0) }
     val topInset = with(LocalDensity.current) { topBarPx.toDp() }
     CompositionLocalProvider(LocalNpTopBarInset provides topInset) {
@@ -708,7 +720,7 @@ fun NpPageScaffold(
                 ),
             contentAlignment = Alignment.TopCenter,
         ) {
-            // 内容层：占满全高、延伸到顶栏之下（玻璃取样源 + 首屏由页面自行避让）
+            // 内容层：占满全高、延伸到顶栏之下（首屏由页面自行避让）
             content(
                 Modifier
                     .fillMaxSize()
@@ -718,16 +730,15 @@ fun NpPageScaffold(
                         } else {
                             Modifier
                         },
-                    )
-                    .hazeSource(hazeState),
+                    ),
             )
             if (topBar != null) {
-                // 顶栏：全宽玻璃（设计稿 .topbar 通栏，内容行另收 1100 上限）
+                // 顶栏：全宽不透明条（设计稿 .topbar 通栏，内容行另收 1100 上限）
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .npGlassChrome(hazeState, ink)
+                        .npGlassChrome(ink)
                         .onSizeChanged { topBarPx = it.height },
                 ) {
                     Box(

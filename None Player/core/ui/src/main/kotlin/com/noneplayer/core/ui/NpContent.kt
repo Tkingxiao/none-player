@@ -40,6 +40,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
@@ -465,11 +466,17 @@ fun NpMediaCard(
     val hoverEnabled = LocalNpHoverEnabled.current
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
-    val titleColor by animateColorAsState(
-        targetValue = if (hovered && hoverEnabled) ink.accent else ink.fg,
-        animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
-        label = "npMediaCardTitle",
-    )
+    // 触屏下 hover 恒不成立 → 不建动画状态（省掉每张卡一个 Animatable 与随动协程）
+    val titleColor = if (!hoverEnabled) {
+        ink.fg
+    } else {
+        val animated by animateColorAsState(
+            targetValue = if (hovered) ink.accent else ink.fg,
+            animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
+            label = "npMediaCardTitle",
+        )
+        animated
+    }
     Column(
         modifier = modifier
             .hoverable(interactionSource = interactionSource, enabled = hoverEnabled)
@@ -532,11 +539,17 @@ fun NpListRow(
     val hoverEnabled = LocalNpHoverEnabled.current
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
-    val titleColor by animateColorAsState(
-        targetValue = if (hovered && hoverEnabled) ink.accent else ink.fg,
-        animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
-        label = "npListRowTitle",
-    )
+    // 触屏下 hover 恒不成立 → 不建动画状态
+    val titleColor = if (!hoverEnabled) {
+        ink.fg
+    } else {
+        val animated by animateColorAsState(
+            targetValue = if (hovered) ink.accent else ink.fg,
+            animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
+            label = "npListRowTitle",
+        )
+        animated
+    }
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -630,11 +643,17 @@ fun NpFolderCard(
     val hoverEnabled = LocalNpHoverEnabled.current
     val interactionSource = remember { MutableInteractionSource() }
     val hovered by interactionSource.collectIsHoveredAsState()
-    val borderAlpha by animateFloatAsState(
-        targetValue = if (hovered && hoverEnabled) 0.40f else 0.26f,
-        animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
-        label = "npFolderCardBorder",
-    )
+    // 触屏下 hover 恒不成立 → 不建动画状态（描边直接取常量 0.26）
+    val borderAlpha = if (!hoverEnabled) {
+        0.26f
+    } else {
+        val animated by animateFloatAsState(
+            targetValue = if (hovered) 0.40f else 0.26f,
+            animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
+            label = "npFolderCardBorder",
+        )
+        animated
+    }
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -661,7 +680,10 @@ fun NpFolderCard(
                         .align(Alignment.BottomStart)
                         .padding(8.dp)
                         .clip(RoundedCornerShape(5.dp))
-                        .background(Color.Black.copy(alpha = 0.58f))
+                        // 设计稿 `.folder .pill`：`color-mix(in oklch, facc 42%, #000 58%)`
+                        // ——底色是文件夹色相与黑的混合，不是纯黑；纯黑会让胶囊与封面
+                        // 的色相编码断开（这一枚 pill 也承担"哪个文件夹"的线索）。
+                        .background(facc.copy(alpha = 0.42f).compositeOver(Color.Black))
                         .border(1.dp, facc.copy(alpha = 0.55f), RoundedCornerShape(5.dp))
                         .padding(horizontal = 7.dp, vertical = 2.dp),
                 )

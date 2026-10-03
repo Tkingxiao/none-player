@@ -35,7 +35,7 @@ data class InkTokens(
     val accentLine: Color,    // --accent-line 选中描边
     val fgSoft: Color,        // --fg-soft 6% 前景：hover / 次级填充
     val fgFaint: Color,       // --fg-faint 3% 前景：最轻的 hover
-    val glass: Color,         // --glass 玻璃条底（近不透明 + 模糊）
+    val glass: Color,         // --glass 条底（**不透明**：标签栏/顶栏不做半透明）
     val edge: Color,          // --edge 玻璃顶部 1px 高光
     val scrim: Color,         // --scrim Sheet 遮罩
     val success: Color,       // 成功
@@ -65,7 +65,9 @@ val NpInkDark = InkTokens(
     accentLine = Color(0x73F58028),   // accent @ 45%
     fgSoft = Color(0x0FF6F5F2),       // fg @ 6%
     fgFaint = Color(0x08F6F5F2),      // fg @ 3%
-    glass = Color(0xC7000000),        // bg @ 78%
+    // 不透明条底（= bg）：标签栏/顶栏不再半透明，滚动内容从其**下面**经过而不是透出来。
+    // 原设计稿 `--glass: bg@78% + backdrop-blur`——不透明化同时省掉了逐帧离屏模糊。
+    glass = Color(0xFF000000),        // bg，不透明
     edge = Color(0x14FFFFFF),         // #fff @ 8%
     scrim = Color(0x9E000000),        // black @ 62%
     success = Color(0xFF54C57A),      // oklch(.74 .15 152)
@@ -92,7 +94,7 @@ val NpInkLight = InkTokens(
     accentLine = Color(0x66CE5600),   // accent @ 40%
     fgSoft = Color(0x0B231E1A),       // fg @ 4.5%
     fgFaint = Color(0x06231E1A),      // fg @ 2.5%
-    glass = Color(0xBCFFFFFF),        // surface @ 74%
+    glass = Color(0xFFFFFFFF),        // bg，不透明（同暗色：不做半透明）
     edge = Color(0x8CFFFFFF),         // #fff @ 55%
     scrim = Color(0x6B423930),        // oklch(.35 .02 65) @ 42%
     // 设计稿亮色未覆盖 --success，沿用暗色值（oklch(.74 .15 152)）

@@ -105,6 +105,10 @@ fun NonePlayerTheme(
     // 旧外观冻结帧：切换瞬间抓取，淡出结束后释放
     var frozenFrame by remember { mutableStateOf<ImageBitmap?>(null) }
     val frozenAlpha = remember { Animatable(0f) }
+    // Reduce Motion：全局读一次系统设置，经 CompositionLocal 下发。
+    // 不下发的话，每个卡片节点各自 remember 一次 ContentResolver 读取——
+    // 列表项滚出/滚回会重新组合、重新读，是滚动期一笔纯浪费。
+    val reduceMotion = remember(context) { readSystemReduceMotion(context) }
 
     LaunchedEffect(darkTheme) {
         // 已经切过了（例如快速连点后 effect 重跑）：把可能残留的冻结帧摘掉再退出。
@@ -144,6 +148,7 @@ fun NonePlayerTheme(
             // 经 LocalNpInk 取用原始令牌（ColorScheme 只投影得到 M3 槽位，损失了 alpha 阶梯）。
             CompositionLocalProvider(
                 LocalNpInk provides if (appliedDark) NpInkDark else NpInkLight,
+                LocalNpReduceMotion provides reduceMotion,
                 content = content,
             )
         }

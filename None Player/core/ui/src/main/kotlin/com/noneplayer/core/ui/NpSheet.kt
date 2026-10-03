@@ -34,7 +34,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -81,7 +80,7 @@ fun NpSheet(
     }
     BackHandler(enabled = true) { close() }
 
-    val progress by animateFloatAsState(
+    val progress = animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
         animationSpec = tween(durationMillis = sheetDuration, easing = NpEasing.Sheet),
         label = "npSheetProgress",
@@ -95,7 +94,10 @@ fun NpSheet(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .alpha(progress)
+                // 进度读在绘制层 lambda 里：sheet 的 320ms 进出场只让遮罩层与
+                // 面板层重绘，不重组下面的整棵 sheet 内容（此前 `alpha(progress)`
+                // 在组合期取值，每帧都要把 content() 重组一遍——开合时的主要掉帧源）。
+                .graphicsLayer { alpha = progress.value }
                 .background(ink.scrim)
                 .clickable(
                     interactionSource = remember { MutableInteractionSource() },
@@ -108,7 +110,7 @@ fun NpSheet(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .graphicsLayer { translationY = (1f - progress) * size.height },
+                .graphicsLayer { translationY = (1f - progress.value) * size.height },
         ) {
             Column(
                 modifier = Modifier

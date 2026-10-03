@@ -13,7 +13,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.composed
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
@@ -22,32 +21,30 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.Dp
-import android.os.Build
 import androidx.compose.ui.unit.dp
-import dev.chrisbanes.haze.HazeState
-import dev.chrisbanes.haze.HazeStyle
-import dev.chrisbanes.haze.HazeTint
-import dev.chrisbanes.haze.hazeEffect
 
 
 /**
- * None Player 材质系统（第 2 层配方）——由令牌组合出的"玻璃 / 高光 / 发丝线"。
+ * None Player 材质系统（第 2 层配方）——由令牌组合出的"条底 / 高光 / 发丝线"。
  *
  * 设计稿的核心材质主张是 `.topbar / .mini / .tabbar` 上的
  * `background: var(--glass); backdrop-filter: blur(22px) saturate(150%)` 加一条
  * `::after { inset:0 0 auto; height:1px; background:var(--edge) }` 顶边高光。
  *
+ * **本实现只取"底 + 高光 + 发丝线"，不取 backdrop-blur**：条底改为不透明
+ * （[InkTokens.glass] = `--bg`），背后模糊已无可见效果，保留它只会让滚动时
+ * 每一帧多做一次全屏离屏采样 —— 这是列表滚动掉帧的最大单一来源。
  * 这里把它统一成 [Modifier.npGlassSurface]。
  */
 
 /**
- * 玻璃条材质：半透明底 + 顶边 1px 高光 + 可选底边发丝线。
+ * 条材质：**不透明底** + 顶边 1px 高光 + 可选底边发丝线。
  *
  * 用于 `.topbar` / `.playerbar` / `.mini` / `.tabbar`——它们**贴在滚动内容之上**，
  * 所以不给投影（投影会把"浮层"读成"卡片"），层次只靠高光与描边表达。
  *
- * [blurRadius] 为真实高斯模糊半径，0 表示不模糊。模糊是 `RenderEffect`，
- * 单条常驻 chrome 的开销可控；列表项**不要**用它（逐帧离屏重绘）。
+ * 不透明是刻意的：半透明条会让滚动内容透出来干扰阅读，且迫使每帧做一次
+ * 背后取样。层次改由 1px 发丝线承担，视觉更稳、绘制更省。
  */
 fun Modifier.npGlassSurface(
     ink: InkTokens,
@@ -179,14 +176,12 @@ fun Modifier.npShadow(
 )
 
 /**
- * 玻璃容器：贴内容之上的浮层（迷你条、控制层、面板）。
+ * 浮层容器：贴内容之上的面板 / 圆形按钮（面板、中央播放键）。
  *
  * 与 [npGlassSurface] 的区别是会带一圈投影——浮层与背景不是同一张纸。
  *
- * [strength] 已在设计稿对齐后取消：真实模糊（`RenderEffect`）在 API 31+ 可用，
- * 但在这层抽一个"模糊强度"参数会诱使调用点各挑一个值，而设计稿只有一种玻璃
- * （`blur(22px) saturate(150%)`）。需要更实的底时改 [elevation] 与
- * [npGlassSurface] 的 alpha，而不是调模糊。
+ * 底是**不透明**的（同 [npGlassSurface]）：浮层要么被看见、要么不出现，
+ * 让它半透明地"糊"在视频上既难读又要逐帧取样。
  */
 @Composable
 fun NpGlass(
@@ -207,48 +202,17 @@ fun NpGlass(
 }
 
 /**
- * 玻璃条材质的 backdrop-blur 版（设计稿 `backdrop-filter: blur(22px)` 的落地）。
+ * 外壳条（顶栏 / 标签栏 / 迷你条）的底色：**不透明**。
  *
- * [state] 是与内容层共享的 [HazeState]：内容层挂 `hazeSource(state)`，玻璃条挂
- * 本修饰符后才能取到"玻璃后面的内容"做真实模糊。[state] 为 null（外壳之外、
- * 或 API 31 以下无 RenderEffect）时退化为半透明底色——这正是设计稿
- * `prefers-reduced-transparency` 的降级形态。
+ * 此前这里是设计稿 `backdrop-filter: blur(22px)` 的落地（Haze 离屏模糊 +
+ * 内容层 `hazeSource` 取样）。用户明确要求标签栏与顶栏不做半透明后，模糊
+ * 已经**不可见**——不透明底之后没有任何"背后的内容"可模糊——而它仍是每次
+ * 滚动/切换都要付出的一次全屏离屏渲染，是掉帧的主要来源。故一并移除。
  *
- * **注意**：挂了本修饰符的容器不要再画 `ink.glass` 底色——着色由 effect 节点负责，
- * 叠两层会变闷。
+ * 顶边 1px 高光与底边发丝线由调用点自行叠加（见 [npGlassSurface] / 各条实现），
+ * 这里只负责"底色是实心的"这一条事实。
  */
-fun Modifier.npGlassChrome(
-    state: HazeState?,
-    ink: InkTokens,
-    blurRadius: Dp = 22.dp,
-): Modifier = composed {
-    if (state != null && !isGpuBlurUnreliable()) {
-        this.hazeEffect(
-            state = state,
-            style = HazeStyle(
-                backgroundColor = ink.bg,
-                tints = listOf(HazeTint(ink.glass)),
-                blurRadius = blurRadius,
-                fallbackTint = HazeTint(ink.glass),
-            ),
-        )
-    } else {
-        // 无 haze（外壳之外）或 GPU 模糊不可靠：退化为半透明底——即设计稿
-        // `prefers-reduced-transparency` 的降级形态。
-        this.background(ink.glass)
-    }
-}
-
-/**
- * GPU 模糊可信度探测：模拟器（ranchu/generic/sdk_gphone）上 `RenderEffect.createBlurEffect`
- * 会静默输出空层（gfxstream 缺陷，Pixel 10 Pro AVD 实测：blurRadius=0 一切正常、>0 整层消失），
- * 一律走 scrim 降级；真机不受影响。
- */
-fun isGpuBlurUnreliable(): Boolean =
-    Build.FINGERPRINT.contains("generic") ||
-        Build.FINGERPRINT.contains("emulator") ||
-        Build.HARDWARE.contains("ranchu") ||
-        Build.PRODUCT.contains("sdk_gphone")
+fun Modifier.npGlassChrome(ink: InkTokens): Modifier = this.background(ink.glass)
 
 /**
  * 设计稿 `.mini .lead-line` / `.prog i` 里的"进度线是骨架"：

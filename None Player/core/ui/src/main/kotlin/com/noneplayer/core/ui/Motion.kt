@@ -15,8 +15,7 @@ import androidx.compose.animation.core.animateValueAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.remember
-import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
@@ -163,16 +162,24 @@ fun staggerDelayMs(index: Int): Int = index.coerceAtMost(6) * Motion.Stagger
 /**
  * Reduce Motion：系统动画时长缩放为 0 时，所有位移/缩放一律砍到 0（只保留 opacity）。
  * 返回 true 表示应禁用位移类动效。
+ *
+ * **值是全局的、每帧不变的**，所以由 [NonePlayerTheme] 读取一次经
+ * [LocalNpReduceMotion] 下发，而不是让每个卡片各自 `remember` 一次
+ * （此前每次调用都要 `ContentResolver` 读一遍系统设置——列表项滚出屏幕再滚回来
+ * 会重新组合、重新读一次，是滚动期一笔纯粹浪费的开销）。
  */
+val LocalNpReduceMotion: androidx.compose.runtime.ProvidableCompositionLocal<Boolean> =
+    staticCompositionLocalOf { false }
+
 @Composable
-fun rememberReduceMotion(): Boolean {
-    val context = LocalContext.current
-    return remember {
-        val scale = Settings.Global.getFloat(
-            context.contentResolver,
-            Settings.Global.ANIMATOR_DURATION_SCALE,
-            1f,
-        )
-        scale == 0f
-    }
+fun rememberReduceMotion(): Boolean = LocalNpReduceMotion.current
+
+/** 读一次系统"动画时长缩放"，供 [NonePlayerTheme] 下发（仅此一处读系统设置）。 */
+fun readSystemReduceMotion(context: android.content.Context): Boolean {
+    val scale = Settings.Global.getFloat(
+        context.contentResolver,
+        Settings.Global.ANIMATOR_DURATION_SCALE,
+        1f,
+    )
+    return scale == 0f
 }

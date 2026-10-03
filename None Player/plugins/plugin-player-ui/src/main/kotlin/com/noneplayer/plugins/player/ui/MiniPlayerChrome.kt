@@ -50,7 +50,6 @@ import com.noneplayer.core.ui.npGlassChrome
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.BottomChromeProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
-import com.noneplayer.kernel.ui.api.LocalNpShellHazeState
 
 /**
  * 迷你播放条（设计稿 `.mini`）——常驻底部 Chrome 槽位的"正在播放"入口。
@@ -65,7 +64,8 @@ import com.noneplayer.kernel.ui.api.LocalNpShellHazeState
  * 设计稿的三个保真点：
  * 1. **左缘 2dp accent 进度线**（`.mini .lead-line`）——"进度线是骨架"的品牌纪律，
  *    它让这一条在任何页面上都被认成"播放中的那一条"；
- * 2. **玻璃材质**（`--glass` + `blur` + 顶边 1px `--edge` 高光）——内容从不浮在不透明条上；
+ * 2. **实底材质**（`--glass` = `--bg` 不透明 + 顶边 1px `--edge` 高光）——条底不做半透明，
+ *    滚动内容从它下面经过而不是透出来，省掉逐帧背后取样；
  * 3. **底部 2dp 细进度**（`.mini-prog`）——不可交互，只回答"放到哪了"。
  *
  * **点条回播放页**：走 `player?...` 深链参数等价形态（uri/title/mime/id 齐全），
@@ -94,9 +94,8 @@ class MiniPlayerChrome : BottomChromeProvider {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // 玻璃底：外壳的 hazeState 若在（tab 壳内）走真实 backdrop blur，
-                    // 否则退化为半透明底（设计稿 reduced-transparency 形态）
-                    .npGlassChrome(LocalNpShellHazeState.current, ink),
+                    // 实底：条底与页面底同色（不透明），滚动内容从下面经过。
+                    .npGlassChrome(ink),
             ) {
                 // 顶边发丝描边——与 Tab 栏共用同一套"玻璃有边"的语言
                 Box(
