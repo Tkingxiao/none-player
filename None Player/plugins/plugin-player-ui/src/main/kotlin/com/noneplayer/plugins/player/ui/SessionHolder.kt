@@ -1,5 +1,6 @@
 package com.noneplayer.plugins.player.ui
 
+import android.annotation.SuppressLint
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.ServiceLocator
 import com.noneplayer.kernel.api.get
@@ -20,6 +21,9 @@ import com.noneplayer.kernel.api.get
  */
 internal object SessionHolder {
 
+    // 进程级单例是设计使然（见类注释）：会话寿命 = 进程寿命，随播放服务驻留，
+    // 非意外持有的 Activity Context——抑制误报。
+    @SuppressLint("StaticFieldLeak")
     @Volatile
     private var instance: PlaybackSession? = null
 

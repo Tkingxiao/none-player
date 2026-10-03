@@ -6,6 +6,7 @@ import com.noneplayer.core.media.MediaItem
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
+import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.VideoPlayerFactory
@@ -72,11 +73,47 @@ class PlaybackSession(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /**
+     * 仅听音频模式（设计稿 `.audio` 整屏页的开关）。
+     *
+     * 放会话而不是路由参数：迷你条的耳机钮在播放页**之外**，它要能把整个 App
+     * 带进/带出该模式；路由参数方案会让"迷你条切仅听"变成一次压栈。
+     * 进程级状态与播放会话同寿——退页后台播放时模式保持。
+     */
+    private val _audioOnly = MutableStateFlow(false)
+
+    /** 仅听音频模式状态（UI collectAsState 用） */
+    val audioOnly: StateFlow<Boolean> = _audioOnly.asStateFlow()
+
+    /** 切换仅听音频（迷你条耳机钮 / 播放页 pactions / 音频页「切回视频」共用） */
+    fun toggleAudioOnly() {
+        _audioOnly.value = !_audioOnly.value
+    }
+
     private val _queue = MutableStateFlow<List<MediaItem>>(emptyList())
     val queue: StateFlow<List<MediaItem>> = _queue.asStateFlow()
 
     private val _index = MutableStateFlow(-1)
     val index: StateFlow<Int> = _index.asStateFlow()
+
+    init {
+        observeEngineIndex()
+    }
+
+    /**
+     * 队列下标以**引擎**为真相：底栏 ⏮⏭、播完自动续播都由 media3 推进播放项，
+     * 会话若只在自己调 [selectQueueIndex] 时写下标，页头 / 选集高亮 / 迷你条
+     * 会停在旧集数上。引擎换代时经 `flatMapLatest` 自动重新订阅新实例的下标流。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeEngineIndex() {
+        scope.launch {
+            _player.flatMapLatest { p -> p?.currentIndex ?: flowOf(-1) }
+                .collect { idx ->
+                    if (idx != _index.value && idx in _queue.value.indices) _index.value = idx
+                }
+        }
+    }
 
     /**
      * 当前播放引擎实例。`null` 表示尚未装载过任何媒体。
@@ -194,16 +231,31 @@ class PlaybackSession(
 
     /** 下一集（无下一集时为空操作） */
     fun next() {
+        persistPosition()
         _player.value?.playNext()
     }
 
     fun previous() {
+        persistPosition()
         _player.value?.playPrevious()
+    }
+
+    private val _loopMode = MutableStateFlow(NpLoopMode.OFF)
+
+    /** 循环模式（fs-panel / more sheet 驱动；会话为 UI 侧单一真相，切换时同步给引擎） */
+    val loopMode: StateFlow<NpLoopMode> = _loopMode.asStateFlow()
+
+    fun setLoopMode(mode: NpLoopMode) {
+        _loopMode.value = mode
+        _player.value?.setLoopMode(mode)
     }
 
     /** 选集面板：跳到队列指定项 */
     fun selectQueueIndex(index: Int) {
         if (index !in _queue.value.indices) return
+        // 切集前把**离开的那一项**的进度落盘——否则从选集/底栏跳集会把断点丢掉
+        // （页退落盘只记得住当前项）。
+        persistPosition()
         _index.value = index
         _player.value?.selectQueueIndex(index)
         events.publish(KernelEvent.PlaybackStarted(_queue.value[index].id))
