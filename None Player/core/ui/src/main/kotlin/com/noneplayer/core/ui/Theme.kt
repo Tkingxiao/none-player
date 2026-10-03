@@ -32,40 +32,46 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.graphics.createBitmap
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
 /**
  * None Player 设计令牌 → Material ColorScheme 的映射。
  *
- * 色板的唯一事实源是 [InkTokens]（`DesignTokens.kt`）：美学主张「暗室与放映灯」——
- * 中性面是带琥珀色相的暖黑/暖米，accent 只用于主操作与"正在播放"。这里把 Ink 令牌
- * 投影到 M3 槽位，使所有读 `MaterialTheme.colorScheme` 的既有界面**自动**获得暖化分层；
- * 需要更精细材质（玻璃/高光/选中底）的组件再经 [LocalNpInk] 取用原始令牌。
+ * 色板的唯一事实源是 [InkTokens]（`DesignTokens.kt`），来自设计稿 `none-player.html`。
+ * 这里把 Ink 令牌投影到 M3 槽位，使所有读 `MaterialTheme.colorScheme` 的既有界面
+ * **自动**获得同一套配色；需要更精细材质（玻璃/高光/选中底）的组件再经 [LocalNpInk]
+ * 取用原始令牌。
+ *
+ * 设计稿的 `--surface` 与 `--bg` 在亮色下同为纯白——这意味着 M3 的
+ * "surface 比 background 亮一档"惯例在这里不成立。投影时刻意保留这个相等关系：
+ * 亮色下的层次全靠发丝描边与投影，改动它会同时改掉整套卡片的读法。
  */
 private fun ColorScheme.applyInk(ink: InkTokens): ColorScheme = copy(
     primary = ink.accent,
-    onPrimary = ink.onAccent,
+    onPrimary = if (ink.isDark) Color(0xFF1C150E) else Color.White,
     secondary = ink.accent,
-    onSecondary = ink.onAccent,
-    secondaryContainer = ink.accentBg,
-    onSecondaryContainer = ink.accentStrong,
-    tertiary = ink.accentStrong,
-    onTertiary = ink.onAccent,
+    onSecondary = if (ink.isDark) Color(0xFF1C150E) else Color.White,
+    secondaryContainer = ink.accentSoft,
+    onSecondaryContainer = ink.accent,
+    tertiary = ink.accent,
+    onTertiary = ink.bg,
     background = ink.bg,
-    onBackground = ink.label,
-    surface = ink.surface1,
-    onSurface = ink.label,
+    onBackground = ink.fg,
+    surface = ink.surface,
+    onSurface = ink.fg,
     surfaceVariant = ink.surface2,
-    onSurfaceVariant = ink.label2,
-    surfaceContainerLowest = ink.void,
-    surfaceContainerLow = ink.bg,
-    surfaceContainer = ink.surface1,
-    surfaceContainerHigh = ink.surface2,
-    surfaceContainerHighest = ink.surface3,
-    outline = ink.label3,
-    outlineVariant = ink.separator,
-    error = ink.destructive,
+    onSurfaceVariant = ink.muted,
+    surfaceContainerLowest = ink.bg,
+    surfaceContainerLow = ink.surface,
+    surfaceContainer = ink.surface,
+    surfaceContainerHigh = ink.surface,
+    surfaceContainerHighest = ink.surface2,
+    outline = ink.muted,
+    outlineVariant = ink.border,
+    error = ink.danger,
+    onError = ink.bg,
     scrim = ink.scrim,
 )
 
@@ -101,16 +107,29 @@ fun NonePlayerTheme(
     val frozenAlpha = remember { Animatable(0f) }
 
     LaunchedEffect(darkTheme) {
-        if (darkTheme == appliedDark) return@LaunchedEffect
+        // 已经切过了（例如快速连点后 effect 重跑）：把可能残留的冻结帧摘掉再退出。
+        // 不摘的话，上一次被取消的淡出会把一张旧画面的位图永久留在界面上。
+        if (darkTheme == appliedDark) {
+            frozenFrame = null
+            return@LaunchedEffect
+        }
         val window = (context as? Activity)?.window
         val captured = window?.let { captureWindow(it) }
-        if (captured != null) {
-            frozenFrame = captured.asImageBitmap()
-            frozenAlpha.snapTo(1f)
-        }
-        appliedDark = darkTheme
-        if (captured != null) {
-            frozenAlpha.animateTo(0f, tween(SCHEME_ANIMATION_MS, easing = LinearEasing))
+        try {
+            if (captured != null) {
+                frozenFrame = captured.asImageBitmap()
+                frozenAlpha.snapTo(1f)
+            }
+            appliedDark = darkTheme
+            if (captured != null) {
+                frozenAlpha.animateTo(0f, tween(SCHEME_ANIMATION_MS, easing = LinearEasing))
+            }
+        } finally {
+            // **必须在 finally 里摘帧**：`animateTo` 在 effect 被取消时会抛
+            // CancellationException（快速连点、配置变更、进程回收都算），
+            // 此前把 `frozenFrame = null` 写在动画之后，取消时就跳过了这一句——
+            // 冻结帧以当时的 alpha 永久盖在界面上，表现为"切一次主题后整个界面变暗一层"，
+            // 且因为新外观已经生效，重进页面也不会自愈。
             frozenFrame = null
         }
     }
@@ -157,7 +176,7 @@ private suspend fun captureWindow(window: Window): Bitmap? =
             return@suspendCancellableCoroutine
         }
         val target = try {
-            Bitmap.createBitmap(
+            createBitmap(
                 width / CAPTURE_SCALE,
                 height / CAPTURE_SCALE,
                 Bitmap.Config.ARGB_8888,
