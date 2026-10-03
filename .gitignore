@@ -3,6 +3,7 @@
 **/.kotlin/
 **/.gradle/
 .kotlin/
+lint-results-debug.txt
 
 # ---- 本地环境与签名 ----
 local.properties
@@ -17,25 +18,7 @@ captures/
 .externalNativeBuild/
 .cxx/
 
-# ---- 审核过程材料（截图/帧数据等临时证据，不入库）----
-.audit/
-None Player/docs/
-Apple design skill.md
-功能修复档案.md
-功能审核文档.md
-界面设计路线.md
-wmv2-clip.avi
-xvid-clip.avi
-xvid-qpel.avi
-/音乐播放器界面设计
-/.shots2
-/.shots3
-/.shots
-/.shots-ui
-/.diag
-/.tmp_inspect
-lint-results-debug.txt
+# ---- 第三方参考仓库：仅本地参考，非本项目内容 ----
 /skills-main
-/UI还原对比
-/.tmpdex
-build-check.log
+/None Player/docs
+/None Player/docs
