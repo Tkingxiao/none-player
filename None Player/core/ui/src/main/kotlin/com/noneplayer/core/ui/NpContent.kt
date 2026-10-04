@@ -157,18 +157,24 @@ fun NpKindTag(
  * 读成"可拖控件"，而长大这个动作本身就是在告诉用户"你现在抓住它了"。
  *
  * 命中区 20dp（设计稿 `.track { height:20px }`）包住 3dp 的细线——细线好看但点不中。
+ *
+ * 未播段取 [InkTokens.border]：它是本系统里唯一"在中性底上安静可见"的色。
+ * 不能用 `fgSoft`（暗 6%/亮 4.5% 前景，贴在 `ink.bg` 上等于没有轨道，
+ * 进度就成了一段悬空的 accent 短条），更不能硬编白（白只适用于压在**视频画面**
+ * 上的件，见 `NpSeekBar`；页面底色在亮色主题下是纯白）。
  */
 @Composable
 fun NpTrackBar(
     progress: Float,
     onSeek: (Float) -> Unit,
     modifier: Modifier = Modifier,
-    trackColor: Color = Color.White.copy(alpha = 0.26f),
+    trackColor: Color? = null,
     fillColor: Color? = null,
     onDragStart: () -> Unit = {},
     onDragEnd: () -> Unit = {},
 ) {
     val ink = LocalNpInk.current
+    val track = trackColor ?: ink.border
     val fill = fillColor ?: ink.accent
     var dragging by remember { mutableFloatStateOf(0f) }
     var draggedProgress by remember { mutableFloatStateOf(progress) }
@@ -215,7 +221,7 @@ fun NpTrackBar(
                 .fillMaxWidth()
                 .height(NpDimens.trackLine)
                 .clip(RoundedCornerShape(2.dp))
-                .background(trackColor),
+                .background(track),
         ) {
             Box(
                 modifier = Modifier
@@ -242,6 +248,9 @@ fun NpTrackBar(
  *
  * 与 [NpTrackBar] 的区别：**不可交互**。它是"放到哪了"的弱提示，
  * 不是控件——加了命中区反而会和下方内容的滚动手势打架。
+ *
+ * 底轨同 [NpTrackBar] 取 [InkTokens.border]（`fgSoft` 在 `ink.glass = ink.bg`
+ * 的迷你条上，亮色主题下白底白线不可见）。
  */
 @Composable
 fun NpMiniProgress(
@@ -262,7 +271,7 @@ fun NpMiniProgress(
         modifier = modifier
             .fillMaxWidth()
             .height(NpDimens.miniProgress)
-            .background(trackColor ?: ink.fgSoft),
+            .background(trackColor ?: ink.border),
     ) {
         Box(
             modifier = Modifier

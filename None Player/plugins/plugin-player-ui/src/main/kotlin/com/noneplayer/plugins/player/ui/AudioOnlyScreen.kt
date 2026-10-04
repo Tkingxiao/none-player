@@ -190,7 +190,6 @@ fun AudioOnlyScreen(
                     onSeek = { fraction ->
                         (snapshot.durationMs * fraction).let { player.seekTo(it.toLong()) }
                     },
-                    trackColor = ink.fgSoft,
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
