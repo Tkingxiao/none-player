@@ -27,6 +27,10 @@ import com.homesoft.exo.extractor.AviExtractorsFactory
 internal const val SCRUB_COMMAND = "np.scrub"
 internal const val SCRUB_ARG_ACTIVE = "active"
 
+/** 画面裁剪命令：UI「画面」面板切换 cover/fit（同样只在会话侧暴露） */
+internal const val CROP_COMMAND = "np.crop"
+internal const val CROP_ARG_ACTIVE = "active"
+
 /** 会话通知点击落点的 PendingIntent 请求码 */
 private const val REQUEST_LAUNCH = 100
 private const val REQUEST_DEEPLINK = 101
@@ -259,11 +263,12 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * 会话回调：放行 np.scrub 自定义命令，并在收到时切换 ExoPlayer 的擦洗模式。
+     * 会话回调：放行 np.scrub / np.crop 自定义命令，并在收到时切换 ExoPlayer
+     * 的擦洗模式与画面缩放模式。
      *
      * 1.8+ 官方擦洗模式（CLOSEST_SYNC 就近定位 + 关闭开销大的后处理），
-     * 松手恢复常规精确 seek。MediaController 无法直接调用 setScrubbingModeEnabled，
-     * 必须经会话侧转发。
+     * 松手恢复常规精确 seek。setScrubbingModeEnabled / setVideoScalingMode 都是
+     * ExoPlayer（会话侧）API，MediaController 无法直接调用，必须经会话侧转发。
      */
     @OptIn(UnstableApi::class)
     private class ScrubAwareCallback(
@@ -277,6 +282,7 @@ class PlaybackService : MediaSessionService() {
             val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
                 .buildUpon()
                 .add(SessionCommand(SCRUB_COMMAND, Bundle.EMPTY))
+                .add(SessionCommand(CROP_COMMAND, Bundle.EMPTY))
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setAvailableSessionCommands(commands)
@@ -291,6 +297,18 @@ class PlaybackService : MediaSessionService() {
         ): ListenableFuture<SessionResult> {
             if (customCommand.customAction == SCRUB_COMMAND) {
                 player.setScrubbingModeEnabled(args.getBoolean(SCRUB_ARG_ACTIVE))
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            if (customCommand.customAction == CROP_COMMAND) {
+                // 满窗裁剪（cover）/ 按比例适配（fit）——§2.4「画面」面板的引擎侧开关；
+                // 比例/镜像/旋转由 UI 层布局与 graphicsLayer 承担，不经会话
+                player.setVideoScalingMode(
+                    if (args.getBoolean(CROP_ARG_ACTIVE, false)) {
+                        C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                    } else {
+                        C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+                    },
+                )
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }
             return super.onCustomCommand(session, controller, customCommand, args)

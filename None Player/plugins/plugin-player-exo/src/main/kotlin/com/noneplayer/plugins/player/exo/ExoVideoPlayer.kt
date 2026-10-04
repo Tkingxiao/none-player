@@ -5,24 +5,37 @@ import android.content.Context
 import android.net.Uri
 import android.os.Bundle
 import android.view.SurfaceView
+import android.view.TextureView
+import androidx.annotation.OptIn
 import androidx.core.net.toUri
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
+import androidx.media3.common.Label
 import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.Metadata
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
+import androidx.media3.common.TrackSelectionOverride
+import androidx.media3.common.TrackGroup
+import androidx.media3.common.TrackSelectionParameters
+import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.extractor.metadata.Chapter
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import com.noneplayer.core.media.PlaybackFailure
 import com.noneplayer.core.media.probe.FormatProbe
 import com.noneplayer.kernel.api.CuePlacement
+import com.noneplayer.kernel.api.NpChapter
+import com.noneplayer.kernel.api.NpTrack
+import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.NpLoopMode
@@ -62,6 +75,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private val _durationMs = MutableStateFlow(0L)
     override val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
 
+    // S5 缓冲段可视化：与 position 同一轮询节拍读取（MediaController.bufferedPosition）
+    private val _bufferedPositionMs = MutableStateFlow(0L)
+    override val bufferedPositionMs: StateFlow<Long> = _bufferedPositionMs.asStateFlow()
+
     private val _videoAspectRatio = MutableStateFlow(0f)
     override val videoAspectRatio: StateFlow<Float> = _videoAspectRatio.asStateFlow()
 
@@ -73,6 +90,16 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private val _cues = MutableStateFlow<List<SubtitleCue>>(emptyList())
     override val cues: StateFlow<List<SubtitleCue>> = _cues.asStateFlow()
+
+    // 批次 3：内嵌轨道枚举与章节（轨道面板/章节面板数据源）
+    private val _tracks = MutableStateFlow<List<NpTrack>>(emptyList())
+    override val tracks: StateFlow<List<NpTrack>> = _tracks.asStateFlow()
+
+    private val _chapters = MutableStateFlow<List<NpChapter>>(emptyList())
+    override val chapters: StateFlow<List<NpChapter>> = _chapters.asStateFlow()
+
+    /** 轨道选择键 → (轨道组, 轨道序号)，selectTrack 时还原成 TrackSelectionOverride */
+    private val trackGroupById = HashMap<String, Pair<Tracks.Group, Int>>()
 
     /** C21：起播探测的"仅软解可用"提示（null = 无） */
     private val _decodeNotice = MutableStateFlow<String?>(null)
@@ -117,6 +144,38 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     // 在连接完成时判断：已释放则直接释放新连接，不再挂到实例字段上。
     @Volatile
     private var released = false
+
+    // E43 字幕偏移：media3 的 Cue 流是"当前活跃的 Cue"（逐 Cue 时刻已被过滤掉），
+    // 偏移只能靠引擎侧缓冲"时间窗"实现——onCues 每次到达即闭合上一窗、开启新窗，
+    // 渲染时按 position - offset 落在哪个窗来取 Cue。
+    private var subtitleOffsetMs = 0L
+    private class CueWindow(val startMs: Long, var endMs: Long, var cues: List<SubtitleCue>)
+    private val cueHistory = ArrayDeque<CueWindow>()
+
+    private fun pushCues(positionMs: Long, mapped: List<SubtitleCue>) {
+        val last = cueHistory.lastOrNull()
+        if (last != null && last.startMs == positionMs) {
+            last.cues = mapped
+        } else {
+            last?.endMs = (positionMs - 1).coerceAtLeast(0L)
+            cueHistory.addLast(CueWindow(positionMs, Long.MAX_VALUE, mapped))
+        }
+        // 只保留最近的窗口：偏移量级是 ±1s，历史超过 3 分钟没有任何用处
+        while (cueHistory.size > 64 || cueHistory.firstOrNull()?.let { positionMs - it.startMs > 180_000 } == true) {
+            cueHistory.removeFirst()
+        }
+        recomputeCues(positionMs)
+    }
+
+    private fun recomputeCues(positionMs: Long) {
+        if (subtitleOffsetMs == 0L) {
+            _cues.value = cueHistory.lastOrNull()?.cues ?: emptyList()
+            return
+        }
+        // 正偏移 = 字幕延后：去找 (position - offset) 时刻活跃的那一窗
+        val t = positionMs - subtitleOffsetMs
+        _cues.value = cueHistory.lastOrNull { t >= it.startMs && t < it.endMs }?.cues ?: emptyList()
+    }
 
     init {
         val future = MediaController.Builder(
@@ -181,16 +240,32 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
                         // E1：字幕 Cue 出口——外挂与内嵌轨道统一从这里流向 UI 字幕浮层
                         override fun onCues(cueGroup: CueGroup) {
-                            _cues.value = cueGroup.cues.map { it.toKernelCue() }
+                            val mapped = cueGroup.cues.map { it.toKernelCue() }
+                            pushCues(controller?.currentPosition?.coerceAtLeast(0) ?: 0L, mapped)
+                        }
+
+                        // 批次 3：内嵌轨道枚举（音轨/字幕面板的数据源）
+                        override fun onTracksChanged(tracks: Tracks) {
+                            publishTracks(tracks)
+                            publishChapters(tracks, null)
+                        }
+
+                        // 章节经 metadata 通道到达（§12.5：MP4/Matroska 章节元数据）
+                        @OptIn(UnstableApi::class)
+                        override fun onMetadata(metadata: Metadata) {
+                            publishChapters(controller?.currentTracks ?: Tracks.EMPTY, metadata)
                         }
                     })
                     // 会话建立后补挂显示表面，并同步会话侧既有状态（速度/当前媒体）
-                    attachedDisplay?.let { c.setVideoSurfaceView(it as? SurfaceView) }
+                    attachSurfaceTo(c)
                     _speed.value = c.playbackParameters.speed
                     _currentUri.value = c.currentMediaItem?.localConfiguration?.uri?.toString()
                     // 会话已在播媒体时，新控制器不会再收到 onVideoSizeChanged：
                     // 主动同步一次画面比例，否则重进播放页"横屏视频自动全屏"因比例未知而失效
                     c.videoSize.takeIf { it.width > 0 && it.height > 0 }?.let { applyVideoSize(it) }
+                    // 同理：重进时轨道/章节也不会再回调，主动同步一次
+                    publishTracks(c.currentTracks)
+                    publishChapters(c.currentTracks, null)
                     connected.complete(c)
                     scope.launch { pollPosition(c) }
                 } catch (t: Throwable) {
@@ -218,6 +293,12 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             pendingSeekMs?.let { pending -> if (abs(position - pending) <= SEEK_SETTLE_MS) pendingSeekMs = null }
             val duration = c.duration
             if (duration > 0 && _durationMs.value != duration) _durationMs.value = duration
+            // 缓冲前沿夹在 [0, duration]：未就绪/未知时 media3 可能给 TIME_UNSET 或超出值，
+            // 直接透传会让进度条画出一段超出时长的"假缓冲"
+            val buffered = c.bufferedPosition.coerceIn(0L, if (duration > 0) duration else Long.MAX_VALUE)
+            if (_bufferedPositionMs.value != buffered) _bufferedPositionMs.value = buffered
+            // 字幕偏移非零时，按位置重取对应时间窗的 Cue（窗口边界由 onCues 到达时机维护）
+            if (subtitleOffsetMs != 0L) recomputeCues(position)
             delay(250)
         }
     }
@@ -289,6 +370,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     runCatching { controller?.clearMediaItems() }
                     _positionMs.value = 0L
                     _durationMs.value = 0L
+                    _bufferedPositionMs.value = 0L
                     terminalFailure = true
                     _state.value = PlaybackState.Error(probe.failure.reason, probe.failure)
                 }
@@ -314,7 +396,23 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     override fun attachDisplay(view: Any?) {
         attachedDisplay = view
-        controller?.setVideoSurfaceView(view as? SurfaceView)
+        attachSurfaceTo(controller)
+    }
+
+    /**
+     * 把 UI 侧表面挂到会话。
+     *
+     * 批次 3 用 TextureView 而非 SurfaceView：镜像/旋转只能靠视图变换实现，而
+     * SurfaceView 的画面由 SurfaceFlinger 独立合成、不吃任何 View/Compose 变换
+     * （`setProjection` 又不是公开 API）。TextureView 走正常渲染节点，变换生效。
+     */
+    private fun attachSurfaceTo(c: MediaController?) {
+        if (c == null) return
+        when (val view = attachedDisplay) {
+            is SurfaceView -> c.setVideoSurfaceView(view)
+            is TextureView -> c.setVideoTextureView(view)
+            else -> c.setVideoSurfaceView(null)
+        }
     }
 
     /**
@@ -359,7 +457,24 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     ) {
         val c = controller ?: return
         _queue.value.let { if (it.isNotEmpty()) _currentUri.value = it[safeIndex].uri }
-        c.setMediaItems(mediaItems, safeIndex, startPositionMs.coerceAtLeast(0L))
+        // 批次 3 修复：队列路径此前从不带 SubtitleConfiguration——字幕记忆/同名挂载
+        // 在"进页即 setQueue"的主流程上整体失效（applyMedia 只服务单媒体项路径）。
+        // 给**即将播放的那一项**烘上当前字幕地址；切集后由 setSubtitle 走重建路径。
+        val subtitle = subtitleUri
+        val items = if (subtitle != null) {
+            mediaItems.mapIndexed { index, item ->
+                if (index == safeIndex) {
+                    item.buildUpon()
+                        .setSubtitleConfigurations(listOf(subtitleConfiguration(subtitle)))
+                        .build()
+                } else {
+                    item
+                }
+            }
+        } else {
+            mediaItems
+        }
+        c.setMediaItems(items, safeIndex, startPositionMs.coerceAtLeast(0L))
         c.prepare()
         c.play()
     }
@@ -470,21 +585,139 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         when {
             uri == previous -> Unit
             uri == null && mountedSubtitleUri != null ->
-                setTextTracksEnabled(c, false)
+                setTextTracksEnabled(false)
             uri != null && uri == mountedSubtitleUri ->
-                setTextTracksEnabled(c, true)
+                setTextTracksEnabled(true)
             // 更换字幕文件：唯一需要重建媒体项的分支（探测未完成时由 applyMedia 带上）
             media == appliedUri -> applyMedia(media)
             else -> Unit
         }
     }
 
-    /** 文本轨开关（TrackSelectionParameters 对当前与后续媒体项生效） */
-    private fun setTextTracksEnabled(c: MediaController, enabled: Boolean) {
+    /**
+     * 文本轨开关（TrackSelectionParameters 对当前与后续媒体项生效）。
+     * 批次 3 起是公开契约：字幕面板的"关闭内嵌字幕"与外挂挂载共用同一开关（E32）。
+     */
+    override fun setTextTracksEnabled(enabled: Boolean) {
+        val c = controller ?: return
         c.trackSelectionParameters = c.trackSelectionParameters
             .buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !enabled)
             .build()
+    }
+
+    /** 内嵌轨道枚举：音轨/字幕轨各一条目，label 组合语言/标题/声道/角色标签 */
+    private fun publishTracks(tracks: Tracks) {
+        trackGroupById.clear()
+        val list = buildList {
+            tracks.groups.forEach { group ->
+                val type = when (group.type) {
+                    C.TRACK_TYPE_AUDIO -> NpTrackType.AUDIO
+                    C.TRACK_TYPE_TEXT -> NpTrackType.TEXT
+                    else -> return@forEach
+                }
+                for (i in 0 until group.length) {
+                    val format = group.getTrackFormat(i)
+                    // 同一 format.id 的多轨道（极少见）只暴露第一条，选择键保持稳定
+                    val id = format.id ?: "${type.name}_$i"
+                    if (trackGroupById.containsKey(id)) continue
+                    trackGroupById[id] = group to i
+                    val label = buildList {
+                        format.label?.let { add(it) }
+                        format.language?.let { add(languageName(it)) }
+                        if (type == NpTrackType.AUDIO) {
+                            format.channelCount.takeIf { it > 0 }?.let { add("${it}声道") }
+                        }
+                        if (format.roleFlags and C.ROLE_FLAG_DESCRIBES_VIDEO != 0) add("导评")
+                        if (format.roleFlags and C.ROLE_FLAG_DUB != 0) add("配音")
+                        if (format.roleFlags and C.ROLE_FLAG_COMMENTARY != 0) add("解说")
+                    }.ifEmpty { listOf("轨道 ${size + 1}") }
+                        .distinct()
+                        .joinToString(" · ")
+                    add(NpTrack(id = id, type = type, label = label, selected = group.isTrackSelected(i)))
+                }
+            }
+        }
+        _tracks.value = list
+    }
+
+    /** ISO 639 语言码的轻量展示（内嵌轨道面板不引 ICU 大表，常见码直译，其余原样展示） */
+    private fun languageName(code: String): String = when (code.lowercase()) {
+        "zh", "zho", "chi" -> "中文"
+        "en", "eng" -> "英语"
+        "ja", "jpn" -> "日语"
+        "ko", "kor" -> "韩语"
+        "und", "mis" -> "未知"
+        else -> code
+    }
+
+    /** 章节聚合：tracks 各 format 的 metadata + onMetadata 推送，按 startMs 去重排序 */
+    @OptIn(UnstableApi::class)
+    private fun publishChapters(tracks: Tracks, metadata: Metadata?) {
+        val raw = buildList {
+            tracks.groups.forEach { group ->
+                for (i in 0 until group.length) {
+                    group.getTrackFormat(i).metadata?.let { md ->
+                        for (j in 0 until md.length()) add(md[j])
+                    }
+                }
+            }
+            metadata?.let { md ->
+                for (j in 0 until md.length()) add(md[j])
+            }
+        }
+        val entries = raw.filterIsInstance<Chapter>()
+            .filter { !it.isHidden }
+            .mapNotNull { entry ->
+                val title = entry.title?.value?.toString()?.takeIf { it.isNotBlank() } ?: return@mapNotNull null
+                NpChapter(
+                    startMs = entry.startTimeMs,
+                    endMs = entry.endTimeMs,
+                    title = title,
+                )
+            }
+            .distinctBy { it.startMs }
+            .sortedBy { it.startMs }
+        if (entries.isNotEmpty()) _chapters.value = entries
+    }
+
+    /**
+     * 轨道选择：清掉同类型既有 override 再加新 override（TrackSelectionParameters
+     * 经 MediaController 设置，对会话侧播放器生效且不重建媒体项）。
+     */
+    override fun selectTrack(type: NpTrackType, id: String) {
+        val c = controller ?: return
+        val (group, index) = trackGroupById[id] ?: return
+        val trackType = when (type) {
+            NpTrackType.AUDIO -> C.TRACK_TYPE_AUDIO
+            NpTrackType.TEXT -> C.TRACK_TYPE_TEXT
+        }
+        runCatching {
+            // Tracks.Group.mediaTrackGroup 声明为 MediaTrackGroup 接口，实际必是 TrackGroup
+            val trackGroup = group.mediaTrackGroup as TrackGroup
+            c.trackSelectionParameters = c.trackSelectionParameters
+                .buildUpon()
+                .clearOverridesOfType(trackType)
+                .addOverride(TrackSelectionOverride(trackGroup, index))
+                .build()
+        }
+    }
+
+    /** 字幕偏移（E43）：正数=延后。立即按当前位置重取时间窗 */
+    override fun setSubtitleOffsetMs(offsetMs: Long) {
+        subtitleOffsetMs = offsetMs
+        controller?.let { recomputeCues(it.currentPosition.coerceAtLeast(0)) }
+    }
+
+    /**
+     * 画面裁剪（§2.4）：cover / fit。setVideoScalingMode 是 ExoPlayer（会话侧）
+     * API、MediaController 不暴露，与 np.scrub 同路转发（见 PlaybackService）。
+     */
+    override fun setVideoCrop(crop: Boolean) {
+        controller?.sendCustomCommand(
+            SessionCommand(CROP_COMMAND, Bundle.EMPTY),
+            Bundle().apply { putBoolean(CROP_ARG_ACTIVE, crop) },
+        )
     }
 
     override fun play() {
@@ -623,7 +856,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         appliedUri = mediaUri
         mountedSubtitleUri = subtitleUri
         // 媒体项重建后保证文本轨开启（清除态不经此路径，不会被误开）
-        setTextTracksEnabled(c, true)
+        setTextTracksEnabled(true)
         if (wasPlaying) c.play()
     }
 

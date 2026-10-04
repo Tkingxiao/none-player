@@ -17,7 +17,15 @@ import com.noneplayer.kernel.ui.api.ScreenProvider
 class PlayerScreenProvider : ScreenProvider {
 
     override val route: String = "player?uri={uri}&title={title}&mime={mime}&id={id}"
-    override val deepLinks: List<String> = listOf("noneplayer://player?uri={uri}")
+
+    // 深链带全量可选参数（都有 defaultValue，query 参数可省略）：
+    // 只声明 uri 的话，外部传入的 id/title/mime 会被导航静默丢弃——
+    // 批次 3 实测：同名挂载/断点续播这些 per-media 记忆在深链路径下全部失灵
+    override val deepLinks: List<String> =
+        listOf(
+            "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}",
+            "noneplayer://player?uri={uri}",
+        )
 
     override fun register(builder: NavGraphBuilder, navigator: Navigator) {
         builder.composable(

@@ -40,6 +40,15 @@ interface VideoPlayer {
     val durationMs: StateFlow<Long>
 
     /**
+     * 当前缓冲前沿（毫秒，§11.3 S5 缓冲段可视化）：进度条三段式
+     * 「已播 / 已缓冲 / 未缓冲」的中段数据源。未知或引擎不支持时为 0——
+     * UI 据此把缓冲段画成与未缓冲同色（零命中时不显示一段假缓冲）。
+     * 默认实现恒为 0（引擎未接入缓冲信息）。
+     */
+    val bufferedPositionMs: StateFlow<Long>
+        get() = MutableStateFlow(0L)
+
+    /**
      * 视频宽高比（宽/高，已考虑旋转），用于 UI 按比例渲染画面；
      * 未知为 0。默认实现返回常量 0 流（无画面信息的能力）。
      */
@@ -62,6 +71,20 @@ interface VideoPlayer {
      * 无字幕时为空列表。默认实现恒为空（引擎未接入字幕输出）。
      */
     val cues: StateFlow<List<SubtitleCue>>
+        get() = MutableStateFlow(emptyList())
+
+    /**
+     * 当前媒体的可选轨道（内嵌音频/字幕，批次 3 轨道面板）。
+     * 空列表 = 无内嵌轨道或引擎未接入轨道枚举。默认实现恒为空。
+     */
+    val tracks: StateFlow<List<NpTrack>>
+        get() = MutableStateFlow(emptyList())
+
+    /**
+     * 章节列表（§12.5，1.11.0+ MP4/Matroska 章节经 metadata 通道）。
+     * 空列表 = 无章节数据，UI 隐藏入口。默认实现恒为空。
+     */
+    val chapters: StateFlow<List<NpChapter>>
         get() = MutableStateFlow(emptyList())
 
     /**
@@ -137,6 +160,33 @@ interface VideoPlayer {
     fun setSubtitle(uri: String?) {}
 
     /**
+     * 选择内嵌轨道（批次 3 轨道面板）。[id] 来自 [tracks] 的 [NpTrack.id]；
+     * 不支持的引擎为空操作。选字幕轨时应同时恢复文本轨启用态。
+     */
+    fun selectTrack(type: NpTrackType, id: String) {}
+
+    /**
+     * 启用/禁用内嵌文本轨（字幕）。关闭 = 不显示任何内嵌字幕，
+     * 外挂挂载也经同一开关复原（E32）。不支持时为空操作。
+     */
+    fun setTextTracksEnabled(enabled: Boolean) {}
+
+    /**
+     * 字幕偏移（E43 / §12.5）：正数 = 字幕延后显示、负数 = 提前，
+     * 单位毫秒。引擎据此重排 Cue 出口的时间窗（media3 的 Cue 流不带
+     * 逐 Cue 时刻，偏移只能由引擎侧缓冲窗口实现）。不支持时为空操作。
+     */
+    fun setSubtitleOffsetMs(offsetMs: Long) {}
+
+    /**
+     * 画面裁剪模式（§2.4「画面」）：true = 满窗裁剪（cover），
+     * false = 按比例适配（fit）。映射 ExoPlayer 的 videoScalingMode；
+     * 布局比例/镜像/旋转由 UI 层 graphicsLayer 承担，不经引擎。
+     * 不支持时为空操作。
+     */
+    fun setVideoCrop(crop: Boolean) {}
+
+    /**
      * 进入/退出"擦洗"（进度条拖动）模式：进入时引擎应放宽 seek 精度换取响应速度，
      * 退出时恢复精确定位。不支持时为空操作。
      */
@@ -193,3 +243,24 @@ interface PlayerEngineProvider : ExtensionPoint {
     /** 是否支持目标 mimeType */
     fun supports(mimeType: String): Boolean
 }
+
+/** 轨道类型（批次 3 轨道面板） */
+enum class NpTrackType { AUDIO, TEXT }
+
+/**
+ * 一条可选轨道（内嵌音频/字幕轨）。[label] 是人类可读展示名
+ * （语言 / 标题 / 声道数 / 角色标签的组合），由引擎拼装；[id] 是选择键。
+ */
+data class NpTrack(
+    val id: String,
+    val type: NpTrackType,
+    val label: String,
+    val selected: Boolean,
+)
+
+/** 章节（§12.5：MP4/Matroska 章节经 metadata 通道暴露） */
+data class NpChapter(
+    val startMs: Long,
+    val endMs: Long,
+    val title: String,
+)

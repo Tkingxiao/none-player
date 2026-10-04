@@ -216,6 +216,23 @@ object NpIcon {
         filled("NpSkipNext", "M16 5h1a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-1a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1zM5 5v14l9-7z")
     }
 
+    // ---- 播放页控制层（锁定键 / 顶栏自绘时钟电量，批次 2）----
+
+    /** 锁定（闭环锁体 + 弧形锁梁）——播放页「锁屏」键 */
+    val Lock: ImageVector by lazy {
+        stroke("NpLock", "M7 11h10a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1zM8.5 11V8a3.5 3.5 0 0 1 7 0v3")
+    }
+
+    /** 解锁（锁梁一端翘开）——锁定态的解锁键 */
+    val LockOpen: ImageVector by lazy {
+        stroke("NpLockOpen", "M7 11h10a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1zM8.5 11V7.5a3.5 3.5 0 0 1 6.9-.9")
+    }
+
+    /** 电池（横向壳体 + 正极端子 + 内部电量条）——顶栏自绘电量 */
+    val Battery: ImageVector by lazy {
+        stroke("NpBattery", "M3 8h14a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1zM20 10.5v3M5 10.5h6v3H5z")
+    }
+
     // ---- 构造器 ----
 
     /**

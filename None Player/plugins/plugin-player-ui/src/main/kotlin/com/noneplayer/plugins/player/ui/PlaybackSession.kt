@@ -90,6 +90,11 @@ class PlaybackSession(
         _audioOnly.value = !_audioOnly.value
     }
 
+    /** 直接置位（§5.1 per-media 记忆恢复：进同一文件时直接进音频形态） */
+    fun setAudioOnly(value: Boolean) {
+        _audioOnly.value = value
+    }
+
     private val _queue = MutableStateFlow<List<MediaItem>>(emptyList())
     val queue: StateFlow<List<MediaItem>> = _queue.asStateFlow()
 

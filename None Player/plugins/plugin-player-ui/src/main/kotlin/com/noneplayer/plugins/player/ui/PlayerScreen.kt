@@ -1,13 +1,21 @@
 package com.noneplayer.plugins.player.ui
 
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
 import android.graphics.Point
+import android.media.AudioManager
+import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
-import android.view.SurfaceView
+import android.view.HapticFeedbackConstants
+import android.view.KeyEvent
+import android.view.TextureView
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -81,6 +89,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -106,12 +115,14 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.graphics.createBitmap
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -152,7 +163,10 @@ import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.Navigator
+import com.noneplayer.kernel.api.NpChapter
 import com.noneplayer.kernel.api.NpLoopMode
+import com.noneplayer.kernel.api.NpTrack
+import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.VideoPlayer
@@ -164,6 +178,14 @@ import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.PlaybackContext
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
+import com.noneplayer.plugins.player.ui.controls.NpSeekBar
+import com.noneplayer.plugins.player.ui.controls.StatusClockBattery
+import com.noneplayer.plugins.player.ui.gesture.GESTURE_INDICATOR_HOLD_MS
+import com.noneplayer.plugins.player.ui.gesture.SeekGestureBubble
+import com.noneplayer.plugins.player.ui.gesture.StageTapZone
+import com.noneplayer.plugins.player.ui.gesture.StageVerticalMode
+import com.noneplayer.plugins.player.ui.gesture.VerticalAdjustIndicator
+import com.noneplayer.plugins.player.ui.gesture.npStageGestures
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -173,6 +195,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import kotlin.math.abs
+import kotlin.math.roundToLong
 import kotlin.math.roundToInt
 
 /** 倍速预设（设计稿 `.speeds` 的档位与顺序：0.5x → 2.0x） */
@@ -461,9 +484,13 @@ fun PlayerScreen(
             if (saved > 5_000) player.seekTo(saved)
             player.setSpeed(settings.playbackSpeed.first())
             if (mediaId.isNotEmpty()) {
-                settings.subtitleUri(mediaId).first()?.let { saved ->
-                    player.setSubtitle(prepareSubtitleUri(context, saved.toUri()))
+                val saved = settings.subtitleUri(mediaId).first()
+                // 同名字幕自动挂载（批次 3 §12.6）：无记忆时按 ASS > SSA > SRT > VTT
+                // 找同目录同名文件；命中即记忆，之后与手动挂载走同一恢复链路
+                val subtitle = saved ?: resolveSiblingSubtitle(context, uri)?.also {
+                    scope.launch { settings.setSubtitleUri(mediaId, it) }
                 }
+                subtitle?.let { player.setSubtitle(prepareSubtitleUri(context, it.toUri())) }
             }
             player.play()
         } else {
@@ -479,6 +506,8 @@ fun PlayerScreen(
     val state by player.state.collectAsStateWithLifecycle()
     val positionMs by player.positionMs.collectAsStateWithLifecycle()
     val durationMs by player.durationMs.collectAsStateWithLifecycle()
+    // S5 缓冲段可视化：进度条三段式的"已缓冲"段数据源
+    val bufferedPositionMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
     val videoAspectRatio by player.videoAspectRatio.collectAsStateWithLifecycle()
     val cues by player.cues.collectAsStateWithLifecycle()
     // 队列与下标提到组合顶层：底部控制层（上/下一集按钮）与选集面板两处都要用，
@@ -561,23 +590,11 @@ fun PlayerScreen(
     }
     // 全屏时返回键先退出全屏（业界一致语义）；第二次返回才离开播放页。
     //
-    // **"退出全屏"必须能真的退掉**，否则返回键会被无限吞掉。两个坑叠在一起：
-    // ① `setFullscreen(false)` 只是**请求**竖向，系统未必照办（用户锁了自动旋转）；
-    // ② 平板/横屏终端的**自然方向就是横向**，压根不存在"回竖向"这一步——
-    //    而 `isFullscreen`（= 窗口横向）在平板上恒为 true，`BackHandler` 恒使能。
-    // 于是每次返回都只发一个不会生效的方向请求、页面纹丝不动。实测连按 6 次仍停在
-    // 播放页，用户被关在里面出不去（竖屏/手机横屏不会命中，因为它们的窗口能真转）。
-    //
-    // 语义：请求竖向并**确认窗口真的转了**，才算"退出了全屏"；转不过去就把这次返回
-    // 交给导航栈（离开播放页），保证用户总能出去。
-    //
-    // 为什么是"确认"而不是"直接 pop"：手机上点视频不会强制转屏（E48），横屏只可能来自
-    // 两种情况——用户点了「全屏」，或把设备横了过来。前者有"退出全屏"这一步，返回键应当
-    // 先退全屏而不是直接离开播放页（业界一致语义，也是本项目既有验收项）。
-    // 判据只能是"竖向请求有没有兑现"：`requestedOrientation` 是请求不是事实，系统可能拒绝
-    // （用户锁了自动旋转），平板/横屏终端的自然方向更是本来就横向、压根没有竖向可回，
-    // 此时若还认自己"退出了全屏"，`isFullscreen` 恒为 true、`BackHandler` 恒使能，
-    // 返回键就被无限吞掉（实测平板横屏连按 6 次仍停在播放页，用户被关在里面）。
+    // **"退出全屏"必须能真的退掉**，否则返回键会被无限吞掉：`isFullscreen`（= 窗口横向）
+    // 在平板横持 / 手机横持时恒为 true、`BackHandler` 恒使能，而 `setFullscreen(false)`
+    // 只是**请求**竖向，系统未必照办（平板自然方向本就是横向 / 手机横持时被传感器拉回）
+    // ——若把"请求发出去了"当成"全屏退掉了"，每次返回都在做同一个不留结果的动作。
+    // 实测两机型连按 6 次都退不出播放页，用户被关在里面。
     //
     // 「返回键该不该先退出全屏」的判据：**这次横向是不是用户自己点「全屏」要来的**。
     //
@@ -622,7 +639,14 @@ fun PlayerScreen(
     fun requestExitFullscreen() {
         setFullscreen(false)
     }
+    // ---- 锁屏锁定键（批次 2 / §4.2 顶栏 🔒）----
+    // 锁定语义：屏蔽**全部**舞台手势、返回键与键盘，仅顶部解锁钮可点——口袋/带娃
+    // 场景防误触；控制层与全部弹层的收口见下方 LaunchedEffect（那里各弹层状态才已声明）。
+    var stageLocked by rememberSaveable { mutableStateOf(false) }
     BackHandler(enabled = isFullscreen) { exitFullscreenOrLeave() }
+    // 锁定态吞掉返回（后注册的 BackHandler 优先）：解锁钮是唯一出口，
+    // 防止口袋里按返回悄悄离开播放页
+    BackHandler(enabled = stageLocked) { }
 
     // 系统栏随沉浸状态联动：手机式横屏沉浸（滑动呼出），其余形态显示系统栏
     DisposableEffect(isImmersive) {
@@ -819,27 +843,102 @@ fun PlayerScreen(
             0,
         )
     }
-    /** 双击左右半屏：±10 秒（设计稿「双击动作：快退 / 快进 10 秒」）。 */
+    // ---- 手势层（批次 2 / §4.3 状态机 + 指示器）----
+    // 触觉走 view 层常量：Compose 的 HapticFeedbackType 只有长按/文本手柄两种，
+    // 规格要的"边界 tick（CLOCK_TICK）"只有 view API 有。
+    val hapticView = LocalView.current
+    fun tickHaptic() {
+        hapticView.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+    }
+
+    /** 双击 ∓/±10 秒：撞到 0/末尾边界时给一次拒绝触觉（§4.3「越过边界 REJECT 同款 tick」）。 */
     fun seekByGesture(forward: Boolean) {
         val step = 10_000L
-        val target = (player.positionMs.value + if (forward) step else -step)
-            .coerceIn(0L, durationMs.coerceAtLeast(0L))
+        val raw = player.positionMs.value + if (forward) step else -step
+        val target = raw.coerceIn(0L, durationMs.coerceAtLeast(0L))
+        if (target != raw) tickHaptic()
         player.seekTo(target)
         gestureHint = if (forward) "快进 10 秒" else "快退 10 秒"
     }
 
-    /** 滑动调亮度：delta 为"屏幕宽度的百分比"，累加到当前值。 */
-    fun adjustBrightnessBy(delta: Float) {
-        setBrightnessPercent((brightnessPercent + delta).roundToInt())
-        gestureHint = "亮度 $brightnessPercent%"
+    /** 双击分区（§4.3）：左右 1/3 = 快退/快进 10 秒；**中心 = 播放/暂停**。 */
+    fun onStageDoubleTap(zone: StageTapZone) {
+        when (zone) {
+            StageTapZone.Back -> seekByGesture(false)
+            StageTapZone.Forward -> seekByGesture(true)
+            StageTapZone.Center -> togglePlay()
+        }
     }
 
-    /** 滑动调音量：同上。 */
-    fun adjustVolumeBy(delta: Float) {
-        setVolumePercent((volumePercent + delta).roundToInt())
-        gestureHint = "音量 $volumePercent%"
+    // 横滑 seek（§4.3）：拖动中视频照常播放，中央气泡只呈现"松手会去哪"；
+    // 松手才真正 seekTo（与进度条拖动的"关键帧预览"是两条路径，互不混用）
+    var seekGestureActive by remember { mutableStateOf(false) }
+    var seekGestureTargetMs by remember { mutableFloatStateOf(0f) }
+    var seekGestureEdgeTicked by remember { mutableStateOf(false) }
+    fun onSeekGestureStart() {
+        // 与长按 3x 的竞争收口：拖动一开始就恢复原速——"3x 快进 + seek"叠加没有任何合理语义
+        if (boostHintVisible) {
+            player.setSpeed(boostPreviousSpeed)
+            boostHintVisible = false
+        }
+        controlsVisible = true
+        seekGestureTargetMs = positionMs.toFloat()
+        seekGestureEdgeTicked = false
+        seekGestureActive = true
     }
+    fun onSeekGestureDelta(deltaMs: Float) {
+        val raw = seekGestureTargetMs + deltaMs
+        val clamped = raw.coerceIn(0f, maxPosition)
+        if (raw != clamped && !seekGestureEdgeTicked) {
+            tickHaptic()
+            seekGestureEdgeTicked = true
+        } else if (raw in 0f..maxPosition) {
+            // 拉回界内后重新武装边界 tick（同一次拖动里反复撞边界各 tick 一次）
+            seekGestureEdgeTicked = false
+        }
+        seekGestureTargetMs = clamped
+    }
+    fun onSeekGestureEnd() {
+        seekGestureActive = false
+        val target = seekGestureTargetMs.toLong()
+        pendingSeekMs = target
+        player.seekTo(target)
+    }
+
+    // 竖滑亮度/音量指示器（§4.3：160dp 竖条 + 图标 + 百分比，900ms 无更新淡出）
+    var verticalGesture by remember { mutableStateOf<StageVerticalMode?>(null) }
+    var verticalGestureTickMs by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(verticalGesture, verticalGestureTickMs) {
+        if (verticalGesture != null) {
+            delay(GESTURE_INDICATOR_HOLD_MS)
+            verticalGesture = null
+        }
+    }
+    fun onVerticalGestureStart(mode: StageVerticalMode) {
+        if (boostHintVisible) {
+            player.setSpeed(boostPreviousSpeed)
+            boostHintVisible = false
+        }
+        verticalGesture = mode
+        verticalGestureTickMs = SystemClock.uptimeMillis()
+    }
+    fun onVerticalGestureDelta(mode: StageVerticalMode, deltaPercent: Float) {
+        // 上滑 = 增大（市面播放器一致的手感）：pointer 的 y 轴向下为正，这里取负
+        when (mode) {
+            StageVerticalMode.Brightness ->
+                setBrightnessPercent((brightnessPercent - deltaPercent).roundToInt())
+            StageVerticalMode.Volume ->
+                setVolumePercent((volumePercent - deltaPercent).roundToInt())
+        }
+        verticalGestureTickMs = SystemClock.uptimeMillis()
+    }
+
     fun enterPip() {
+        // §5.1：仅听音频与 PiP 互斥——小窗里没有画面，进入只是个小黑框
+        if (session.audioOnly.value) {
+            toast.show("仅听音频模式下没有画面可显示")
+            return
+        }
         val a = context as? ComponentActivity ?: return
         runCatching {
             a.enterPictureInPictureMode(
@@ -849,6 +948,220 @@ fun PlayerScreen(
             )
         }
         toast.show("已进入画中画")
+    }
+
+    // 锁定语义：屏蔽**全部**舞台手势、返回键与键盘，仅顶部解锁钮可点——
+    // 口袋/带娃场景防误触。控制层与全部弹层的收口在下方 LaunchedEffect（那里
+    // 各弹层状态才已声明）。
+    LaunchedEffect(stageLocked) {
+        if (stageLocked) {
+            controlsVisible = false
+            episodePanelVisible = false
+            fsPanelVisible = false
+            speedPickerVisible = false
+            subtitleSheetVisible = false
+            moreSheetVisible = false
+            fileInfoVisible = false
+        }
+    }
+
+    /**
+     * 两种形态的舞台手势接线（§4.3）——收敛成一处，避免双份漂移。
+     * 锁定态（[stageLocked]）整体禁用；点按单独再判一次：手势开关关闭的用户
+     * 仍需点按呼出控制层，但锁定的用户连这个也不该有。
+     */
+    fun stageGestures(): Modifier =
+        Modifier.npStageGestures(
+            gesturesEnabled = gesturesEnabled && !stageLocked,
+            onTap = { if (!stageLocked) controlsVisible = !controlsVisible },
+            onDoubleTap = ::onStageDoubleTap,
+            onLongPressStart = {
+                boostPreviousSpeed = speed
+                player.setSpeed(3f)
+                boostHintVisible = true
+                hapticView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+            },
+            onLongPressEnd = {
+                if (boostHintVisible) {
+                    player.setSpeed(boostPreviousSpeed)
+                    boostHintVisible = false
+                }
+            },
+            onSeekStart = ::onSeekGestureStart,
+            onSeekDelta = ::onSeekGestureDelta,
+            onSeekEnd = ::onSeekGestureEnd,
+            onVerticalStart = ::onVerticalGestureStart,
+            onVerticalDelta = ::onVerticalGestureDelta,
+        )
+
+    // ================= 批次 3：轨道 / 章节 / 画面 / 偏移 / PiP / 睡眠 / 截图 =================
+
+    // 内嵌轨道与章节（引擎经 onTracksChanged/onMetadata 推送；面板据此渲染）
+    val tracks by player.tracks.collectAsStateWithLifecycle()
+    val chapters by player.chapters.collectAsStateWithLifecycle()
+    // 字幕三态文案：外挂优先，其次内嵌轨被选中（CC 钮点亮与面板取值同一真相）
+    val subtitleText = when {
+        subtitleLoaded -> "已挂载"
+        tracks.any { it.type == NpTrackType.TEXT && it.selected } -> "内嵌"
+        else -> "关闭"
+    }
+    val subtitleOn = subtitleText != "关闭"
+
+    // 画面显示记忆（§2.4 比例 / 镜像 / 旋转，per-media 落盘）
+    var scaleMode by remember(mediaId) { mutableStateOf(VideoScaleMode.FIT) }
+    var mirrored by remember(mediaId) { mutableStateOf(false) }
+    var rotation by remember(mediaId) { mutableIntStateOf(0) }
+    LaunchedEffect(mediaId) {
+        val (mode, mirror, rot) = parseDisplaySettings(settings.displaySettings(mediaId).first())
+        scaleMode = mode
+        mirrored = mirror
+        rotation = rot
+    }
+    fun updateDisplaySettings(
+        mode: VideoScaleMode = scaleMode,
+        mirror: Boolean = mirrored,
+        rot: Int = rotation,
+    ) {
+        scaleMode = mode
+        mirrored = mirror
+        rotation = rot
+        scope.launch { settings.setDisplaySettings(mediaId, serializeDisplaySettings(mode, mirror, rot)) }
+    }
+    // 裁剪是引擎侧缩放模式（np.crop 命令）；比例走布局，镜像/旋转走画面 View 变换
+    LaunchedEffect(scaleMode) { player.setVideoCrop(scaleMode == VideoScaleMode.CROP) }
+
+    // 字幕偏移（E43）：±1000ms / 50ms 步进，正数 = 延后。会话级（不跨进程记忆）
+    var subtitleOffsetMs by remember { mutableLongStateOf(0L) }
+    fun adjustSubtitleOffset(deltaMs: Long) {
+        subtitleOffsetMs = (subtitleOffsetMs + deltaMs).coerceIn(-1_000L, 1_000L)
+        player.setSubtitleOffsetMs(subtitleOffsetMs)
+    }
+
+    // 面板开关
+    var audioTrackSheetVisible by remember { mutableStateOf(false) }
+    var pictureSheetVisible by remember { mutableStateOf(false) }
+    var chaptersPanelVisible by remember { mutableStateOf(false) }
+
+    // 睡眠定时：绝对到期时间（epoch ms），0 = 关。到期暂停播放。
+    var sleepTimerEndsAtMs by rememberSaveable { mutableLongStateOf(0L) }
+    val sleepLabel = if (sleepTimerEndsAtMs > 0) {
+        "睡眠 ${((sleepTimerEndsAtMs - System.currentTimeMillis()).coerceAtLeast(0) / 60_000 + 1)}分"
+    } else {
+        "睡眠定时"
+    }
+
+    /** 睡眠定时两态开关（30 分钟档）：档位扩展留给设置页 */
+    fun toggleSleepTimer() {
+        if (sleepTimerEndsAtMs > 0) {
+            sleepTimerEndsAtMs = 0
+            toast.show("睡眠定时已取消")
+        } else {
+            sleepTimerEndsAtMs = System.currentTimeMillis() + 30 * 60_000
+            toast.show("将在 30 分钟后暂停")
+        }
+    }
+    LaunchedEffect(sleepTimerEndsAtMs) {
+        val endsAt = sleepTimerEndsAtMs
+        if (endsAt <= 0) return@LaunchedEffect
+        val remain = endsAt - System.currentTimeMillis()
+        if (remain > 0) delay(remain)
+        if (sleepTimerEndsAtMs > 0 && System.currentTimeMillis() >= sleepTimerEndsAtMs) {
+            sleepTimerEndsAtMs = 0
+            player.pause()
+            toast.show("睡眠定时：已暂停播放")
+        }
+    }
+
+    // 截图（TextureView 取当前帧，落 Pictures/None Player）
+    val surfaceViewRef = remember { mutableStateOf<TextureView?>(null) }
+    fun screenshot() {
+        val view = surfaceViewRef.value
+        if (view == null || view.width == 0 || view.height == 0) {
+            toast.show("画面尚未就绪，稍后再试")
+            return
+        }
+        val bitmap = runCatching { view.getBitmap(view.width, view.height) }.getOrNull()
+        if (bitmap == null) {
+            toast.show("截图失败")
+            return
+        }
+        runCatching {
+            scope.launch(Dispatchers.IO) {
+                val values = android.content.ContentValues().apply {
+                    put(
+                        android.provider.MediaStore.Images.Media.DISPLAY_NAME,
+                        "noneplayer_${System.currentTimeMillis()}.png",
+                    )
+                    put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+                    put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/None Player")
+                }
+                val saved = context.contentResolver
+                    .insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                    ?.let { u ->
+                        context.contentResolver.openOutputStream(u)?.use { out ->
+                            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+                            u
+                        }
+                    }
+                withContext(Dispatchers.Main) {
+                    toast.show(if (saved != null) "截图已保存到相册" else "截图保存失败")
+                }
+            }
+        }.onFailure { toast.show("截图失败") }
+    }
+
+    // PiP（§5.3）：竖屏比例小窗、播放中自动进入（API 31+ autoEnter）、仅听音频时禁用
+    var inPipMode by remember { mutableStateOf(false) }
+    DisposableEffect(activity) {
+        val act = activity ?: return@DisposableEffect onDispose { }
+        val listener = androidx.core.util.Consumer<androidx.core.app.PictureInPictureModeChangedInfo> { info ->
+            inPipMode = info.isInPictureInPictureMode
+        }
+        act.addOnPictureInPictureModeChangedListener(listener)
+        onDispose { act.removeOnPictureInPictureModeChangedListener(listener) }
+    }
+    // PiP 中控制层与悬浮元素全部收起（§5.3「控制层在 PiP 中自动隐藏」）
+    LaunchedEffect(inPipMode) {
+        if (inPipMode) {
+            controlsVisible = false
+            fsPanelVisible = false
+            episodePanelVisible = false
+            audioTrackSheetVisible = false
+            pictureSheetVisible = false
+            chaptersPanelVisible = false
+            speedPickerVisible = false
+        }
+    }
+    // 参数跟随：比例跟随视频、播放中（且非仅音频）才自动进入；暂停即收回 autoEnter，
+    // 用户上滑回桌面时停在暂停画面上不该弹一个小窗
+    LaunchedEffect(videoAspectRatio, state, audioOnly, inPipMode) {
+        val act = activity ?: return@LaunchedEffect
+        if (inPipMode) return@LaunchedEffect
+        runCatching {
+            val ratio = videoAspectRatio.takeIf { it > 0f } ?: 16f / 9f
+            val builder = PictureInPictureParams.Builder()
+                .setAspectRatio(android.util.Rational((ratio * 1000).roundToInt().coerceAtLeast(1), 1000))
+                .setActions(pipActions(context, state == PlaybackState.Playing))
+            // 这两个 setter 是 API 31+（minSdk 26），低版本直接调会 NoSuchMethodError；
+            // 不设置即退回用户手动拖入小窗，PiP 本身仍可用
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                builder.setAutoEnterEnabled(state == PlaybackState.Playing && !audioOnly)
+                    .setSeamlessResizeEnabled(false)
+            }
+            act.setPictureInPictureParams(builder.build())
+        }
+    }
+
+    // 仅听音频 per-media 记忆（§5.1）：进同一文件直接进入音频形态
+    val savedAudioOnly by settings.audioOnlyPreferred(mediaId).collectAsStateWithLifecycle(initialValue = false)
+    LaunchedEffect(mediaId, savedAudioOnly) {
+        if (savedAudioOnly && !session.audioOnly.value) session.setAudioOnly(true)
+    }
+    fun toggleAudioOnlyWithMemory() {
+        val target = !session.audioOnly.value
+        session.setAudioOnly(target)
+        scope.launch { settings.setAudioOnlyPreferred(mediaId, target) }
+        toast.show(if (target) "已进入仅听音频模式" else "已切回视频播放")
     }
 
     // ================= 形态分派（E48 余项 / §13.4）=================
@@ -871,6 +1184,8 @@ fun PlayerScreen(
             .focusRequester(keyFocus)
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
+                // 锁定态吞掉全部按键（与手势屏蔽同语义）：键盘也是误触面
+                if (stageLocked) return@onPreviewKeyEvent true
                 when (event.key) {
                     Key.Spacebar -> {
                         togglePlay()
@@ -900,10 +1215,7 @@ fun PlayerScreen(
             // 覆盖所有形态；「切回视频」回到当前形态的播放版式
             AudioOnlyScreen(
                 session = session,
-                onBack = {
-                    session.toggleAudioOnly()
-                    toast.show("已切回视频播放")
-                },
+                onBack = { toggleAudioOnlyWithMemory() },
                 favorited = favorited,
                 onToggleFavorite = {
                     favorited = !favorited
@@ -928,24 +1240,7 @@ fun PlayerScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color.Black)
-                        .npStageGestures(
-                            gesturesEnabled = gesturesEnabled,
-                            onTap = { controlsVisible = !controlsVisible },
-                            onBoostStart = {
-                                boostPreviousSpeed = speed
-                                player.setSpeed(2f)
-                                boostHintVisible = true
-                            },
-                            onBoostEnd = {
-                                if (boostHintVisible) {
-                                    player.setSpeed(boostPreviousSpeed)
-                                    boostHintVisible = false
-                                }
-                            },
-                            onDoubleTap = ::seekByGesture,
-                            onSwipeBrightness = ::adjustBrightnessBy,
-                            onSwipeVolume = ::adjustVolumeBy,
-                        ),
+                        .then(stageGestures()),
                 ) {
                     VideoStage(
                         player = player,
@@ -956,12 +1251,16 @@ fun PlayerScreen(
                         navigator = navigator,
                         state = state,
                         userDragging = userDragging,
+                        scaleMode = scaleMode,
+                        mirrored = mirrored,
+                        rotation = rotation,
+                        onSurfaceView = { surfaceViewRef.value = it },
                         modifier = Modifier.fillMaxSize(),
                     )
                     // 暂停时的中央"继续"：64dp 玻璃圆（设计稿 .bigplay），
                     // 播放中不出现——它只在"用户可能需要我"的时刻存在
                     CenterResumeButton(
-                        visible = state == PlaybackState.Paused && !userDragging,
+                        visible = state == PlaybackState.Paused && !userDragging && !inPipMode,
                         onPlay = ::togglePlay,
                         modifier = Modifier.align(Alignment.Center),
                     )
@@ -982,18 +1281,61 @@ fun PlayerScreen(
                         text = gestureHint,
                         modifier = Modifier.align(Alignment.Center),
                     )
+                    // 横滑 seek 气泡（§4.3）：拖动中视频照常播放，这里只呈现"松手会去哪"
+                    if (seekGestureActive) {
+                        SeekGestureBubble(
+                            deltaMs = (seekGestureTargetMs - positionMs).roundToLong(),
+                            targetMs = seekGestureTargetMs.roundToLong(),
+                            modifier = Modifier.align(Alignment.Center),
+                        )
+                    }
+                    // 竖滑亮度/音量指示条（§4.3）：在起手的那一侧显示
+                    verticalGesture?.let { mode ->
+                        VerticalAdjustIndicator(
+                            mode = mode,
+                            percent = if (mode == StageVerticalMode.Brightness) brightnessPercent else volumePercent,
+                            modifier = Modifier
+                                .align(
+                                    if (mode == StageVerticalMode.Brightness) {
+                                        Alignment.CenterStart
+                                    } else {
+                                        Alignment.CenterEnd
+                                    },
+                                )
+                                .padding(horizontal = 28.dp),
+                        )
+                    }
+                    // 锁定态（§4.2 🔒）：唯一可点元素是解锁钮
+                    if (stageLocked) {
+                        StageLockBadge(
+                            onUnlock = {
+                                stageLocked = false
+                                controlsVisible = true
+                            },
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .windowInsetsPadding(
+                                    WindowInsets.safeDrawing.only(
+                                        WindowInsetsSides.Top + WindowInsetsSides.End,
+                                    ),
+                                )
+                                .padding(16.dp),
+                        )
+                    }
                     PlayerTopBar(
-                        visible = controlsVisible,
+                        visible = controlsVisible && !inPipMode,
                         title = headerTitle,
-                        // 全屏形态的返回 = **退出全屏**（与系统返回键、Esc 同一语义），
-                        // 不是退出播放页。走与返回键相同的出口：设备自然方向就是横向时
-                        // （平板）没有"退出全屏"这一步，直接离开播放页——否则这一点会变成
-                        // 一个永远点不动的死键。
                         onBack = {
                             exitFullscreenOrLeave()
                             controlsVisible = true
                         },
                         applyInsets = true,
+                        showStatus = true,
+                        locked = stageLocked,
+                        onToggleLock = {
+                            stageLocked = true
+                            controlsVisible = false
+                        },
                         // 右上：⋯（选项抽屉）/ 选集。**图标直接摆在顶栏里**，和底栏同一
                         // 材质、同一条 scrim、随控制层一起显隐——原先它们套在一个圆角
                         // 黑框里，像个独立贴在画面上的悬浮物。倍速不在这里出现：
@@ -1016,15 +1358,17 @@ fun PlayerScreen(
                         modifier = Modifier.align(Alignment.TopCenter),
                     )
                     PlayerBottomControls(
-                        visible = controlsVisible,
+                        visible = controlsVisible && !inPipMode,
                         applyInsets = true,
                         showTransport = true,
                         positionMs = positionMs,
                         durationMs = durationMs,
+                        bufferedPositionMs = bufferedPositionMs,
                         dragPositionMs = dragPositionMs,
                         userDragging = userDragging,
                         displayPosition = displayPosition,
                         maxPosition = maxPosition,
+                        onScrubStart = ::onScrubStart,
                         onScrubChange = {
                             onScrubStart()
                             onScrubProgress(it)
@@ -1040,7 +1384,7 @@ fun PlayerScreen(
                             speedPickerVisible = !speedPickerVisible
                         },
                         onPickSpeed = ::pickSpeed,
-                        subtitleLoaded = subtitleLoaded,
+                        subtitleLoaded = subtitleOn,
                         onPrevious = { session.previous() },
                         onTogglePlay = ::togglePlay,
                         onNext = { session.next() },
@@ -1056,7 +1400,7 @@ fun PlayerScreen(
                     FullscreenOptionsPanel(
                         visible = fsPanelVisible,
                         speedText = speedText,
-                        subtitleLoaded = subtitleLoaded,
+                        subtitleText = subtitleText,
                         loopMode = loopMode,
                         brightnessPercent = brightnessPercent,
                         volumePercent = volumePercent,
@@ -1064,6 +1408,9 @@ fun PlayerScreen(
                         hasSubtitles = true,
                         queueSize = queue.size,
                         queueIndex = queueIndex,
+                        hasChapters = chapters.isNotEmpty(),
+                        sleepLabel = sleepLabel,
+                        sleepActive = sleepTimerEndsAtMs > 0,
                         onDismiss = { fsPanelVisible = false },
                         onLoopMode = { mode ->
                             session.setLoopMode(mode)
@@ -1079,7 +1426,10 @@ fun PlayerScreen(
                             controlsVisible = true
                             speedPickerVisible = true
                         },
-                        onSubtitle = { subtitleSheetVisible = true },
+                        onSubtitle = {
+                            fsPanelVisible = false
+                            subtitleSheetVisible = true
+                        },
                         onEpisodes = { episodePanelVisible = true; fsPanelVisible = false },
                         onBrightness = ::setBrightnessPercent,
                         onVolume = ::setVolumePercent,
@@ -1087,6 +1437,26 @@ fun PlayerScreen(
                         onFavorite = {
                             favorited = !favorited
                             toast.show(if (favorited) "已加入收藏" else "已取消收藏")
+                        },
+                        onAudioTrack = {
+                            fsPanelVisible = false
+                            audioTrackSheetVisible = true
+                        },
+                        onPicture = {
+                            fsPanelVisible = false
+                            pictureSheetVisible = true
+                        },
+                        onChapters = {
+                            fsPanelVisible = false
+                            chaptersPanelVisible = true
+                        },
+                        onScreenshot = {
+                            fsPanelVisible = false
+                            screenshot()
+                        },
+                        onSleep = {
+                            fsPanelVisible = false
+                            toggleSleepTimer()
                         },
                         modifier = Modifier.align(Alignment.CenterEnd),
                     )
@@ -1109,15 +1479,18 @@ fun PlayerScreen(
                             WindowInsets.safeDrawing.only(WindowInsetsSides.Top),
                         ),
                 ) {
-                    // 常驻 playerbar（设计稿 `.playerbar`）：播放中的返回出口永远在
-                    PlayerBar(
-                        title = headerTitle,
-                        subtitle = listOf(
-                            headerContainer,
-                            currentItem?.folder ?: "本地文件",
-                        ).filterNotNull().filter { it.isNotBlank() }.joinToString(" · "),
-                        onBack = navigator::popBackStack,
-                    )
+                    // 常驻 playerbar（设计稿 `.playerbar`）：播放中的返回出口永远在。
+                    // PiP 形态下整个活动窗口被缩进小窗——只留画面，不渲染外壳。
+                    if (!inPipMode) {
+                        PlayerBar(
+                            title = headerTitle,
+                            subtitle = listOf(
+                                headerContainer,
+                                currentItem?.folder ?: "本地文件",
+                            ).filterNotNull().filter { it.isNotBlank() }.joinToString(" · "),
+                            onBack = navigator::popBackStack,
+                        )
+                    }
                     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                         val ratio = if (videoAspectRatio > 0f) videoAspectRatio else 16f / 9f
                         // 横屏视频按 16:9 定高；竖屏视频限高（55% 窗口高），
@@ -1134,24 +1507,7 @@ fun PlayerScreen(
                         Box(
                             modifier = stageHeight
                                 .background(Color.Black)
-                                .npStageGestures(
-                                    gesturesEnabled = gesturesEnabled,
-                                    onTap = { controlsVisible = !controlsVisible },
-                                    onBoostStart = {
-                                        boostPreviousSpeed = speed
-                                        player.setSpeed(2f)
-                                        boostHintVisible = true
-                                    },
-                                    onBoostEnd = {
-                                        if (boostHintVisible) {
-                                            player.setSpeed(boostPreviousSpeed)
-                                            boostHintVisible = false
-                                        }
-                                    },
-                                    onDoubleTap = ::seekByGesture,
-                                    onSwipeBrightness = ::adjustBrightnessBy,
-                                    onSwipeVolume = ::adjustVolumeBy,
-                                ),
+                                .then(stageGestures()),
                         ) {
                             VideoStage(
                                 player = player,
@@ -1162,10 +1518,14 @@ fun PlayerScreen(
                                 navigator = navigator,
                                 state = state,
                                 userDragging = userDragging,
+                                scaleMode = scaleMode,
+                                mirrored = mirrored,
+                                rotation = rotation,
+                                onSurfaceView = { surfaceViewRef.value = it },
                                 modifier = Modifier.fillMaxSize(),
                             )
                             CenterResumeButton(
-                                visible = state == PlaybackState.Paused && !userDragging,
+                                visible = state == PlaybackState.Paused && !userDragging && !inPipMode,
                                 onPlay = ::togglePlay,
                                 modifier = Modifier.align(Alignment.Center),
                             )
@@ -1185,7 +1545,7 @@ fun PlayerScreen(
                                 text = gestureHint,
                                 modifier = Modifier.align(Alignment.Center),
                             )
-                            // 长按 2.0x 提示胶囊（设计稿 .gest-hint：黑 62% 丸 + mono 13sp）
+                            // 长按 3x 提示胶囊（§4.3：中心胶囊"3x 快进中"，松手恢复原速）
                             androidx.compose.animation.AnimatedVisibility(
                                 visible = boostHintVisible,
                                 enter = androidx.compose.animation.fadeIn(),
@@ -1193,7 +1553,7 @@ fun PlayerScreen(
                                 modifier = Modifier.align(Alignment.Center),
                             ) {
                                 Text(
-                                    text = "长按 2.0x 快进",
+                                    text = "3x 快进中",
                                     style = NpMono,
                                     color = Color.White,
                                     modifier = Modifier
@@ -1202,18 +1562,54 @@ fun PlayerScreen(
                                         .padding(horizontal = 16.dp, vertical = 8.dp),
                                 )
                             }
+                            // 横滑 seek 气泡 / 竖滑指示条 / 锁定徽标（与全屏形态同一套，§4.3）
+                            if (seekGestureActive) {
+                                SeekGestureBubble(
+                                    deltaMs = (seekGestureTargetMs - positionMs).roundToLong(),
+                                    targetMs = seekGestureTargetMs.roundToLong(),
+                                    modifier = Modifier.align(Alignment.Center),
+                                )
+                            }
+                            verticalGesture?.let { mode ->
+                                VerticalAdjustIndicator(
+                                    mode = mode,
+                                    percent = if (mode == StageVerticalMode.Brightness) brightnessPercent else volumePercent,
+                                    modifier = Modifier
+                                        .align(
+                                            if (mode == StageVerticalMode.Brightness) {
+                                                Alignment.CenterStart
+                                            } else {
+                                                Alignment.CenterEnd
+                                            },
+                                        )
+                                        .padding(horizontal = 20.dp),
+                                )
+                            }
+                            if (stageLocked) {
+                                StageLockBadge(
+                                    onUnlock = {
+                                        stageLocked = false
+                                        controlsVisible = true
+                                    },
+                                    modifier = Modifier
+                                        .align(Alignment.TopEnd)
+                                        .padding(12.dp),
+                                )
+                            }
                             // 视频区底部：进度 + 时间 + 全屏（§4.1 的版式）；
                             // 顶栏已上移为常驻 playerbar，舞台内不再放返回键
                             PlayerBottomControls(
-                                visible = controlsVisible,
+                                visible = controlsVisible && !inPipMode,
                                 applyInsets = false,
                                 showTransport = false,
                                 positionMs = positionMs,
                                 durationMs = durationMs,
+                                bufferedPositionMs = bufferedPositionMs,
                                 dragPositionMs = dragPositionMs,
                                 userDragging = userDragging,
                                 displayPosition = displayPosition,
                                 maxPosition = maxPosition,
+                                onScrubStart = ::onScrubStart,
                                 onScrubChange = {
                                     onScrubStart()
                                     onScrubProgress(it)
@@ -1229,7 +1625,7 @@ fun PlayerScreen(
                                     speedPickerVisible = !speedPickerVisible
                                 },
                                 onPickSpeed = ::pickSpeed,
-                                subtitleLoaded = subtitleLoaded,
+                                subtitleLoaded = subtitleOn,
                                 onPrevious = { session.previous() },
                                 onTogglePlay = ::togglePlay,
                                 onNext = { session.next() },
@@ -1244,7 +1640,8 @@ fun PlayerScreen(
                     }
 
                     // --- 信息区（标题 / 元数据 / 主操作 / 选集）---
-                    Column(
+                    // PiP 形态不渲染（小窗里只留画面）
+                    if (!inPipMode) Column(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxWidth()
@@ -1311,10 +1708,7 @@ fun PlayerScreen(
                             PlayerActionButton(
                                 glyph = ActionGlyph.Audio,
                                 label = "仅听音频",
-                                onClick = {
-                                    session.toggleAudioOnly()
-                                    toast.show("已进入仅听音频模式")
-                                },
+                                onClick = { toggleAudioOnlyWithMemory() },
                                 modifier = Modifier.weight(1f),
                             )
                         }
@@ -1524,6 +1918,21 @@ fun PlayerScreen(
             )
         }
 
+        // ---- 章节抽屉（§12.5，批次 3）：无章节数据时入口隐藏，面板也不会出现 ----
+        if (chaptersPanelVisible && chapters.isNotEmpty()) {
+            BackHandler { chaptersPanelVisible = false }
+            ChaptersPanel(
+                chapters = chapters,
+                positionMs = positionMs,
+                onSelect = { chapter ->
+                    player.seekTo(chapter.startMs)
+                    chaptersPanelVisible = false
+                },
+                onDismiss = { chaptersPanelVisible = false },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+
         // ---- 底部弹层（设计稿 .sheet 体系）：字幕 / 播放选项 ----
         // 倍速不在这里：它改成贴在倍速钮上方的选择条（SpeedChoiceRow）。
         if (subtitleSheetVisible) {
@@ -1533,7 +1942,7 @@ fun PlayerScreen(
             ) {
                 NpOptRow(
                     text = "关闭字幕",
-                    selected = !subtitleLoaded,
+                    selected = !subtitleOn,
                     onClick = {
                         player.setSubtitle(null)
                         scope.launch { settings.setSubtitleUri(mediaId, null) }
@@ -1557,6 +1966,133 @@ fun PlayerScreen(
                         modifier = Modifier.padding(top = 8.dp, start = 12.dp),
                     )
                 }
+                // 内嵌字幕轨（批次 3）：MKV 多轨选择，走 TrackSelectionParameters 不重建媒体项
+                val textTracks = tracks.filter { it.type == NpTrackType.TEXT }
+                Text(
+                    text = "内嵌字幕轨",
+                    style = NpTypography.titleSmall,
+                    color = ink0.fg,
+                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp, start = 12.dp),
+                )
+                if (textTracks.isEmpty()) {
+                    Text(
+                        text = "此视频没有内嵌字幕轨",
+                        style = NpMonoSmall,
+                        color = ink0.muted,
+                        modifier = Modifier.padding(start = 12.dp),
+                    )
+                } else {
+                    textTracks.forEach { track ->
+                        TrackOptionRow(
+                            label = track.label,
+                            detail = null,
+                            selected = track.selected,
+                            onClick = {
+                                player.selectTrack(NpTrackType.TEXT, track.id)
+                                subtitleSheetVisible = false
+                            },
+                        )
+                    }
+                }
+                // 字幕偏移（E43）：±1000ms / 50ms 步进；正数 = 字幕延后
+                Text(
+                    text = "字幕偏移",
+                    style = NpTypography.titleSmall,
+                    color = ink0.fg,
+                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp, start = 12.dp),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "提前",
+                        style = NpMonoSmall,
+                        color = ink0.muted,
+                        modifier = Modifier.padding(start = 12.dp),
+                    )
+                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                        Text(
+                            text = if (subtitleOffsetMs == 0L) "0ms" else
+                                (if (subtitleOffsetMs > 0) "+" else "") + "${subtitleOffsetMs}ms",
+                            style = NpMono,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    Text(
+                        text = "延后",
+                        style = NpMonoSmall,
+                        color = ink0.muted,
+                        modifier = Modifier.padding(end = 12.dp),
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    listOf(-50L to "−50ms", -250L to "−250ms", 250L to "+250ms", 50L to "+50ms").forEach { (delta, label) ->
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(NpRadius.chip))
+                                .background(ink0.fgSoft)
+                                .clickable { adjustSubtitleOffset(delta) }
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = label,
+                                style = NpMonoSmall,
+                                color = ink0.fg,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        if (audioTrackSheetVisible) {
+            NpSheet(
+                onDismiss = { audioTrackSheetVisible = false },
+                title = "音轨",
+            ) {
+                val audioTracks = tracks.filter { it.type == NpTrackType.AUDIO }
+                if (audioTracks.isEmpty()) {
+                    Text(
+                        text = "此视频没有内嵌音轨",
+                        style = NpMonoSmall,
+                        color = ink0.muted,
+                        modifier = Modifier.padding(start = 12.dp),
+                    )
+                } else {
+                    audioTracks.forEach { track ->
+                        TrackOptionRow(
+                            label = track.label,
+                            detail = null,
+                            selected = track.selected,
+                            onClick = {
+                                player.selectTrack(NpTrackType.AUDIO, track.id)
+                                audioTrackSheetVisible = false
+                            },
+                        )
+                    }
+                }
+            }
+        }
+        if (pictureSheetVisible) {
+            NpSheet(
+                onDismiss = { pictureSheetVisible = false },
+                title = "画面",
+            ) {
+                PicturePanelContent(
+                    currentMode = scaleMode,
+                    mirrored = mirrored,
+                    rotation = rotation,
+                    onMode = { updateDisplaySettings(mode = it) },
+                    onMirror = { updateDisplaySettings(mirror = it) },
+                    onRotate = { updateDisplaySettings(rot = it) },
+                )
             }
         }
         if (moreSheetVisible) {
@@ -1573,7 +2109,47 @@ fun PlayerScreen(
                     add(
                         QuickTileSpec(NpIcon.Pip, "画中画") {
                             moreSheetVisible = false
-                            enterPip()
+                            // §5.1：仅听音频与 PiP 互斥——小窗无画面无意义
+                            if (session.audioOnly.value) {
+                                toast.show("仅听音频模式下没有画面可显示")
+                            } else {
+                                enterPip()
+                            }
+                        },
+                    )
+                    add(
+                        QuickTileSpec(NpIcon.Sound, "音轨") {
+                            moreSheetVisible = false
+                            audioTrackSheetVisible = true
+                        },
+                    )
+                    add(
+                        QuickTileSpec(NpIcon.GridView, "画面") {
+                            moreSheetVisible = false
+                            pictureSheetVisible = true
+                        },
+                    )
+                    if (chapters.isNotEmpty()) {
+                        add(
+                            QuickTileSpec(NpIcon.List, "章节") {
+                                moreSheetVisible = false
+                                chaptersPanelVisible = true
+                            },
+                        )
+                    }
+                    add(
+                        QuickTileSpec(NpIcon.Clock, "截图") {
+                            moreSheetVisible = false
+                            screenshot()
+                        },
+                    )
+                    add(
+                        QuickTileSpec(
+                            icon = NpIcon.Moon,
+                            label = sleepLabel,
+                            selected = sleepTimerEndsAtMs > 0,
+                        ) {
+                            toggleSleepTimer()
                         },
                     )
                     add(
@@ -1592,8 +2168,16 @@ fun PlayerScreen(
                             )
                         },
                     )
+                    // 锁屏锁定键（§4.2）：锁定后屏蔽全部手势/返回/键盘，仅解锁钮可点。
+                    // 全屏顶栏 🔒 与这里共用同一份 [stageLocked] 状态。
                     add(
-                        QuickTileSpec(NpIcon.Subtitle, "字幕", selected = subtitleLoaded) {
+                        QuickTileSpec(NpIcon.Lock, "锁屏") {
+                            moreSheetVisible = false
+                            stageLocked = true
+                        },
+                    )
+                    add(
+                        QuickTileSpec(NpIcon.Subtitle, "字幕", selected = subtitleOn) {
                             moreSheetVisible = false
                             subtitleSheetVisible = true
                         },
@@ -2013,81 +2597,6 @@ private fun EpisodePanel(
 }
 
 /**
- * B 站式进度条滑块：小圆点，拖动时轻微放大。
- * 默认 M3 竖条滑块（4×44dp）视觉占比过重，且与进度条本体争抢视线。
- */
-@Composable
-private fun PlaybackThumb(dragging: Boolean) {
-    // 设计稿 .track .knob：accent 圆，12dp，拖动长大到 18dp（此前白色 11/16）
-    Box(
-        modifier = Modifier
-            .size(if (dragging) 18.dp else 12.dp)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primary),
-    )
-}
-
-/** B 站式进度条轨道：细线圆角，拖动时略加粗；fill 比例与滑块位置由 Slider 保证一致 */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun PlaybackTrack(sliderState: SliderState, dragging: Boolean) {
-    val activeColor = MaterialTheme.colorScheme.primary
-    // 压在视频上：未播段用白色半透明
-    val inactiveColor = Color.White.copy(alpha = 0.28f)
-    val range = sliderState.valueRange.endInclusive - sliderState.valueRange.start
-    val fraction = if (range > 0f) {
-        ((sliderState.value - sliderState.valueRange.start) / range).coerceIn(0f, 1f)
-    } else {
-        0f
-    }
-    Canvas(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(if (dragging) 4.dp else 3.dp),
-    ) {
-        val radius = size.height / 2f
-        drawRoundRect(
-            color = inactiveColor,
-            cornerRadius = CornerRadius(radius, radius),
-        )
-        drawRoundRect(
-            color = activeColor,
-            size = Size(size.width * fraction, size.height),
-            cornerRadius = CornerRadius(radius, radius),
-        )
-    }
-}
-
-/**
- * 进度条行（设计稿 `.track`）：**独占一行**的 3dp 细线轨道 + 12dp accent 圆 knob。
- *
- * 时间码不在这行——设计稿把 `.track` 与 `.time-row` 分成上下两行，滑块因此拿到整幅
- * 宽度；挤在同一行里会让轨道只剩中间一小段（此前正是这样，与设计稿不符）。
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun PlaybackTrackRow(
-    displayPosition: Float,
-    maxPosition: Float,
-    userDragging: Boolean,
-    onScrubChange: (Float) -> Unit,
-    onScrubEnd: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Slider(
-        value = displayPosition.coerceIn(0f, maxPosition),
-        onValueChange = onScrubChange,
-        onValueChangeFinished = onScrubEnd,
-        valueRange = 0f..maxPosition,
-        thumb = { PlaybackThumb(dragging = userDragging) },
-        track = { sliderState ->
-            PlaybackTrack(sliderState, dragging = userDragging)
-        },
-        modifier = modifier.fillMaxWidth(),
-    )
-}
-
-/**
  * 时间行内的图标钮（设计稿 `.time-row .bar-ctl`）：38dp 方形、9dp 圆角、白色描边图标，
  * 激活态转 accent。
  *
@@ -2249,10 +2758,12 @@ private fun PlayerBottomControls(
     showTransport: Boolean,
     positionMs: Long,
     durationMs: Long,
+    bufferedPositionMs: Long,
     dragPositionMs: Float,
     userDragging: Boolean,
     displayPosition: Float,
     maxPosition: Float,
+    onScrubStart: () -> Unit,
     onScrubChange: (Float) -> Unit,
     onScrubEnd: () -> Unit,
     isPlaying: Boolean,
@@ -2288,11 +2799,13 @@ private fun PlayerBottomControls(
                 )
                 .padding(horizontal = NpSpace.lg),
         ) {
-            // 行 1：进度条独占一行（设计稿 `.track`）
-            PlaybackTrackRow(
-                displayPosition = displayPosition,
-                maxPosition = maxPosition,
-                userDragging = userDragging,
+            // 行 1：进度条独占一行（设计稿 `.track`）——自绘三段式（已播/已缓冲/未缓冲）
+            NpSeekBar(
+                durationMs = durationMs,
+                displayPositionMs = displayPosition,
+                bufferedPositionMs = bufferedPositionMs,
+                dragging = userDragging,
+                onScrubStart = onScrubStart,
                 onScrubChange = onScrubChange,
                 onScrubEnd = onScrubEnd,
                 modifier = Modifier.padding(top = 6.dp),
@@ -2411,10 +2924,14 @@ private fun PlayerBottomControls(
 }
 
 /**
- * 顶部控制层：返回 + 标题（+ 可选右侧图标），压在视频上（渐变 scrim + 白字）。
+ * 顶部控制层：返回 + 标题（+ 可选时钟电量/锁定键/右侧图标），压在视频上（渐变 scrim + 白字）。
  *
  * [trailing] 的图标与底栏右端图标**同一条竖基线**（都用 NpSpace.lg 收边），
  * 这样上下两栏读起来是一套控件，而不是两块各自为政的悬浮物。
+ *
+ * [showStatus]（§4.2 顶栏 56dp：`16:33 🔋41%`）：全屏沉浸下系统栏被隐藏，
+ * 时间与电量由顶栏自绘。放在 trailing 图标之前——它是"环境信息"，不是"动作"。
+ * [locked] / [onToggleLock]：锁屏锁定键（批次 2）。
  */
 @Composable
 private fun PlayerTopBar(
@@ -2423,6 +2940,9 @@ private fun PlayerTopBar(
     onBack: () -> Unit,
     applyInsets: Boolean,
     modifier: Modifier = Modifier,
+    showStatus: Boolean = false,
+    locked: Boolean = false,
+    onToggleLock: () -> Unit = {},
     trailing: @Composable () -> Unit = {},
 ) {
     AnimatedVisibility(
@@ -2469,6 +2989,14 @@ private fun PlayerTopBar(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
+            if (showStatus) {
+                StatusClockBattery(tint = Color.White)
+                BarCtlButton(
+                    icon = if (locked) NpIcon.Lock else NpIcon.LockOpen,
+                    contentDescription = if (locked) "已锁定" else "锁屏",
+                    onClick = onToggleLock,
+                )
+            }
             trailing()
         }
     }
@@ -2519,6 +3047,7 @@ private fun CenterResumeButton(
  * 手势反馈胶囊（"亮度 62%" / "音量 40%" / "快进 10 秒"）——屏幕中央，1.2s 自动消失。
  *
  * 没有它，滑动调节就是"盲调"：用户不知道当前值，也不知道手势是否被识别。
+ * 竖滑亮度/音量已升级为竖条指示器（§4.3），本胶囊现只承载双击快进/快退的回执。
  */
 @Composable
 private fun GestureHintPill(text: String?, modifier: Modifier = Modifier) {
@@ -2540,6 +3069,33 @@ private fun GestureHintPill(text: String?, modifier: Modifier = Modifier) {
                 color = Color.White,
             )
         }
+    }
+}
+
+/**
+ * 锁定态徽标（§4.2 🔒 / 批次 2「锁屏锁定键」）：锁定后舞台上**唯一**可点元素。
+ * 常驻显示（不随控制层显隐、不自动隐藏）——它若消失，用户就没有任何出口了。
+ */
+@Composable
+private fun StageLockBadge(
+    onUnlock: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .size(44.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.45f))
+            .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape)
+            .npPressScale(onClick = onUnlock, pressedScale = 0.92f),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = NpIcon.LockOpen,
+            contentDescription = "解锁",
+            tint = Color.White,
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
@@ -2715,6 +3271,9 @@ private fun PlayingBars(modifier: Modifier = Modifier) {
 /**
  * 视频舞台：画面 + 字幕层 + 覆盖层扩展点 + 缓冲指示。
  * 两种形态共用——形态差异只在"舞台外"的版式，不重复实现播放链路。
+ *
+ * [scaleMode] 是批次 3「画面」面板的比例档（裁剪走引擎 np.crop）；[mirrored] /
+ * [rotation] 直接落在画面 View 的变换上——字幕层是它的兄弟节点，不受变换影响。
  */
 @Composable
 private fun VideoStage(
@@ -2726,30 +3285,48 @@ private fun VideoStage(
     navigator: Navigator,
     state: PlaybackState,
     userDragging: Boolean,
+    scaleMode: VideoScaleMode = VideoScaleMode.FIT,
+    mirrored: Boolean = false,
+    rotation: Int = 0,
+    onSurfaceView: (TextureView?) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        // 视频画面：按视频分辨率比例渲染，黑边交给布局而非拉伸。
-        // 竖向片（比例 < 1）改「先匹配高度」：横向窗口里默认的先宽后高会被
+        // 视频画面：按比例模式决定布局约束；黑边/裁剪行为随模式。
+        // 竖向片（比例 < 1）在 FIT 下改「先匹配高度」：横向窗口里默认的先宽后高会被
         // 容器高度上限截断，宽度却仍按容器给，画面被压扁（平板横屏放 9:16 实测如此）。
-        Box(
-            modifier = Modifier.then(
-                if (videoAspectRatio > 0f) {
-                    Modifier.aspectRatio(
-                        videoAspectRatio,
-                        matchHeightConstraintsFirst = videoAspectRatio < 1f,
-                    )
+        // CROP/拉伸 = 布局满窗（裁剪由引擎缩放模式完成 / 拉伸即用户显式选择变形）。
+        val stageModifier = when (scaleMode) {
+            VideoScaleMode.CROP, VideoScaleMode.STRETCH -> Modifier.fillMaxSize()
+            else -> {
+                val ratio = when (scaleMode) {
+                    VideoScaleMode.R16_9 -> 16f / 9f
+                    VideoScaleMode.R4_3 -> 4f / 3f
+                    else -> videoAspectRatio
+                }
+                if (ratio > 0f) {
+                    Modifier.aspectRatio(ratio, matchHeightConstraintsFirst = ratio < 1f)
                 } else {
                     Modifier.fillMaxSize()
-                },
-            ),
-        ) {
+                }
+            }
+        }
+        Box(modifier = stageModifier) {
             AndroidView(
-                factory = { ctx -> SurfaceView(ctx) },
-                update = { view -> player.attachDisplay(view) },
+                factory = { ctx -> TextureView(ctx).also { onSurfaceView(it) } },
+                update = { view ->
+                    player.attachDisplay(view)
+                    // 镜像/旋转只翻画面：TextureView 的内容走正常渲染节点，View 变换
+                    // 生效；字幕层是兄弟节点，镜像时字幕保持可读。
+                    // （SurfaceView 做不到——它的画面由 SurfaceFlinger 独立合成，
+                    //  批次 3 模拟器实测变换完全不落。）
+                    view.scaleX = if (mirrored) -1f else 1f
+                    view.rotation = rotation.toFloat()
+                },
+                onRelease = { onSurfaceView(null) },
                 modifier = Modifier.fillMaxSize(),
             )
-            // E1：字幕浮层（外挂 + 内嵌轨道统一出口），位于画面坐标系内
+            // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
             SubtitleLayer(cues = cues, modifier = Modifier.fillMaxSize())
         }
         // 覆盖层扩展点：字幕/弹幕等插件动态挂载（E23）
@@ -2980,7 +3557,7 @@ private fun PlayerBar(
 private fun FullscreenOptionsPanel(
     visible: Boolean,
     speedText: String,
-    subtitleLoaded: Boolean,
+    subtitleText: String,
     loopMode: NpLoopMode,
     brightnessPercent: Int,
     volumePercent: Int,
@@ -2988,6 +3565,9 @@ private fun FullscreenOptionsPanel(
     hasSubtitles: Boolean,
     queueSize: Int,
     queueIndex: Int,
+    hasChapters: Boolean,
+    sleepLabel: String,
+    sleepActive: Boolean,
     onDismiss: () -> Unit,
     onLoopMode: (NpLoopMode) -> Unit,
     onSpeed: () -> Unit,
@@ -2997,6 +3577,11 @@ private fun FullscreenOptionsPanel(
     onVolume: (Int) -> Unit,
     onPip: () -> Unit,
     onFavorite: () -> Unit,
+    onAudioTrack: () -> Unit,
+    onPicture: () -> Unit,
+    onChapters: () -> Unit,
+    onScreenshot: () -> Unit,
+    onSleep: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val reduceMotion = rememberReduceMotion()
@@ -3097,8 +3682,8 @@ private fun FullscreenOptionsPanel(
                 FpRow(
                     icon = NpIcon.Subtitle,
                     label = "字幕",
-                    value = if (subtitleLoaded) "已挂载" else "关闭",
-                    active = subtitleLoaded,
+                    value = subtitleText,
+                    active = subtitleText != "关闭",
                     onClick = onSubtitle,
                 )
                 if (queueSize > 1) {
@@ -3111,6 +3696,18 @@ private fun FullscreenOptionsPanel(
                 }
                 FpSectionTitle("更多")
                 FpRow(icon = NpIcon.Pip, label = "画中画", onClick = onPip)
+                FpRow(icon = NpIcon.Sound, label = "音轨", onClick = onAudioTrack)
+                FpRow(icon = NpIcon.GridView, label = "画面", onClick = onPicture)
+                if (hasChapters) {
+                    FpRow(icon = NpIcon.List, label = "章节", onClick = onChapters)
+                }
+                FpRow(icon = NpIcon.Clock, label = "截图", onClick = onScreenshot)
+                FpRow(
+                    icon = NpIcon.Moon,
+                    label = sleepLabel,
+                    active = sleepActive,
+                    onClick = onSleep,
+                )
                 FpRow(
                     icon = NpIcon.Heart,
                     label = if (favorited) "已收藏" else "收藏",
@@ -3215,54 +3812,6 @@ private fun FpSlider(
         )
     }
 }
-
-/**
- * 舞台手势（设计稿 .gest-hint / §8 手势清单）：
- * - 点按 = 切换控制层；
- * - 长按 ≥420ms = 2.0x 快进（松手恢复原速）；
- * - 双击左/右半屏 = 快退 / 快进 10 秒（设置页「双击动作」）；
- * - 左右滑动 = 左半屏调亮度、右半屏调音量（设置页「启用音量/亮度手势」关闭时整组禁用）。
- *
- * 手势开关只影响"滑动 + 双击"这两组：点按与长按是控制层/倍速的基础交互，
- * 不随偏好关闭——关掉手势的用户仍然需要能呼出控制层。
- */
-private fun Modifier.npStageGestures(
-    gesturesEnabled: Boolean,
-    onTap: () -> Unit,
-    onBoostStart: () -> Unit,
-    onBoostEnd: () -> Unit,
-    onDoubleTap: (forward: Boolean) -> Unit,
-    onSwipeBrightness: (deltaPercent: Float) -> Unit,
-    onSwipeVolume: (deltaPercent: Float) -> Unit,
-): Modifier = this
-    .pointerInput(Unit) {
-        detectTapGestures(
-            onTap = { onTap() },
-            onDoubleTap = { offset ->
-                if (gesturesEnabled) onDoubleTap(offset.x > size.width / 2f)
-            },
-            onLongPress = { onBoostStart() },
-            onPress = {
-                // 长按未触发就松手（普通点按）时无需恢复；长按后松手走这里恢复原速
-                tryAwaitRelease()
-                onBoostEnd()
-            },
-        )
-    }
-    .pointerInput(gesturesEnabled) {
-        if (!gesturesEnabled) return@pointerInput
-        var lastX = 0f
-        detectHorizontalDragGestures(
-            onDragStart = { lastX = it.x },
-            onDragEnd = {},
-        ) { change, dragAmount ->
-            change.consume()
-            // 拖动距离按"屏幕宽度的百分比"换算（满宽 ≈ 100%），
-            // 左半屏起手调亮度、右半屏调音量——与主流播放器一致的位置语义
-            val delta = dragAmount / size.width * 100f
-            if (lastX < size.width / 2f) onSwipeBrightness(delta) else onSwipeVolume(delta)
-        }
-    }
 
 /** 倍速文本（1.0x / 1.25x …） */
 private fun speedLabel(speed: Float): String =
@@ -3444,3 +3993,104 @@ private suspend fun resolveFolderQueue(
 
 /** 等媒体来源把"本项"扫出来的上限；超过则退回单项队列（绝不卡住进页） */
 private const val SOURCE_WAIT_MS = 3_000L
+
+// ---- PiP 动作（§5.3）：经标准 MEDIA_BUTTON 事件驱动会话，引擎无关 ----
+
+private const val PIP_REQUEST_CODE_BASE = 2000
+
+private fun pipActions(context: Context, playing: Boolean): List<RemoteAction> {
+    fun mediaButton(keyCode: Int): PendingIntent {
+        val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            `package` = context.packageName
+            putExtra(
+                Intent.EXTRA_KEY_EVENT,
+                KeyEvent(KeyEvent.ACTION_DOWN, keyCode),
+            )
+        }
+        return PendingIntent.getService(
+            context,
+            PIP_REQUEST_CODE_BASE + keyCode,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+    }
+
+    fun icon(resId: Int) = android.graphics.drawable.Icon.createWithResource(context, resId)
+    return listOf(
+        RemoteAction(
+            icon(if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play),
+            if (playing) "暂停" else "播放",
+            if (playing) "暂停播放" else "继续播放",
+            mediaButton(if (playing) KeyEvent.KEYCODE_MEDIA_PAUSE else KeyEvent.KEYCODE_MEDIA_PLAY),
+        ),
+        RemoteAction(
+            icon(android.R.drawable.ic_media_next),
+            "下一集",
+            "播放下一集",
+            mediaButton(KeyEvent.KEYCODE_MEDIA_NEXT),
+        ),
+    )
+}
+
+/** 同名字幕优先级（§12.6 同名挂载）：ASS 特效最全，VTT 兜底 */
+private val SIBLING_SUBTITLE_EXTENSIONS = listOf("ass", "ssa", "srt", "vtt")
+
+/**
+ * 同名字幕自动挂载（批次 3）：查 MediaStore Files 表找**同目录、同基名**的字幕文件，
+ * 按优先级取第一条。视频在 MediaStore 的 RELATIVE_PATH（Q+）与字幕所在目录比对；
+ * 查不到（非 MediaStore 来源 / 无字幕）返回 null，调用方保持现状。
+ */
+private suspend fun resolveSiblingSubtitle(context: Context, uri: String): String? =
+    withContext(Dispatchers.IO) {
+        runCatching {
+            val resolver = context.contentResolver
+            val videoMeta = resolver
+                .query(
+                    uri.toUri(),
+                    arrayOf(
+                        android.provider.MediaStore.Video.Media.DISPLAY_NAME,
+                        android.provider.MediaStore.Video.Media.RELATIVE_PATH,
+                    ),
+                    null, null, null,
+                )
+                ?.use { c -> if (c.moveToFirst()) c.getString(0) to c.getString(1) else null }
+                ?: return@runCatching null
+            val displayName = videoMeta.first ?: return@runCatching null
+            val base = displayName.substringBeforeLast('.', displayName)
+            if (base.isBlank()) return@runCatching null
+            // LIKE 通配符转义：文件名里的 % _ 会扩大匹配面
+            val escapedBase = base
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            val selection = SIBLING_SUBTITLE_EXTENSIONS
+                .joinToString(" OR ") { "_display_name LIKE ? ESCAPE '\\'" } + " AND relative_path = ?"
+            val args = SIBLING_SUBTITLE_EXTENSIONS.map { "$escapedBase.$it" } + (videoMeta.second ?: "")
+            resolver.query(
+                android.provider.MediaStore.Files.getContentUri("external"),
+                arrayOf(
+                    android.provider.MediaStore.Files.FileColumns._ID,
+                    android.provider.MediaStore.Files.FileColumns.DISPLAY_NAME,
+                ),
+                selection,
+                args.toTypedArray(),
+                null,
+            )?.use { c ->
+                var best: String? = null
+                var bestPrio = Int.MAX_VALUE
+                while (c.moveToNext()) {
+                    val name = c.getString(1) ?: continue
+                    val ext = name.substringAfterLast('.', "").lowercase()
+                    val prio = SIBLING_SUBTITLE_EXTENSIONS.indexOf(ext).let { if (it < 0) Int.MAX_VALUE else it }
+                    if (prio < bestPrio) {
+                        bestPrio = prio
+                        best = android.content.ContentUris.withAppendedId(
+                            android.provider.MediaStore.Files.getContentUri("external"),
+                            c.getLong(0),
+                        ).toString()
+                    }
+                }
+                best
+            }
+        }.getOrNull()
+    }

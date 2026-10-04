@@ -69,6 +69,12 @@ class AppSettings(private val context: Context) {
         fun playbackAtKey(mediaId: String) = longPreferencesKey("playback_at_$mediaId")
         fun subtitleKey(mediaId: String) = stringPreferencesKey("subtitle_$mediaId")
 
+        /** 画面显示记忆（批次 3）："<比例模式>|<镜像0/1>|<旋转0/180>"，整体读写 */
+        fun displayKey(mediaId: String) = stringPreferencesKey("display_$mediaId")
+
+        /** 仅听音频记忆（§5.1）：下次进同一文件直接进入音频形态 */
+        fun audioOnlyKey(mediaId: String) = booleanPreferencesKey("audio_only_$mediaId")
+
         /** 最近搜索最多保留 5 条（设计稿 searchView 的 chips 一行放得下） */
         const val MAX_SEARCH_HISTORY = 5
     }
@@ -309,5 +315,23 @@ class AppSettings(private val context: Context) {
         context.dataStore.edit { prefs ->
             if (uri == null) prefs.remove(subtitleKey(mediaId)) else prefs[subtitleKey(mediaId)] = uri
         }
+    }
+
+    /** 某媒体的画面显示记忆（比例|镜像|旋转），未设置过为 null */
+    fun displaySettings(mediaId: String): Flow<String?> = context.dataStore.data
+        .map { it[displayKey(mediaId)] }
+
+    suspend fun setDisplaySettings(mediaId: String, value: String?) {
+        context.dataStore.edit { prefs ->
+            if (value == null) prefs.remove(displayKey(mediaId)) else prefs[displayKey(mediaId)] = value
+        }
+    }
+
+    /** 某媒体的仅听音频记忆（§5.1），默认 false */
+    fun audioOnlyPreferred(mediaId: String): Flow<Boolean> = context.dataStore.data
+        .map { it[audioOnlyKey(mediaId)] ?: false }
+
+    suspend fun setAudioOnlyPreferred(mediaId: String, value: Boolean) {
+        context.dataStore.edit { it[audioOnlyKey(mediaId)] = value }
     }
 }
