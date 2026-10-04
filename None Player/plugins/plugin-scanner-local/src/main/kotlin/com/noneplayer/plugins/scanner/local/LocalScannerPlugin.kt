@@ -3,6 +3,7 @@ package com.noneplayer.plugins.scanner.local
 import android.content.Context
 import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
@@ -38,7 +39,16 @@ class LocalScannerPlugin : Plugin {
         val dispatchers: DispatcherProvider = services.get()
         eventBus = services.get()
         val settings: AppSettings = services.get()
-        source = LocalMediaSource(context, dispatchers, eventBus, settings)
+        // 注册表在 onBind 即可用（内核把它也登记成了服务，见 Kernel.registerKernelServices）
+        val registry: ExtensionRegistry = services.get()
+        source = LocalMediaSource(
+            context = context,
+            dispatchers = dispatchers,
+            eventBus = eventBus,
+            settings = settings,
+            registry = registry,
+            history = services.get(),
+        )
     }
 
     override suspend fun onInstall(registry: ExtensionRegistry) {

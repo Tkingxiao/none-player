@@ -17,11 +17,15 @@ import android.util.Size
 import androidx.core.net.toUri
 import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.kernel.api.EventBus
+import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.MediaSourceProvider
+import com.noneplayer.kernel.api.MetadataEnricher
 import com.noneplayer.kernel.api.ScanResult
+import com.noneplayer.kernel.api.query
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -63,6 +67,10 @@ class LocalMediaSource(
     private val dispatchers: DispatcherProvider,
     private val eventBus: EventBus,
     val settings: AppSettings,
+    /** 富化链来源（E34：扫描期按注册顺序串行执行 MetadataEnricher） */
+    private val registry: ExtensionRegistry,
+    /** §8.3/E11：断点迁移的目标仓库 */
+    private val history: HistoryRepository,
 ) : MediaSourceProvider {
 
     override val sourceId: String = "local"
@@ -151,6 +159,12 @@ class LocalMediaSource(
         }
         val previousIds = _media.value.map { it.id }.toSet()
         val items = queryMediaStore(validScopes)
+            // 垃圾文件过滤（§10 批次 4）：下载中的 .part/.tmp 等半成品不进库
+            .filterNot { isJunkFile(it.title, it.sizeBytes) }
+            // 元数据富化（E34 的消费端）：插件按注册顺序串行富化，失败不拖垮扫描
+            .map { enrichAll(it) }
+        // §8.3/E11：首次扫描把 DataStore 的断点迁入 Room，随后清旧键
+        migrateHistoryOnce(items)
         // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存，故只看 "ms-" 前缀）
         val validIds = items.filter { it.id.startsWith("ms-") }.map { it.id.removePrefix("ms-") }.toSet()
         File(context.cacheDir, "video_thumbs")
@@ -181,6 +195,47 @@ class LocalMediaSource(
             removed = summary.removed,
             durationMs = summary.durationMs,
         )
+    }
+
+    /**
+     * 垃圾文件过滤（§10 批次 4）：`.part`/`.tmp`/`.crdownload`/隐藏/0 字节排除。
+     *
+     * `.nomedia` 目录与隐藏文件本就被 MediaStore 的媒体集合跳过（扫描全走 MediaStore
+     * 查询），这里再挡一道是防御异常 OEM 实现把半成品塞进游标——下载器创建的
+     * `xxx.mp4.part` 一旦被索引，库里就会出现"点开打不开"的条目。
+     */
+    private fun isJunkFile(name: String, sizeBytes: Long): Boolean {
+        if (sizeBytes <= 0L) return true
+        if (name.startsWith('.')) return true
+        val lower = name.lowercase()
+        return JUNK_SUFFIXES.any { lower.endsWith(it) }
+    }
+
+    /**
+     * 富化链（E34 的消费端）：按注册顺序**串行**执行 `MetadataEnricher`，
+     * 后一个看到前一个的输出（契约约定：实现必须幂等）；单个失败按原样跳过。
+     */
+    private suspend fun enrichAll(item: MediaItem): MediaItem {
+        var current = item
+        registry.query<MetadataEnricher>().forEach { enricher ->
+            current = runCatching { enricher.enrich(current) }.getOrDefault(current)
+        }
+        return current
+    }
+
+    /**
+     * §8.3/E11 一次性迁移：把 DataStore 的 `playback_pos_*` / `playback_at_*`
+     * 读成 Room 历史行（行快照取自刚扫到的媒体列表），随即清旧键并置位——
+     * 之后 DataStore 只保留设置项，断点键不再随媒体数无限增长。
+     */
+    private suspend fun migrateHistoryOnce(items: List<MediaItem>) {
+        if (settings.historyMigrated.first()) return
+        val positions = settings.playbackPositions.first()
+        val lastAt = settings.playbackLastAt.first()
+        val migrated = history.migrateFromDataStore(items, positions, lastAt)
+        settings.clearPlaybackMemory()
+        settings.setHistoryMigrated(true)
+        Log.i(TAG, "历史迁移（E11）：$migrated 条断点迁入 Room，DataStore 旧键已清理")
     }
 
     /**
@@ -613,6 +668,8 @@ class LocalMediaSource(
         }
     }.getOrNull()
 }
+
+private val JUNK_SUFFIXES = listOf(".part", ".tmp", ".crdownload", ".!qb", ".downloading")
 
 private const val TAG = "LocalMediaSource"
 

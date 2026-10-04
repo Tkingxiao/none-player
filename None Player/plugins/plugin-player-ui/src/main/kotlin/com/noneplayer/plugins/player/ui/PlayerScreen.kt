@@ -102,6 +102,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -112,6 +113,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -129,7 +132,10 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.MediaNaturalOrder
+import com.noneplayer.core.media.cardTitle
 import com.noneplayer.core.media.MediaNames
 import com.noneplayer.core.media.PlaybackFailure
 import com.noneplayer.core.media.resolutionLabel
@@ -137,7 +143,6 @@ import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEyebrow
-import com.noneplayer.core.ui.NpGlass
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpOptRow
 import com.noneplayer.core.ui.NpQuickTile
@@ -199,7 +204,7 @@ import kotlin.math.roundToLong
 import kotlin.math.roundToInt
 
 /** 倍速预设（设计稿 `.speeds` 的档位与顺序：0.5x → 2.0x） */
-private val SPEED_PRESETS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+internal val SPEED_PRESETS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
 
 /** 拖动预览 seek 的最小间隔：更密会在本地大文件上反复解码，更疏则画面不跟手 */
 private const val SCRUB_PREVIEW_INTERVAL_MS = 200L
@@ -361,11 +366,15 @@ fun PlayerScreen(
     mimeType: String,
     mediaId: String,
     navigator: Navigator,
+    /** 「从头播放」（长按菜单）：不恢复断点，从 0 起播 */
+    fromStart: Boolean = false,
 ) {
     val kernel = LocalKernel.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings = remember { kernel.services.get<AppSettings>() }
+    // §8.3：断点/历史唯一读写口（引擎装载恢复断点、退页落盘都走它）
+    val history = remember { kernel.services.get<HistoryRepository>() }
 
     // ---- 设置页「后台与屏幕 / 手势」三组的消费端（设计稿 settingsView） ----
     // 后台播放关闭 → 退页即停；屏幕常亮关闭 → 播放中不取 FLAG_KEEP_SCREEN_ON；
@@ -397,18 +406,10 @@ fun PlayerScreen(
     // 但不阻塞主线程（runBlocking 会在每次退页时卡住退出动画，扫描期间尤其明显）。
     DisposableEffect(mediaId, backgroundPlay) {
         onDispose {
-            // 落盘要落**当前真正在播的那一项**：页内切过集之后路由 mediaId 已不是
-            // 会话当前项，继续用它当 key 会把新一集的进度写进旧文件的断点。
-            val nowId = session.queue.value.getOrNull(session.index.value)?.id?.takeIf { it.isNotEmpty() }
-                ?: mediaId
-            val position = player.positionMs.value
-            if (nowId.isNotEmpty() && position > 1_000) {
-                scope.launch(NonCancellable) {
-                    withContext(Dispatchers.IO) {
-                        settings.savePlaybackPosition(nowId, position)
-                    }
-                }
-            }
+            // 退页落盘交给会话的唯一写入方（§8.3：进度落 Room 历史；门槛/看完语义
+            // 收在 HistoryRepository.shouldPersist）。落的是**当前真正在播的那一项**：
+            // 页内切过集之后路由 mediaId 已不是会话当前项。
+            session.persistPosition()
             // 设置页「后台播放」关闭 → 退页即停（并清掉迷你条）；
             // 打开则播放继续在后台服务里跑，迷你条据此持续可见、点回来无缝续播（L0）。
             if (!backgroundPlay) session.pause()
@@ -458,48 +459,26 @@ fun PlayerScreen(
         if (mediaId.isEmpty()) resolvedMimeType = resolveMimeType(context, uri)
         val cover = resolveCoverUri(kernel.registry, mediaId)
         artworkUri = cover
-        // 2) 会话就绪后装载
-        player.awaitReady()
-        val sameMedia = player.currentUri.value == uri
-        if (!sameMedia) {
-            // §8.2 同文件夹队列：把当前媒体的同目录兄弟一起交给会话，
-            // 于是"播完自动下一集"与通知栏 ⏮⏭ 由 media3 免费提供。
-            // 查询失败/目录不可得时退化为单项队列，不影响单集播放。
-            val queue = resolveFolderQueue(kernel.registry, uri, mediaId)
-            // 队列里匹配到的那一项才是"权威条目"（有真实标题/时长/封面/来源），
-            // 路由参数只是入口线索——深链场景下 title 甚至可能为空。
-            val authoritative = queue.firstOrNull { it.uri == uri || it.id == mediaId }
-            val saved = if (mediaId.isNotEmpty()) settings.playbackPosition(mediaId).first() else 0L
-            session.open(
-                item = authoritative ?: MediaItem(
-                    id = mediaId,
-                    sourceId = "",
-                    title = resolvedTitle,
-                    uri = uri,
-                    mimeType = mimeType,
-                    coverUri = cover,
-                ),
-                queueOfFolder = queue,
-            )
-            if (saved > 5_000) player.seekTo(saved)
-            player.setSpeed(settings.playbackSpeed.first())
-            if (mediaId.isNotEmpty()) {
-                val saved = settings.subtitleUri(mediaId).first()
-                // 同名字幕自动挂载（批次 3 §12.6）：无记忆时按 ASS > SSA > SRT > VTT
-                // 找同目录同名文件；命中即记忆，之后与手动挂载走同一恢复链路
-                val subtitle = saved ?: resolveSiblingSubtitle(context, uri)?.also {
-                    scope.launch { settings.setSubtitleUri(mediaId, it) }
-                }
-                subtitle?.let { player.setSubtitle(prepareSubtitleUri(context, it.toUri())) }
-            }
-            player.play()
-        } else {
-            // 会话里已经是同一个媒体（从迷你条点回来）。
-            // **已播完的必须从头起**：media3 在 STATE_ENDED 上 `play()` 是空操作，
-            // 不退位就永远停在结束画面——用户看到"点进来没反应"。
-            if (player.state.value == PlaybackState.Ended) player.seekTo(0L)
-            player.play()
-        }
+        // 2) 装载并起播——与「内嵌播放器」共用同一条链（SessionBootstrap）：
+        //    队列 / 断点 / 字幕记忆 / 倍速的语义只有一处，避免两处漂移。
+        ensureSessionPlaying(
+            context = context,
+            registry = kernel.registry,
+            settings = settings,
+            history = history,
+            player = player,
+            session = session,
+            item = MediaItem(
+                id = mediaId,
+                sourceId = "",
+                title = resolvedTitle,
+                uri = uri,
+                mimeType = mimeType,
+                coverUri = cover,
+            ),
+            restorePosition = !fromStart,
+            onSubtitleMatched = { hit -> scope.launch { settings.setSubtitleUri(mediaId, hit) } },
+        )
         mediaOpened = true
     }
 
@@ -518,7 +497,7 @@ fun PlayerScreen(
     // 选集切换或底栏 ⏭ 之后，标题与容器必须立刻换成新一集，
     // 而不是停在进页时那一条（路由 uri 不会因子会话内切集而改变）。
     val currentItem = queue.getOrNull(queueIndex)
-    val headerTitle = currentItem?.title?.takeIf { it.isNotBlank() } ?: displayTitle
+    val headerTitle = currentItem?.cardTitle?.takeIf { it.isNotBlank() } ?: displayTitle
     val headerMimeType = currentItem?.mimeType?.takeIf { it.isNotBlank() } ?: mimeType
     // 容器名三级取值（越靠前越可信）：
     // ① 地址带扩展名（file:// 深链）→ 直接按扩展名判定（`MediaNames.containerName`）；
@@ -551,8 +530,13 @@ fun PlayerScreen(
     val windowInfo = LocalNpWindowInfo.current
     val isDesktopLike = windowInfo.isDesktopLike
     val isFullscreen = !windowIsPortrait
-    /** 隐藏系统栏的手机式沉浸——类 PC 形态系统栏常驻，不抢用户的状态栏 */
-    val isImmersive = isFullscreen && !isDesktopLike
+    // 类 PC 的独占播放页**默认就是真全屏**：系统栏（含手势条）隐藏，
+    // 从详情页内嵌播放点「全屏」进来那一刻起就该是真全屏——用户实报
+    // 「点击全屏进入的还是假全屏（能看见小白条）」。⛶ 仍可切回带系统栏的窗口化观看；
+    // 手机横屏语义不变（本就沉浸，见下方 isImmersive）。
+    var immersiveFullscreen by rememberSaveable { mutableStateOf(isDesktopLike) }
+    /** 隐藏系统栏的沉浸：手机式横屏恒沉浸；类 PC 默认沉浸，⛶ 可退出 */
+    val isImmersive = isFullscreen && (!isDesktopLike || immersiveFullscreen)
     var orientationLock by rememberSaveable { mutableStateOf(OrientationLock.FollowSensor) }
     // 弹层提示的状态位提前到这里：方向请求被系统驳回时要靠它说清楚原因
     val toast = rememberNpToastState()
@@ -679,6 +663,46 @@ fun PlayerScreen(
     var controlsVisible by remember { mutableStateOf(true) }
     // 选集面板（§8.3）：控制层之上的模态浮层，选中即跳集并关闭
     var episodePanelVisible by remember { mutableStateOf(false) }
+
+    // ---- 全屏下拉选项菜单（本轮：替换右抽屉 fs-panel / 底部弹层 / 横向倍速条）----
+    // 菜单锚在触发它的按钮上（矩形来自 onGloballyPositioned）：底栏按钮向上展开、
+    // 顶栏按钮向下展开；菜单内部用「推进-返回」两页切换（drill-in）。
+    var fsMenuPage by remember { mutableStateOf<FsMenuPage?>(null) }
+    var fsMenuRoot by remember { mutableStateOf(FsMenuPage.MAIN) }
+    var fsMenuAnchor by remember { mutableStateOf<FsMenuAnchor?>(null) }
+    var dotsAnchor by remember { mutableStateOf<Rect?>(null) }
+    var episodesAnchor by remember { mutableStateOf<Rect?>(null) }
+    var speedAnchor by remember { mutableStateOf<Rect?>(null) }
+    var subtitleAnchor by remember { mutableStateOf<Rect?>(null) }
+    var seekBarAnchor by remember { mutableStateOf<Rect?>(null) }
+
+    fun openFsMenu(
+        page: FsMenuPage,
+        anchor: Rect?,
+        preferAbove: Boolean = false,
+        /** 向上展开时菜单的下沿参照（进度条行）；不传则贴着触发控件顶 */
+        aboveLimit: Rect? = null,
+    ) {
+        val rect = anchor ?: return
+        fsMenuRoot = page
+        fsMenuAnchor = FsMenuAnchor(
+            rect,
+            alignEnd = true,
+            preferAbove = preferAbove,
+            aboveLimitRect = if (preferAbove) aboveLimit else null,
+        )
+        fsMenuPage = page
+    }
+
+    /** 子页返回：从 ⋯ 一级页推进来的回一级页；直接打开的根页（底栏倍速/字幕）则收起 */
+    fun leaveFsMenuPage() {
+        fsMenuPage = if (fsMenuPage != null && fsMenuPage != fsMenuRoot) FsMenuPage.MAIN else null
+    }
+
+    fun closeFsMenu() {
+        fsMenuPage = null
+    }
+
     var userDragging by remember { mutableStateOf(false) }
     var dragPositionMs by remember { mutableFloatStateOf(0f) }
     // 拖动释放后的目标位置：seek 完成前进度条停在目标处，避免"回跳再快进"的跳变感
@@ -740,9 +764,13 @@ fun PlayerScreen(
     }
 
     // 播放中控制层自动隐藏；拖动进度条期间不隐藏。
-    // 类 PC / 有指针设备：控制层常驻（§13.6——有鼠标时"3.5s 自动消失"是反模式）
-    LaunchedEffect(controlsVisible, state, userDragging, isDesktopLike) {
-        if (isDesktopLike) return@LaunchedEffect
+    // 类 PC / 有指针设备：控制层常驻（§13.6——有鼠标时"3.5s 自动消失"是反模式），
+    // 两个例外：① 显式切入沉浸全屏（"专心看片"的意图，控制层随系统栏一起隐去）；
+    // ② 锁定态（屏幕上只有解锁钮，它必须会自行隐去——"一直挂着"是用户实报的问题）。
+    // 菜单开着时同样不隐藏：菜单锚在触发按钮上，控制层一隐，锚点就没了着落。
+    LaunchedEffect(controlsVisible, state, userDragging, isDesktopLike, immersiveFullscreen, fsMenuPage, stageLocked) {
+        if (isDesktopLike && !immersiveFullscreen && !stageLocked) return@LaunchedEffect
+        if (fsMenuPage != null) return@LaunchedEffect
         if (controlsVisible && state == PlaybackState.Playing && !userDragging) {
             delay(CONTROLS_AUTO_HIDE_MS)
             controlsVisible = false
@@ -781,14 +809,13 @@ fun PlayerScreen(
         if (state == PlaybackState.Playing) player.pause() else player.play()
     }
 
-    // ---- 设计稿播放器交互面（sheet / fs-panel / 仅听音频 / 循环模式）----
+    // ---- 设计稿播放器交互面（sheet / 仅听音频 / 循环模式）----
     val ink0 = LocalNpInk.current
     val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
     val loopMode by session.loopMode.collectAsStateWithLifecycle()
     var speedPickerVisible by remember { mutableStateOf(false) }
     var subtitleSheetVisible by remember { mutableStateOf(false) }
     var moreSheetVisible by remember { mutableStateOf(false) }
-    var fsPanelVisible by remember { mutableStateOf(false) }
 
     /** 选倍速：落到播放器 + 持久化 + 回执，并收起选择条 */
     fun pickSpeed(preset: Float) {
@@ -950,14 +977,17 @@ fun PlayerScreen(
         toast.show("已进入画中画")
     }
 
-    // 锁定语义：屏蔽**全部**舞台手势、返回键与键盘，仅顶部解锁钮可点——
+    // 锁定语义：屏蔽**全部**舞台手势、返回键与键盘，舞台上仅解锁钮可点——
     // 口袋/带娃场景防误触。控制层与全部弹层的收口在下方 LaunchedEffect（那里
     // 各弹层状态才已声明）。
+    // 锁定瞬间让解锁钮**先亮一下**（controlsVisible=true 只是它的载体：锁定态下
+    // 顶/底控制层都被 !stageLocked 挡住，屏幕上只多出解锁钮）——随后由自动隐藏
+    // 守护按同一节拍收起；之后单指点按即可再唤出（见 [stageGestures] 的 onTap）。
     LaunchedEffect(stageLocked) {
         if (stageLocked) {
-            controlsVisible = false
+            controlsVisible = true
             episodePanelVisible = false
-            fsPanelVisible = false
+            fsMenuPage = null
             speedPickerVisible = false
             subtitleSheetVisible = false
             moreSheetVisible = false
@@ -967,13 +997,13 @@ fun PlayerScreen(
 
     /**
      * 两种形态的舞台手势接线（§4.3）——收敛成一处，避免双份漂移。
-     * 锁定态（[stageLocked]）整体禁用；点按单独再判一次：手势开关关闭的用户
-     * 仍需点按呼出控制层，但锁定的用户连这个也不该有。
+     * 锁定态（[stageLocked]）禁用全部手势；**点按例外**：它是解锁钮的唤出入口
+     * （锁定后屏幕只剩解锁钮，不许点按就等于没有出口；除显隐解锁钮外不触发任何动作）。
      */
     fun stageGestures(): Modifier =
         Modifier.npStageGestures(
             gesturesEnabled = gesturesEnabled && !stageLocked,
-            onTap = { if (!stageLocked) controlsVisible = !controlsVisible },
+            onTap = { controlsVisible = !controlsVisible },
             onDoubleTap = ::onStageDoubleTap,
             onLongPressStart = {
                 boostPreviousSpeed = speed
@@ -1124,7 +1154,7 @@ fun PlayerScreen(
     LaunchedEffect(inPipMode) {
         if (inPipMode) {
             controlsVisible = false
-            fsPanelVisible = false
+            fsMenuPage = null
             episodePanelVisible = false
             audioTrackSheetVisible = false
             pictureSheetVisible = false
@@ -1258,14 +1288,15 @@ fun PlayerScreen(
                         modifier = Modifier.fillMaxSize(),
                     )
                     // 暂停时的中央"继续"：64dp 玻璃圆（设计稿 .bigplay），
-                    // 播放中不出现——它只在"用户可能需要我"的时刻存在
+                    // 播放中不出现——它只在"用户可能需要我"的时刻存在。
+                    // 锁定态不出现：那是舞台上的第二个可点元素，破坏"只有解锁钮可点"。
                     CenterResumeButton(
-                        visible = state == PlaybackState.Paused && !userDragging && !inPipMode,
+                        visible = state == PlaybackState.Paused && !userDragging && !inPipMode && !stageLocked,
                         onPlay = ::togglePlay,
                         modifier = Modifier.align(Alignment.Center),
                     )
-                    // 播完：画面内的轻量结束态（非模态，不遮全屏、不打断）
-                    if (state == PlaybackState.Ended && mediaOpened) {
+                    // 播完：画面内的轻量结束态（非模态，不遮全屏、不打断）；锁定态同上不收
+                    if (state == PlaybackState.Ended && mediaOpened && !stageLocked) {
                         EndedOverlay(
                             onReplay = {
                                 player.seekTo(0L)
@@ -1306,24 +1337,27 @@ fun PlayerScreen(
                         )
                     }
                     // 锁定态（§4.2 🔒）：唯一可点元素是解锁钮
-                    if (stageLocked) {
-                        StageLockBadge(
-                            onUnlock = {
-                                stageLocked = false
-                                controlsVisible = true
-                            },
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .windowInsetsPadding(
-                                    WindowInsets.safeDrawing.only(
-                                        WindowInsetsSides.Top + WindowInsetsSides.End,
-                                    ),
-                                )
-                                .padding(16.dp),
-                        )
-                    }
+                    // 锁定徽标：随控制层显隐——锁定瞬间亮起（反馈 + 指出解锁位置），
+                    // 随后按同一节拍自动隐去；锁定态下单指点按可随时把它唤回。
+                    // （旧行为是"常驻不隐"，用户实报"已锁定按钮不会隐藏，一直存在"。）
+                    StageLockBadgeHost(
+                        visible = stageLocked && controlsVisible,
+                        onUnlock = {
+                            stageLocked = false
+                            controlsVisible = true
+                        },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(
+                                    WindowInsetsSides.Top + WindowInsetsSides.End,
+                                ),
+                            )
+                            .padding(16.dp),
+                    )
                     PlayerTopBar(
-                        visible = controlsVisible && !inPipMode,
+                        // 锁定态里顶/底控制层整体不出——锁定后舞台上只剩解锁钮
+                        visible = controlsVisible && !inPipMode && !stageLocked,
                         title = headerTitle,
                         onBack = {
                             exitFullscreenOrLeave()
@@ -1332,11 +1366,8 @@ fun PlayerScreen(
                         applyInsets = true,
                         showStatus = true,
                         locked = stageLocked,
-                        onToggleLock = {
-                            stageLocked = true
-                            controlsVisible = false
-                        },
-                        // 右上：⋯（选项抽屉）/ 选集。**图标直接摆在顶栏里**，和底栏同一
+                        onToggleLock = { stageLocked = true },
+                        // 右上：⋯（播放选项下拉）/ 选集。**图标直接摆在顶栏里**，和底栏同一
                         // 材质、同一条 scrim、随控制层一起显隐——原先它们套在一个圆角
                         // 黑框里，像个独立贴在画面上的悬浮物。倍速不在这里出现：
                         // 底栏已有倍速钮，右上角再放一份是重复。
@@ -1344,21 +1375,31 @@ fun PlayerScreen(
                             BarCtlButton(
                                 icon = NpIcon.Dots,
                                 contentDescription = "播放选项",
-                                onClick = { fsPanelVisible = !fsPanelVisible },
-                                active = fsPanelVisible,
+                                onClick = {
+                                    controlsVisible = true
+                                    // 再点一次 ⋯ = 收起（子页里点 = 回一级页），与旧面板的开关语义一致
+                                    if (fsMenuPage == FsMenuPage.MAIN) {
+                                        closeFsMenu()
+                                    } else {
+                                        openFsMenu(FsMenuPage.MAIN, dotsAnchor)
+                                    }
+                                },
+                                active = fsMenuPage != null && fsMenuRoot == FsMenuPage.MAIN,
+                                modifier = Modifier.onGloballyPositioned { dotsAnchor = it.boundsInWindow() },
                             )
                             if (queue.size > 1) {
                                 BarCtlButton(
                                     icon = NpIcon.List,
                                     contentDescription = "选集",
-                                    onClick = { episodePanelVisible = true },
+                                    onClick = { openFsMenu(FsMenuPage.EPISODES, episodesAnchor) },
+                                    modifier = Modifier.onGloballyPositioned { episodesAnchor = it.boundsInWindow() },
                                 )
                             }
                         },
                         modifier = Modifier.align(Alignment.TopCenter),
                     )
                     PlayerBottomControls(
-                        visible = controlsVisible && !inPipMode,
+                        visible = controlsVisible && !inPipMode && !stageLocked,
                         applyInsets = true,
                         showTransport = true,
                         positionMs = positionMs,
@@ -1378,88 +1419,167 @@ fun PlayerScreen(
                         hasPrevious = hasPrevious,
                         hasNext = hasNext,
                         speed = speed,
-                        speedPickerVisible = speedPickerVisible,
+                        // 全屏形态的倍速选择是下拉列表（横向选择条留给竖屏/仅听音频）
+                        speedPickerVisible = fsMenuPage == FsMenuPage.SPEED,
+                        inlineSpeedRow = false,
                         onToggleSpeedPicker = {
                             controlsVisible = true
-                            speedPickerVisible = !speedPickerVisible
+                            // 再点一次倍速钮 = 收起
+                            if (fsMenuPage == FsMenuPage.SPEED) {
+                                closeFsMenu()
+                            } else {
+                                openFsMenu(FsMenuPage.SPEED, speedAnchor, preferAbove = true, aboveLimit = seekBarAnchor)
+                            }
                         },
                         onPickSpeed = ::pickSpeed,
                         subtitleLoaded = subtitleOn,
                         onPrevious = { session.previous() },
                         onTogglePlay = ::togglePlay,
                         onNext = { session.next() },
-                        onPickSubtitle = { subtitleSheetVisible = true },
+                        onPickSubtitle = {
+                            if (fsMenuPage == FsMenuPage.SUBTITLE) {
+                                closeFsMenu()
+                            } else {
+                                openFsMenu(FsMenuPage.SUBTITLE, subtitleAnchor, preferAbove = true, aboveLimit = seekBarAnchor)
+                            }
+                        },
                         onToggleFullscreen = {
-                            // 切换类出口：只换版式，不把用户弹出播放页
-                            requestExitFullscreen()
+                            if (isDesktopLike) {
+                                // 类 PC：全屏键 = 沉浸切换（隐藏系统栏），本页版式不变
+                                immersiveFullscreen = !immersiveFullscreen
+                            } else {
+                                // 切换类出口：只换版式，不把用户弹出播放页
+                                requestExitFullscreen()
+                            }
                             controlsVisible = true
                         },
+                        fullscreenActive = isDesktopLike && immersiveFullscreen,
+                        onSpeedAnchor = { speedAnchor = it },
+                        onSubtitleAnchor = { subtitleAnchor = it },
+                        onSeekBarAnchor = { seekBarAnchor = it },
                         modifier = Modifier.align(Alignment.BottomCenter),
                     )
-                    // 全屏播放选项右抽屉（设计稿 .fs-panel）
-                    FullscreenOptionsPanel(
-                        visible = fsPanelVisible,
-                        speedText = speedText,
-                        subtitleText = subtitleText,
-                        loopMode = loopMode,
-                        brightnessPercent = brightnessPercent,
-                        volumePercent = volumePercent,
-                        favorited = favorited,
-                        hasSubtitles = true,
-                        queueSize = queue.size,
-                        queueIndex = queueIndex,
-                        hasChapters = chapters.isNotEmpty(),
-                        sleepLabel = sleepLabel,
-                        sleepActive = sleepTimerEndsAtMs > 0,
-                        onDismiss = { fsPanelVisible = false },
-                        onLoopMode = { mode ->
-                            session.setLoopMode(mode)
-                            toast.show("循环模式：" + when (mode) {
-                                NpLoopMode.OFF -> "顺序播放"
-                                NpLoopMode.ONE -> "单集循环"
-                                NpLoopMode.ALL -> "列表循环"
-                                NpLoopMode.SHUFFLE -> "随机播放"
-                            })
-                        },
-                        onSpeed = {
-                            fsPanelVisible = false
-                            controlsVisible = true
-                            speedPickerVisible = true
-                        },
-                        onSubtitle = {
-                            fsPanelVisible = false
-                            subtitleSheetVisible = true
-                        },
-                        onEpisodes = { episodePanelVisible = true; fsPanelVisible = false },
-                        onBrightness = ::setBrightnessPercent,
-                        onVolume = ::setVolumePercent,
-                        onPip = ::enterPip,
-                        onFavorite = {
-                            favorited = !favorited
-                            toast.show(if (favorited) "已加入收藏" else "已取消收藏")
-                        },
-                        onAudioTrack = {
-                            fsPanelVisible = false
-                            audioTrackSheetVisible = true
-                        },
-                        onPicture = {
-                            fsPanelVisible = false
-                            pictureSheetVisible = true
-                        },
-                        onChapters = {
-                            fsPanelVisible = false
-                            chaptersPanelVisible = true
-                        },
-                        onScreenshot = {
-                            fsPanelVisible = false
-                            screenshot()
-                        },
-                        onSleep = {
-                            fsPanelVisible = false
-                            toggleSleepTimer()
-                        },
-                        modifier = Modifier.align(Alignment.CenterEnd),
-                    )
+                    // 全屏选项：锚定触发按钮的纵向下拉列表
+                    //（本轮替换掉全高右抽屉 fs-panel 与各底部弹层；
+                    //  竖屏形态的 NpSheet 体系不受影响）
+                    fsMenuPage?.let { page ->
+                        val anchor = fsMenuAnchor
+                        if (anchor != null) {
+                            FsDropdown(anchor = anchor, onDismiss = ::closeFsMenu) {
+                                when (page) {
+                                    FsMenuPage.MAIN -> FsMainMenuContent(
+                                        speed = speed,
+                                        subtitleText = subtitleText,
+                                        loopMode = loopMode,
+                                        brightnessPercent = brightnessPercent,
+                                        volumePercent = volumePercent,
+                                        favorited = favorited,
+                                        queueSize = queue.size,
+                                        queueIndex = queueIndex,
+                                        hasChapters = chapters.isNotEmpty(),
+                                        sleepLabel = sleepLabel,
+                                        sleepActive = sleepTimerEndsAtMs > 0,
+                                        onClose = ::closeFsMenu,
+                                        onPage = { fsMenuPage = it },
+                                        onLoopMode = { mode ->
+                                            session.setLoopMode(mode)
+                                            toast.show("循环模式：" + loopLabel(mode))
+                                        },
+                                        onBrightness = ::setBrightnessPercent,
+                                        onVolume = ::setVolumePercent,
+                                        onPip = {
+                                            closeFsMenu()
+                                            enterPip()
+                                        },
+                                        onFavorite = {
+                                            favorited = !favorited
+                                            toast.show(if (favorited) "已加入收藏" else "已取消收藏")
+                                        },
+                                        onScreenshot = {
+                                            closeFsMenu()
+                                            screenshot()
+                                        },
+                                        onSleep = ::toggleSleepTimer,
+                                    )
+
+                                    FsMenuPage.SPEED -> FsSpeedMenuContent(
+                                        speed = speed,
+                                        onPick = {
+                                            closeFsMenu()
+                                            pickSpeed(it)
+                                        },
+                                        onBack = ::leaveFsMenuPage,
+                                    )
+
+                                    FsMenuPage.SUBTITLE -> FsSubtitleMenuContent(
+                                        subtitleOn = subtitleOn,
+                                        subtitleLoaded = subtitleLoaded,
+                                        savedSubtitleName = savedSubtitle
+                                            ?.substringAfterLast('/')
+                                            ?.substringBeforeLast('.'),
+                                        textTracks = tracks.filter { it.type == NpTrackType.TEXT },
+                                        offsetMs = subtitleOffsetMs,
+                                        onOff = {
+                                            player.setSubtitle(null)
+                                            scope.launch { settings.setSubtitleUri(mediaId, null) }
+                                            toast.show("字幕：关闭")
+                                            closeFsMenu()
+                                        },
+                                        onPickTrack = { track ->
+                                            player.selectTrack(NpTrackType.TEXT, track.id)
+                                            closeFsMenu()
+                                        },
+                                        onMountExternal = {
+                                            closeFsMenu()
+                                            subtitlePicker.launch(arrayOf("*/*"))
+                                        },
+                                        onOffset = ::adjustSubtitleOffset,
+                                        onBack = ::leaveFsMenuPage,
+                                    )
+
+                                    FsMenuPage.AUDIO -> FsAudioMenuContent(
+                                        tracks = tracks.filter { it.type == NpTrackType.AUDIO },
+                                        onPick = { track ->
+                                            player.selectTrack(NpTrackType.AUDIO, track.id)
+                                            closeFsMenu()
+                                        },
+                                        onBack = ::leaveFsMenuPage,
+                                    )
+
+                                    FsMenuPage.PICTURE -> FsPictureMenuContent(
+                                        currentMode = scaleMode,
+                                        mirrored = mirrored,
+                                        rotation = rotation,
+                                        onMode = { updateDisplaySettings(mode = it) },
+                                        onMirror = { updateDisplaySettings(mirror = it) },
+                                        onRotate = { updateDisplaySettings(rot = it) },
+                                        onBack = ::leaveFsMenuPage,
+                                    )
+
+                                    FsMenuPage.CHAPTERS -> FsChaptersMenuContent(
+                                        chapters = chapters,
+                                        positionMs = positionMs,
+                                        onSelect = { chapter ->
+                                            player.seekTo(chapter.startMs)
+                                            closeFsMenu()
+                                        },
+                                        onBack = ::leaveFsMenuPage,
+                                    )
+
+                                    FsMenuPage.EPISODES -> FsEpisodesMenuContent(
+                                        queue = queue,
+                                        currentIndex = queueIndex,
+                                        onSelect = { index ->
+                                            session.selectQueueIndex(index)
+                                            closeFsMenu()
+                                            controlsVisible = false
+                                        },
+                                        onBack = ::leaveFsMenuPage,
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
                 }
                 FullscreenForm()
@@ -1525,11 +1645,11 @@ fun PlayerScreen(
                                 modifier = Modifier.fillMaxSize(),
                             )
                             CenterResumeButton(
-                                visible = state == PlaybackState.Paused && !userDragging && !inPipMode,
+                                visible = state == PlaybackState.Paused && !userDragging && !inPipMode && !stageLocked,
                                 onPlay = ::togglePlay,
                                 modifier = Modifier.align(Alignment.Center),
                             )
-                            if (state == PlaybackState.Ended && mediaOpened) {
+                            if (state == PlaybackState.Ended && mediaOpened && !stageLocked) {
                                 EndedOverlay(
                                     onReplay = {
                                         player.seekTo(0L)
@@ -1585,21 +1705,22 @@ fun PlayerScreen(
                                         .padding(horizontal = 20.dp),
                                 )
                             }
-                            if (stageLocked) {
-                                StageLockBadge(
-                                    onUnlock = {
-                                        stageLocked = false
-                                        controlsVisible = true
-                                    },
-                                    modifier = Modifier
-                                        .align(Alignment.TopEnd)
-                                        .padding(12.dp),
-                                )
-                            }
+                            // 锁定徽标：随控制层显隐（与全屏形态同一语义）；
+                            // 竖屏里视频区之外的信息区不受锁定影响，出口始终不止一个
+                            StageLockBadgeHost(
+                                visible = stageLocked && controlsVisible,
+                                onUnlock = {
+                                    stageLocked = false
+                                    controlsVisible = true
+                                },
+                                modifier = Modifier
+                                    .align(Alignment.TopEnd)
+                                    .padding(12.dp),
+                            )
                             // 视频区底部：进度 + 时间 + 全屏（§4.1 的版式）；
                             // 顶栏已上移为常驻 playerbar，舞台内不再放返回键
                             PlayerBottomControls(
-                                visible = controlsVisible && !inPipMode,
+                                visible = controlsVisible && !inPipMode && !stageLocked,
                                 applyInsets = false,
                                 showTransport = false,
                                 positionMs = positionMs,
@@ -2610,9 +2731,10 @@ private fun BarCtlButton(
     contentDescription: String,
     onClick: () -> Unit,
     active: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     Box(
-        modifier = Modifier
+        modifier = modifier
             .size(38.dp)
             .clip(RoundedCornerShape(9.dp))
             .clickable(onClick = onClick),
@@ -2626,6 +2748,11 @@ private fun BarCtlButton(
         )
     }
 }
+
+/** 把控件在窗口中的位置回报给全屏下拉菜单当锚点；无回调时零开销 */
+private fun anchorReporter(onAnchor: ((Rect) -> Unit)?): Modifier =
+    if (onAnchor == null) Modifier
+    else Modifier.onGloballyPositioned { onAnchor(it.boundsInWindow()) }
 
 /**
  * 连播传输键（上一集 / 播放暂停 / 下一集，§8.2）。
@@ -2780,6 +2907,15 @@ private fun PlayerBottomControls(
     onPickSubtitle: () -> Unit,
     onToggleFullscreen: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 内联倍速选择条（竖屏/仅听音频用）；全屏形态改下拉菜单后传 false */
+    inlineSpeedRow: Boolean = true,
+    /** ⛶ 的激活态（类 PC 沉浸全屏中） */
+    fullscreenActive: Boolean = false,
+    /** 触发控件的窗口位置回报（全屏下拉菜单的锚点） */
+    onSpeedAnchor: ((Rect) -> Unit)? = null,
+    onSubtitleAnchor: ((Rect) -> Unit)? = null,
+    /** 进度条所在行的矩形（向上展开的下拉菜单以此为下限，永不遮住进度条） */
+    onSeekBarAnchor: ((Rect) -> Unit)? = null,
 ) {
     val idleColor = Color.White.copy(alpha = 0.9f)
     val content: @Composable () -> Unit = {
@@ -2808,12 +2944,15 @@ private fun PlayerBottomControls(
                 onScrubStart = onScrubStart,
                 onScrubChange = onScrubChange,
                 onScrubEnd = onScrubEnd,
-                modifier = Modifier.padding(top = 6.dp),
+                modifier = Modifier
+                    .padding(top = 6.dp)
+                    .then(anchorReporter(onSeekBarAnchor)),
             )
             // 倍速选择条：贴在倍速钮上方展开（替代原底部弹层——调速不该
             // 把整个画面盖住，也不该让用户的手从控制条跑到屏幕底下）。
+            // 全屏形态改用下拉菜单后传 inlineSpeedRow=false，这条只服务竖屏/仅听音频。
             AnimatedVisibility(
-                visible = speedPickerVisible,
+                visible = speedPickerVisible && inlineSpeedRow,
                 enter = fadeIn(animationSpec = silkSpring(Motion.Overlay)) +
                     slideInVertically(animationSpec = silkSpring(Motion.Overlay)) { it },
                 exit = fadeOut(animationSpec = silkSpring(Motion.OverlayExit)) +
@@ -2879,12 +3018,14 @@ private fun PlayerBottomControls(
                             contentDescription = "字幕",
                             onClick = onPickSubtitle,
                             active = subtitleLoaded,
+                            modifier = anchorReporter(onSubtitleAnchor),
                         )
                         BarCtlButton(
                             icon = NpIcon.Speed,
                             contentDescription = "倍速播放",
                             onClick = onToggleSpeedPicker,
                             active = speed != 1f || speedPickerVisible,
+                            modifier = anchorReporter(onSpeedAnchor),
                         )
                         Text(
                             text = formatTimestamp(durationMs),
@@ -2895,6 +3036,7 @@ private fun PlayerBottomControls(
                             icon = NpIcon.Expand,
                             contentDescription = "全屏切换",
                             onClick = onToggleFullscreen,
+                            active = fullscreenActive,
                         )
                     }
                 }
@@ -3007,7 +3149,7 @@ private fun PlayerTopBar(
  * 只在暂停时出现——播放中它不该占着画面。
  */
 @Composable
-private fun CenterResumeButton(
+internal fun CenterResumeButton(
     visible: Boolean,
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
@@ -3020,25 +3162,24 @@ private fun CenterResumeButton(
             scaleOut(targetScale = 0.86f, animationSpec = silkSpring(Motion.Field)),
         modifier = modifier,
     ) {
-        NpGlass(
-            modifier = Modifier.size(64.dp),
-            shape = CircleShape,
-            elevation = 0.dp,
+        // 暗色玻璃 + 白图标（与锁定徽标/控制条同一套播放器覆盖层语言）。
+        // 此前用 NpGlass 浅色玻璃 + 白 icon：浅色主题或浅色画面上是白底白图，
+        // 图标整个隐形（用户实报"暂停按钮看不清"）。
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.45f))
+                .border(1.dp, Color.White.copy(alpha = 0.28f), CircleShape)
+                .clickable(onClick = onPlay),
             contentAlignment = Alignment.Center,
         ) {
-            Box(
-                modifier = Modifier
-                    .size(64.dp)
-                    .clickable(onClick = onPlay),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.PlayArrow,
-                    contentDescription = "播放",
-                    tint = Color.White,
-                    modifier = Modifier.size(32.dp),
-                )
-            }
+            Icon(
+                imageVector = Icons.Filled.PlayArrow,
+                contentDescription = "播放",
+                tint = Color.White,
+                modifier = Modifier.size(32.dp),
+            )
         }
     }
 }
@@ -3074,8 +3215,30 @@ private fun GestureHintPill(text: String?, modifier: Modifier = Modifier) {
 
 /**
  * 锁定态徽标（§4.2 🔒 / 批次 2「锁屏锁定键」）：锁定后舞台上**唯一**可点元素。
- * 常驻显示（不随控制层显隐、不自动隐藏）——它若消失，用户就没有任何出口了。
+ *
+ * **随控制层显隐**（本轮修正）：锁定瞬间亮起作反馈，随后按同一节拍自动隐去；
+ * 锁定态下单指点按随时把它唤回（见 [PlayerScreen] 的 stageGestures）。
+ * 旧行为是"常驻不隐"，用户实报"已锁定按钮不会隐藏，一直存在"。
  */
+@Composable
+private fun StageLockBadgeHost(
+    visible: Boolean,
+    onUnlock: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    // 独立成组件的另一个原因：舞台嵌在 Column 里时，直接调 AnimatedVisibility 会解析到
+    // ColumnScope 的重载而编译不过；这里没有隐式接收者，落到顶层重载。
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(animationSpec = tween(Motion.Field)),
+        exit = fadeOut(animationSpec = tween(Motion.Field)),
+        modifier = modifier,
+    ) {
+        StageLockBadge(onUnlock = onUnlock)
+    }
+}
+
+/** 44dp 玻璃圆「解锁」钮本体（外观与按压反馈） */
 @Composable
 private fun StageLockBadge(
     onUnlock: () -> Unit,
@@ -3276,7 +3439,7 @@ private fun PlayingBars(modifier: Modifier = Modifier) {
  * [rotation] 直接落在画面 View 的变换上——字幕层是它的兄弟节点，不受变换影响。
  */
 @Composable
-private fun VideoStage(
+internal fun VideoStage(
     player: VideoPlayer,
     videoAspectRatio: Float,
     cues: List<SubtitleCue>,
@@ -3352,7 +3515,7 @@ private fun VideoStage(
 
 /** 双竖条暂停图形（material-icons-core 不含 Pause，手绘保持视觉一致） */
 @Composable
-private fun PauseGlyph(
+internal fun PauseGlyph(
     tint: Color = Color.White,
     barWidth: Dp = 5.dp,
     barHeight: Dp = 26.dp,
@@ -3549,224 +3712,6 @@ private fun PlayerBar(
     }
 }
 
-/**
- * 全屏播放选项右抽屉（设计稿 `.fs-panel`）：宽 min(330dp,78vw)、黑 78% 渐变左缘淡出、
- * 左下角 18dp 圆角，fade + 右滑 24dp 进场（Motion.Drawer / NpEasing.Drawer）。
- */
-@Composable
-private fun FullscreenOptionsPanel(
-    visible: Boolean,
-    speedText: String,
-    subtitleText: String,
-    loopMode: NpLoopMode,
-    brightnessPercent: Int,
-    volumePercent: Int,
-    favorited: Boolean,
-    hasSubtitles: Boolean,
-    queueSize: Int,
-    queueIndex: Int,
-    hasChapters: Boolean,
-    sleepLabel: String,
-    sleepActive: Boolean,
-    onDismiss: () -> Unit,
-    onLoopMode: (NpLoopMode) -> Unit,
-    onSpeed: () -> Unit,
-    onSubtitle: () -> Unit,
-    onEpisodes: () -> Unit,
-    onBrightness: (Int) -> Unit,
-    onVolume: (Int) -> Unit,
-    onPip: () -> Unit,
-    onFavorite: () -> Unit,
-    onAudioTrack: () -> Unit,
-    onPicture: () -> Unit,
-    onChapters: () -> Unit,
-    onScreenshot: () -> Unit,
-    onSleep: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    val reduceMotion = rememberReduceMotion()
-    var shown by remember { mutableStateOf(false) }
-    LaunchedEffect(visible) { shown = visible }
-    AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(animationSpec = tween(Motion.Drawer, easing = NpEasing.Silk)) +
-            slideInHorizontally(animationSpec = tween(Motion.Drawer, easing = NpEasing.Drawer)) { it / 4 },
-        exit = fadeOut(animationSpec = tween(if (reduceMotion) 1 else Motion.Drawer)) +
-            slideOutHorizontally(animationSpec = tween(if (reduceMotion) 1 else Motion.Drawer)) { it / 4 },
-        modifier = modifier,
-    ) {
-        val widthPx = LocalConfiguration.current.screenWidthDp
-        val panelWidth = minOf(330, widthPx * 78 / 100).dp
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .statusBarsPadding()
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onDismiss,
-                ),
-        ) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.CenterEnd)
-                    .fillMaxHeight()
-                    .width(panelWidth)
-                    .clip(RoundedCornerShape(bottomStart = 18.dp))
-                    .background(
-                        Brush.horizontalGradient(
-                            listOf(
-                                Color.Black.copy(alpha = 0.42f),
-                                Color.Black.copy(alpha = 0.78f),
-                                Color.Black.copy(alpha = 0.78f),
-                            ),
-                        ),
-                    )
-                    .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.End))
-                    .verticalScroll(rememberScrollState())
-                    .padding(start = 24.dp, end = 20.dp, top = 18.dp, bottom = 20.dp),
-            ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = "播放选项",
-                        style = NpTypography.titleMedium,
-                        color = Color.White,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        text = "$speedText · ${"%.0f".format(brightnessPercent.toFloat())}%",
-                        style = NpMonoSmall,
-                        color = Color.White.copy(alpha = 0.55f),
-                    )
-                    NpIconButton(
-                        icon = NpIcon.Close,
-                        contentDescription = "关闭面板",
-                        onClick = onDismiss,
-                        size = 32.dp,
-                        iconSize = 16.dp,
-                        tint = Color.White,
-                    )
-                }
-                FpSectionTitle("循环模式")
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(
-                        NpLoopMode.OFF to NpIcon.ListView,
-                        NpLoopMode.ONE to NpIcon.Rotate,
-                        NpLoopMode.SHUFFLE to NpIcon.Sort,
-                        NpLoopMode.ALL to NpIcon.Sound,
-                    ).forEach { (mode, icon) ->
-                        val on = loopMode == mode
-                        Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(RoundedCornerShape(11.dp))
-                                .background(if (on) MaterialTheme.colorScheme.primary else Color.Transparent)
-                                .border(1.dp, Color.White.copy(alpha = 0.22f), RoundedCornerShape(11.dp))
-                                .npPressScale(onClick = { onLoopMode(mode) }, pressedScale = 0.94f),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            androidx.compose.material3.Icon(
-                                imageVector = icon,
-                                contentDescription = loopLabel(mode),
-                                tint = if (on) MaterialTheme.colorScheme.onPrimary else Color.White,
-                                modifier = Modifier.size(19.dp),
-                            )
-                        }
-                    }
-                }
-                FpSectionTitle("画面与声音")
-                FpSlider("亮度", NpIcon.Moon, brightnessPercent, onBrightness)
-                FpSlider("音量", NpIcon.Sound, volumePercent, onVolume)
-                FpSectionTitle("播放")
-                FpRow(icon = NpIcon.Speed, label = "播放倍速", value = speedText, onClick = onSpeed)
-                FpRow(
-                    icon = NpIcon.Subtitle,
-                    label = "字幕",
-                    value = subtitleText,
-                    active = subtitleText != "关闭",
-                    onClick = onSubtitle,
-                )
-                if (queueSize > 1) {
-                    FpRow(
-                        icon = NpIcon.List,
-                        label = "选集",
-                        value = "${queueIndex + 1} / $queueSize",
-                        onClick = onEpisodes,
-                    )
-                }
-                FpSectionTitle("更多")
-                FpRow(icon = NpIcon.Pip, label = "画中画", onClick = onPip)
-                FpRow(icon = NpIcon.Sound, label = "音轨", onClick = onAudioTrack)
-                FpRow(icon = NpIcon.GridView, label = "画面", onClick = onPicture)
-                if (hasChapters) {
-                    FpRow(icon = NpIcon.List, label = "章节", onClick = onChapters)
-                }
-                FpRow(icon = NpIcon.Clock, label = "截图", onClick = onScreenshot)
-                FpRow(
-                    icon = NpIcon.Moon,
-                    label = sleepLabel,
-                    active = sleepActive,
-                    onClick = onSleep,
-                )
-                FpRow(
-                    icon = NpIcon.Heart,
-                    label = if (favorited) "已收藏" else "收藏",
-                    active = favorited,
-                    onClick = onFavorite,
-                )
-            }
-        }
-    }
-}
-
-/** fs-panel 分区小标题（设计稿 .fp-t：mono 11sp 大写 55% 白） */
-@Composable
-private fun FpSectionTitle(text: String) {
-    Text(
-        text = text.uppercase(),
-        style = NpEyebrow,
-        color = Color.White.copy(alpha = 0.55f),
-        modifier = Modifier.padding(top = 18.dp, bottom = 10.dp),
-    )
-}
-
-/** fs-panel 行（设计稿 .fp-row）：图标 + 文字 + 右侧 mono 值，on 态 accent */
-@Composable
-private fun FpRow(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    value: String? = null,
-    active: Boolean = false,
-    onClick: () -> Unit,
-) {
-    val tint = if (active) MaterialTheme.colorScheme.primary else Color.White
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(10.dp))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 4.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        androidx.compose.material3.Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = tint.copy(alpha = 0.85f),
-            modifier = Modifier.size(18.dp),
-        )
-        Text(
-            text = label,
-            style = NpTypography.bodyMedium,
-            color = tint,
-            modifier = Modifier.weight(1f),
-        )
-        if (value != null) {
-            Text(text = value, style = NpMonoSmall, color = if (active) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.75f))
-        }
-    }
-}
-
 /** `.opt-grid` 的一个圆 tile（图标 / 标签 / 选中 / danger / 动作） */
 private data class QuickTileSpec(
     val icon: androidx.compose.ui.graphics.vector.ImageVector,
@@ -3814,11 +3759,11 @@ private fun FpSlider(
 }
 
 /** 倍速文本（1.0x / 1.25x …） */
-private fun speedLabel(speed: Float): String =
+internal fun speedLabel(speed: Float): String =
     "%.2fx".format(speed).removeSuffix("0").removeSuffix(".")
 
 /** 循环模式文案 */
-private fun loopLabel(mode: NpLoopMode): String = when (mode) {
+internal fun loopLabel(mode: NpLoopMode): String = when (mode) {
     NpLoopMode.OFF -> "顺序播放"
     NpLoopMode.ONE -> "单集循环"
     NpLoopMode.ALL -> "列表循环"
@@ -3833,7 +3778,7 @@ private fun loopLabel(mode: NpLoopMode): String = when (mode) {
  */
 private val ALLOWED_URI_SCHEMES = setOf("content", "file")
 
-private fun isPlayableUriScheme(uriString: String): Boolean =
+internal fun isPlayableUriScheme(uriString: String): Boolean =
     runCatching { uriString.toUri().scheme?.lowercase() }.getOrNull() in ALLOWED_URI_SCHEMES
 
 /** ACTION_VIEW 外唤（本地 Intent，零网络）；scheme 不在白名单、无处理方或 file:// 受限时返回 false */
@@ -3944,7 +3889,7 @@ private suspend fun resolveCoverUri(
  * 失败 / 找不到目录 / 只有一项时返回**只含当前项的列表**：单集播放照样成立，
  * 不会因为队列构造失败而播不出来（宁可没有连播，也不能没有播放）。
  */
-private suspend fun resolveFolderQueue(
+internal suspend fun resolveFolderQueue(
     registry: ExtensionRegistry,
     uri: String,
     mediaId: String,
@@ -3980,9 +3925,9 @@ private suspend fun resolveFolderQueue(
                 val folder = self.folder ?: return@withContext listOf(self)
                 val siblings = all
                     .filter { it.folder == folder }
-                    // 自然序（"第2集" 排在 "第10集" 前）——库里列表用的同款比较器，
+                    // 自然序（E42）：与媒体库排序**同一个比较器**（core:media NaturalOrder），
                     // 队列顺序必须与用户看到的顺序一致，否则"下一集"会跳错
-                    .sortedWith(compareBy({ it.title.lowercase() }, { it.title }))
+                    .sortedWith(MediaNaturalOrder)
                 val result = if (siblings.none { it.id == self.id }) siblings + self else siblings
                 return@withContext result
             }
@@ -4040,7 +3985,7 @@ private val SIBLING_SUBTITLE_EXTENSIONS = listOf("ass", "ssa", "srt", "vtt")
  * 按优先级取第一条。视频在 MediaStore 的 RELATIVE_PATH（Q+）与字幕所在目录比对；
  * 查不到（非 MediaStore 来源 / 无字幕）返回 null，调用方保持现状。
  */
-private suspend fun resolveSiblingSubtitle(context: Context, uri: String): String? =
+internal suspend fun resolveSiblingSubtitle(context: Context, uri: String): String? =
     withContext(Dispatchers.IO) {
         runCatching {
             val resolver = context.contentResolver

@@ -27,6 +27,7 @@ dependencies {
     implementation(project(":kernel:kernel-ui-api"))
     implementation(project(":core:common"))
     implementation(project(":core:data"))
+    implementation(project(":core:database"))
     implementation(project(":core:ui"))
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

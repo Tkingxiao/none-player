@@ -11,6 +11,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -83,6 +84,7 @@ import androidx.compose.ui.unit.sp
  * 按下的 160ms 里每帧都要重组一次卡片——列表里几十张卡片同时被按下就是掉帧。
  */
 @Composable
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 fun Modifier.npPressScale(
     onClick: () -> Unit,
     pressedScale: Float = 0.96f,
@@ -92,6 +94,8 @@ fun Modifier.npPressScale(
      * 传入后本函数不再自建。为空时自建（绝大多数按钮/图标的用法）。
      */
     interactionSource: MutableInteractionSource? = null,
+    /** 长按（§3.6 上下文菜单入口）；null = 仅点击（既有调用点行为不变） */
+    onLongClick: (() -> Unit)? = null,
 ): Modifier {
     val source = interactionSource ?: remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
@@ -102,14 +106,26 @@ fun Modifier.npPressScale(
         durationMs = Motion.Press,
         label = "npPressScale",
     )
-    return this
-        .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
-        .clickable(
+    val clickModifier = if (onLongClick == null) {
+        Modifier.clickable(
             interactionSource = source,
             indication = null,
             enabled = enabled,
             onClick = onClick,
         )
+    } else {
+        // combinedClickable 才会把"长按"与"点击"分开派发；无长按时保留原 clickable
+        Modifier.combinedClickable(
+            interactionSource = source,
+            indication = null,
+            enabled = enabled,
+            onClick = onClick,
+            onLongClick = onLongClick,
+        )
+    }
+    return this
+        .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
+        .then(clickModifier)
 }
 
 /**

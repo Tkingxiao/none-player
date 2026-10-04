@@ -29,6 +29,17 @@ data class MediaItem(
     val width: Int = 0,
     /** 视频像素高（未知为 0；音频恒 0） */
     val height: Int = 0,
+    /**
+     * 富化后的展示标题（`plugin-enricher-filename` 写；E42）。
+     * null / 空白 = 未富化，UI 退回 [title]（整条文件名）。
+     */
+    val displayTitle: String? = null,
+    /** 季号（文件名解析；0 = 未知） */
+    val seasonNumber: Int = 0,
+    /** 集号（文件名解析；0 = 未知） */
+    val episodeNumber: Int = 0,
+    /** 视频编码（文件名解析，如 HEVC / AVC / AV1；null = 未知） */
+    val videoCodec: String? = null,
 )
 
 /** 媒体种类：由 mimeType 判定（音频/视频），UI 用它决定角标、图标与分组 */
@@ -37,6 +48,23 @@ enum class MediaKind { VIDEO, AUDIO }
 /** 由 [MediaItem.mimeType] 判定媒体种类；未知/视频一律视为 VIDEO */
 val MediaItem.kind: MediaKind
     get() = if (mimeType.startsWith("audio/", ignoreCase = true)) MediaKind.AUDIO else MediaKind.VIDEO
+
+/**
+ * 卡片/列表要显示的标题：富化出短标题时用它，否则退回整条文件名（E42 验收项）。
+ */
+val MediaItem.cardTitle: String
+    get() = displayTitle?.takeIf { it.isNotBlank() } ?: title
+
+/**
+ * 「第 N 集」标签（文件名解析出集号时才有）——设计稿卡片 meta 里的剧集角标。
+ * 有季号时并成「第 1 季 第 2 集」，避免多季混排时歧义。
+ */
+val MediaItem.episodeLabel: String?
+    get() = when {
+        episodeNumber <= 0 -> null
+        seasonNumber > 0 -> "第 $seasonNumber 季 第 $episodeNumber 集"
+        else -> "第 $episodeNumber 集"
+    }
 
 /**
  * 卡片 meta 的「分辨率 / 质量」标签（设计稿 `v.res`：1080P / 4K / 无损）。

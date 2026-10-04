@@ -55,5 +55,6 @@ internal fun sessionFactoryOf(services: ServiceLocator): KernelServicesView =
             registry = services.get<ExtensionRegistry>(),
             settings = services.get(),
             events = services.get(),
+            history = services.get(),
         )
     }

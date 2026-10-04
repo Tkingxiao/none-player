@@ -459,6 +459,8 @@ fun NpMediaCard(
     /** meta 行首的文件夹色相胶囊（设计稿 gridCard 的 `.foldertag`） */
     folderTag: String? = null,
     folderTagIsAudio: Boolean = false,
+    /** 长按（上下文菜单入口，§3.6）；null = 不注册长按，点击行为不变 */
+    onLongClick: (() -> Unit)? = null,
     cover: @Composable () -> Unit = {},
 ) {
     val ink = LocalNpInk.current
@@ -485,6 +487,7 @@ fun NpMediaCard(
                 onClick = onClick,
                 pressedScale = 0.975f,
                 interactionSource = interactionSource,
+                onLongClick = onLongClick,
             ),
     ) {
         cover()
@@ -532,6 +535,8 @@ fun NpListRow(
     /** meta 行首的文件夹色相胶囊（设计稿 listCard 的 `.foldertag`） */
     folderTag: String? = null,
     folderTagIsAudio: Boolean = false,
+    /** 长按（上下文菜单入口，§3.6）；null = 不注册长按，点击行为不变 */
+    onLongClick: (() -> Unit)? = null,
     cover: @Composable () -> Unit = {},
 ) {
     val ink = LocalNpInk.current
@@ -561,6 +566,7 @@ fun NpListRow(
                 onClick = onClick,
                 pressedScale = 0.99f,
                 interactionSource = interactionSource,
+                onLongClick = onLongClick,
             )
             .padding(8.dp),
         verticalAlignment = Alignment.CenterVertically,

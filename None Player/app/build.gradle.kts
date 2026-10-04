@@ -45,6 +45,7 @@ dependencies {
     implementation(project(":plugins:plugin-player-exo"))
     implementation(project(":plugins:plugin-player-ui"))
     implementation(project(":plugins:plugin-profile"))
+    implementation(project(":plugins:plugin-enricher-filename"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

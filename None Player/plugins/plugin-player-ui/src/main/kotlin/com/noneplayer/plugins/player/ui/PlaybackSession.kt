@@ -2,7 +2,9 @@ package com.noneplayer.plugins.player.ui
 
 import android.content.Context
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.cardTitle
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
@@ -14,6 +16,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -40,7 +43,8 @@ data class NowPlaying(
     val hasNext: Boolean,
     val hasPrevious: Boolean,
 ) {
-    val title: String get() = item.title
+    // E42：展示名统一用 cardTitle（富化短标题）——迷你条/通知/点回播放页的路由标题共用
+    val title: String get() = item.cardTitle
     val coverUri: String? get() = item.coverUri
 
     /** 进度 0f..1f；时长未知时为 0 */
@@ -69,9 +73,22 @@ class PlaybackSession(
     private val registry: ExtensionRegistry,
     private val settings: AppSettings,
     private val events: EventBus,
+    /** §8.3 持久层：断点/历史的唯一写入方（DataStore 只留设置项，E11） */
+    private val history: HistoryRepository,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    init {
+        // §8.3 写入时机：播放中每 5s 落一次断点；暂停/切集/退页另有显式调用。
+        // 引擎/队列未就绪时 persistPosition 自行短路，这里不做状态判断之外的事。
+        scope.launch {
+            while (true) {
+                delay(PERIODIC_PERSIST_MS)
+                if (_player.value?.state?.value == PlaybackState.Playing) persistPosition()
+            }
+        }
+    }
 
     /**
      * 仅听音频模式（设计稿 `.audio` 整屏页的开关）。
@@ -196,7 +213,14 @@ class PlaybackSession(
      *
      * 队列写入 media3 会话后，**通知栏 ⏮⏭ 与播完自动下一集由框架免费提供**。
      */
-    fun open(item: MediaItem, queueOfFolder: List<MediaItem>) {
+    fun open(
+        item: MediaItem,
+        queueOfFolder: List<MediaItem>,
+        /** 起始位置（断点续播）：经 `setQueue` 的 startPositionMs 下发——
+         *  它由引擎在 prepare 时套用，不依赖"控制器已连接"这一时序假设
+         *  （单独的 seekTo 在控制器未就绪时会被静默丢弃，模拟器实测续播丢失）。 */
+        startPositionMs: Long = 0L,
+    ) {
         val player = acquire(item.mimeType)
         // 定位起点同样"先 id 再 uri"：来源重扫后 id 可能已换号（MediaStore._id 会变），
         // 只认 id 会让队列退化成单项且**静默**——播放正常，却悄悄丢掉连播与选集。
@@ -216,8 +240,10 @@ class PlaybackSession(
         }
         _queue.value = list
         _index.value = index
-        player.setQueue(list, index, 0L)
+        player.setQueue(list, index, startPositionMs.coerceAtLeast(0L))
         events.publish(KernelEvent.PlaybackStarted(list[index].id))
+        // play_count 在"进入某项播放"时 +1（周期/暂停落点不算，避免被落点次数灌水）
+        scope.launch { withContext(Dispatchers.IO) { history.markPlayed(list[index]) } }
     }
 
     /** 切换播放/暂停（迷你条 ▶/⏸ 直接控制会话） */
@@ -280,18 +306,26 @@ class PlaybackSession(
         _index.value = -1
     }
 
-    /** 记住当前项进度（退页/切集时调用），供断点续播 */
+    /**
+     * 记住当前项进度（周期/暂停/切集/退页时调用），供断点续播与历史。
+     *
+     * 门槛与"看完"语义收在 [HistoryRepository.shouldPersist]（E12：<10s 且未完看不写）——
+     * 此前页面侧的门槛是 1s，切集瞬间的 0 附近位置会把「继续观看」污染成 0:00。
+     */
     fun persistPosition() {
         val item = _queue.value.getOrNull(_index.value) ?: return
-        val position = _player.value?.positionMs?.value ?: return
-        if (item.id.isEmpty() || position <= MIN_PERSIST_POSITION_MS) return
+        val p = _player.value ?: return
+        val position = p.positionMs.value
+        val duration = p.durationMs.value
+        if (item.id.isEmpty()) return
+        if (!HistoryRepository.shouldPersist(position, duration)) return
         scope.launch {
-            withContext(Dispatchers.IO) { settings.savePlaybackPosition(item.id, position) }
+            withContext(Dispatchers.IO) { history.record(item, positionMs = position, durationMs = duration) }
         }
     }
 
     private companion object {
-        /** 与 E12 语义一致：太靠前的进度不算"看过"，不写断点 */
-        const val MIN_PERSIST_POSITION_MS = 1_000L
+        /** §8.3：播放中每 5s 落一次断点 */
+        const val PERIODIC_PERSIST_MS = 5_000L
     }
 }

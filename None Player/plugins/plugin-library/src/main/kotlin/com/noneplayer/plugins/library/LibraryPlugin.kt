@@ -1,7 +1,10 @@
 package com.noneplayer.plugins.library
 
 import androidx.navigation.compose.composable
+import com.noneplayer.kernel.api.ContextMenuItem
 import com.noneplayer.kernel.api.ExtensionRegistry
+import com.noneplayer.kernel.api.ServiceLocator
+import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.PluginMarker
 import com.noneplayer.kernel.api.SearchProvider
@@ -23,7 +26,16 @@ class LibraryPlugin : Plugin {
     override val name: String = "媒体库"
     override val version: String = "1.0.0"
 
+    private lateinit var appContext: android.content.Context
+
+    override fun onBind(services: ServiceLocator) {
+        appContext = services.get<android.content.Context>()
+    }
+
     override suspend fun onInstall(registry: ExtensionRegistry) {
+        // §3.6：本插件用公开契约（ContextMenuItem）贡献「分享」——
+        // 契约既有实现也有消费方（长按菜单），E34 的"死契约"就此闭环一格
+        registry.register(ContextMenuItem::class.java, ShareContextMenuItem(appContext))
         registry.register(TabProvider::class.java, LibraryTabProvider())
         registry.register(TabProvider::class.java, FoldersTabProvider())
         registry.register(ScreenProvider::class.java, SearchScreenProvider())

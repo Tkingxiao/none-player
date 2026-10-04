@@ -32,8 +32,12 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryEntry
+import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.cardTitle
+import com.noneplayer.core.media.episodeLabel
 import com.noneplayer.core.media.kind
 import com.noneplayer.core.media.resolutionLabel
 import com.noneplayer.core.ui.LocalNpInk
@@ -124,8 +128,11 @@ private fun ProfileScreen(navigator: Navigator) {
         }
     }.collectAsStateWithLifecycle(initialValue = null)
     val settings = remember { kernel.services.get<AppSettings>() }
-    val positions by settings.playbackPositions.collectAsStateWithLifecycle(initialValue = emptyMap())
-    val lastAt by settings.playbackLastAt.collectAsStateWithLifecycle(initialValue = emptyMap())
+    // §8.3：播放历史/收藏（进度与时间序都读 Room 仓库）
+    val history = remember { kernel.services.get<HistoryRepository>() }
+    val historyEntries by history.recent.collectAsStateWithLifecycle(initialValue = emptyList())
+    val positions = remember(historyEntries) { historyEntries.associate { it.mediaId to it.positionMs } }
+    val lastAt = remember(historyEntries) { historyEntries.associate { it.mediaId to it.lastPlayedAt } }
     val recent = remember(mediaState, positions, lastAt) {
         (mediaState ?: emptyList())
             .filter { (positions[it.id] ?: 0L) > 0L }
@@ -133,6 +140,12 @@ private fun ProfileScreen(navigator: Navigator) {
             .take(12)
     }
     val historyCount = remember(positions) { positions.count { it.value > 0L } }
+    // §8.3 收藏：与媒体库长按菜单的「加入收藏」共用同一个仓库 → 天然联动
+    val favorites by history.favorites.collectAsStateWithLifecycle(initialValue = emptyList())
+    val favoriteItems = remember(mediaState, favorites) {
+        val list = mediaState ?: emptyList()
+        favorites.mapNotNull { key -> list.firstOrNull { HistoryEntry.keyOf(it) == key } }
+    }
 
     /**
      * 打开首页的「播放历史」聚合。
@@ -143,6 +156,12 @@ private fun ProfileScreen(navigator: Navigator) {
      */
     fun openHistory() {
         NpTabChannel.request("home", "history")
+        switchTab("home")
+    }
+
+    /** 打开首页的「我的收藏」聚合（与 [openHistory] 同一套跨 Tab 通道） */
+    fun openFavorites() {
+        NpTabChannel.request("home", "favorites")
         switchTab("home")
     }
 
@@ -185,8 +204,9 @@ private fun ProfileScreen(navigator: Navigator) {
                         EntryRow(
                             icon = NpIcon.Heart,
                             title = "我的收藏",
-                            subtitle = null,
-                            onClick = { notYet("收藏") },
+                            // §8.3：真实收藏条数（数据来自与媒体库长按菜单同一个仓库）
+                            subtitle = if (favorites.isNotEmpty()) "${favorites.size} 个" else null,
+                            onClick = { openFavorites() },
                         )
                         EntryRow(
                             icon = NpIcon.List,
@@ -201,6 +221,38 @@ private fun ProfileScreen(navigator: Navigator) {
                             onClick = { notYet("音频收藏") },
                             showDivider = false,
                         )
+                    }
+                }
+
+                if (favoriteItems.isNotEmpty()) {
+                    item(key = "favorites") {
+                        Column(modifier = Modifier.padding(top = 20.dp)) {
+                            Box(modifier = Modifier.padding(horizontal = gutter)) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    NpEyebrow(text = "我的收藏")
+                                    Box(modifier = Modifier.weight(1f))
+                                    NpMoreLink(text = "全部", onClick = { openFavorites() })
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(14.dp))
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                items(favoriteItems, key = { "${it.sourceId}:${it.id}" }) { item ->
+                                    NpCarouselItem {
+                                        RecentCard(
+                                            item = item,
+                                            onOpen = { openPlayer(navigator, item) },
+                                            progress = fractionOf(item, positions),
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -348,12 +400,15 @@ private fun RecentCard(item: MediaItem, onOpen: () -> Unit, progress: Float = 0f
     val isAudio = item.kind == MediaKind.AUDIO
     val hue = NpMediaColor.itemHue(item.folder, isAudio)
     NpMediaCard(
-        title = item.title,
+        // E42：与媒体库卡片同一套展示名（富化短标题 + 「第 N 集」）
+        title = item.cardTitle,
         // 设计稿 medCard 的 meta：`已看 x% · 时长 · 分辨率`
         meta = buildList {
+            item.episodeLabel?.let { add(it) }
             if (progress > 0.01f && progress < 0.99f) add("已看 ${(progress * 100).toInt()}%")
             formatTimestamp(item.durationMs).takeIf { item.durationMs > 0 }?.let { add(it) }
             item.resolutionLabel.takeIf { it.isNotEmpty() }?.let { add(it) }
+            item.videoCodec?.let { add(it) }
         },
         onClick = onOpen,
         cover = {

@@ -10,6 +10,7 @@ import com.noneplayer.kernel.BootState
 import com.noneplayer.kernel.Kernel
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.generated.ExoPlayerPluginIndex
+import com.noneplayer.kernel.generated.FilenameEnricherPluginIndex
 import com.noneplayer.kernel.generated.LibraryPluginIndex
 import com.noneplayer.kernel.generated.LocalScannerPluginIndex
 import com.noneplayer.kernel.generated.PlayerUiPluginIndex
@@ -65,6 +66,7 @@ class NonePlayerApplication : Application(), ImageLoaderFactory {
                 ExoPlayerPluginIndex(),
                 PlayerUiPluginIndex(),
                 ProfilePluginIndex(),
+                FilenameEnricherPluginIndex(),
             ),
         )
         kernel.boot()

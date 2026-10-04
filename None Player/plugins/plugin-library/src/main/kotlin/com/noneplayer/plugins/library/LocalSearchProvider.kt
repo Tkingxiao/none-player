@@ -1,6 +1,7 @@
 package com.noneplayer.plugins.library
 
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.cardTitle
 import com.noneplayer.core.media.SearchResult
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.MediaSourceProvider
@@ -31,8 +32,12 @@ class LocalSearchProvider(private val registry: ExtensionRegistry) : SearchProvi
             .flatten()
         return items
             .filter { item ->
+                // 与搜索页同一匹配域（标题/短标题/文件夹/扩展名）
                 item.title.contains(q, ignoreCase = true) ||
-                    (item.folder?.contains(q, ignoreCase = true) == true)
+                    item.cardTitle.contains(q, ignoreCase = true) ||
+                    (item.folder?.contains(q, ignoreCase = true) == true) ||
+                    item.title.substringAfterLast('.', "")
+                        .contains(q.removePrefix("."), ignoreCase = true)
             }
             .map { item ->
                 SearchResult(

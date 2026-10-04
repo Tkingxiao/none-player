@@ -136,6 +136,14 @@ object NpIcon {
         stroke("NpTrash", "M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13")
     }
 
+    /** 分享（§3.6 长按菜单）：三节点连线，24 视口 2px 描边 monoline */
+    val Share: ImageVector by lazy {
+        stroke(
+            "NpShare",
+            "M18 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM6 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM18 22a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM8.6 10.5l6.8-3.9M8.6 13.5l6.8 3.9",
+        )
+    }
+
     val Pip: ImageVector by lazy {
         stroke("NpPip", "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM12 12h7v5h-7z")
     }

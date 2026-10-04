@@ -6,6 +6,7 @@ import com.noneplayer.kernel.api.PluginMarker
 import com.noneplayer.kernel.api.ServiceLocator
 import com.noneplayer.kernel.api.register
 import com.noneplayer.kernel.ui.api.BottomChromeProvider
+import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.ScreenProvider
 
 /**
@@ -33,6 +34,8 @@ class PlayerUiPlugin : Plugin {
     override suspend fun onInstall(registry: ExtensionRegistry) {
         registry.register(ScreenProvider::class.java, PlayerScreenProvider())
         registry.register(BottomChromeProvider::class.java, MiniPlayerChrome())
+        // 内嵌播放（详情页封面区直接播，全屏键才进独占播放页）
+        registry.register(InlinePlaybackProvider::class.java, InlinePlayerSurface())
     }
 
     override suspend fun onStart() = Unit

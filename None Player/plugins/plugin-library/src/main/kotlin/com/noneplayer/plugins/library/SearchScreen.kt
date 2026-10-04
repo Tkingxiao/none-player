@@ -51,6 +51,8 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.SortMode
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.MediaNaturalOrder
+import com.noneplayer.core.media.cardTitle
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.NpAppTopBar
 import com.noneplayer.core.ui.LocalNpTopBarInset
@@ -125,12 +127,18 @@ fun SearchScreen(navigator: Navigator) {
         if (q.isEmpty()) {
             emptyList()
         } else {
+            // §3.7 匹配域：标题 / 文件夹 / 扩展名。标题按 **cardTitle**（E42 富化后的
+            // 展示名——用户看到的"我的视频"必须能搜到；原名同时保留匹配，搜"[字幕组]"也行）
             val matched = items.filter { item ->
                 item.title.contains(q, ignoreCase = true) ||
-                    (item.folder?.contains(q, ignoreCase = true) == true)
+                    item.cardTitle.contains(q, ignoreCase = true) ||
+                    (item.folder?.contains(q, ignoreCase = true) == true) ||
+                    item.title.substringAfterLast('.', "")
+                        .contains(q.removePrefix("."), ignoreCase = true)
             }
             val comparator: Comparator<MediaItem> = when (sortMode) {
-                SortMode.NAME -> compareBy { it.title.lowercase() }
+                // E42：自然序（与媒体库/队列同一口径）
+                SortMode.NAME -> MediaNaturalOrder
                 SortMode.ADDED -> compareBy { it.addedAtMs }
                 SortMode.DURATION -> compareBy { it.durationMs }
                 SortMode.SIZE -> compareBy { it.sizeBytes }

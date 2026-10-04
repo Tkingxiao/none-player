@@ -1,3 +1,5 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.noneplayer.plugins.library
 
 import androidx.activity.compose.BackHandler
@@ -48,7 +50,10 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -61,9 +66,14 @@ import coil.request.videoFrameMillis
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.LibraryView
 import com.noneplayer.core.data.SortMode
+import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.cardTitle
+import com.noneplayer.core.media.episodeLabel
 import com.noneplayer.core.media.kind
+import com.noneplayer.core.database.HistoryEntry
+import com.noneplayer.core.media.MediaNaturalOrder
 import com.noneplayer.core.media.resolutionLabel
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
 import com.noneplayer.core.ui.LocalNpInk
@@ -84,6 +94,7 @@ import com.noneplayer.core.ui.NpMediaColor
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpOptRow
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSectionHead
@@ -97,6 +108,13 @@ import com.noneplayer.core.ui.formatRelativeDate
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npClickable
 import com.noneplayer.core.ui.npPressScale
+import com.noneplayer.kernel.api.ContextMenuItem
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.async
+import com.noneplayer.kernel.api.subscribe
+import com.noneplayer.kernel.api.KernelEvent
+import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.PermissionProvider
@@ -104,6 +122,7 @@ import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.LocalKernel
+import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.NpTabChannel
@@ -131,6 +150,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings = remember { kernel.services.get<AppSettings>() }
+    // §8.3：播放历史/收藏（进度、时间序、收藏键都从这里来）
+    val history = remember { kernel.services.get<HistoryRepository>() }
     val windowInfo = LocalNpWindowInfo.current
     val compact = windowInfo.isCompact
     // 跨 Tab 跳转通道（首页"文件夹"区块 → 文件夹 Tab）。见 [FolderNav] 与
@@ -157,6 +178,21 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     // 共用同一份选择——两处各记一份的话，从文件夹进"全部"再返回筛选就"重置"了。
     var filter by rememberSaveable { mutableStateOf(FilterKey.ALL.key) }
 
+    // 平板横屏（类 PC）：点视频先进「视频详情」内页（侧边 Rail 常驻不变），
+    // 从详情页的播放键/封面再进全屏播放器；返回链路 = 播放器 → 详情 → 媒体库。
+    // 详情是**页内状态**而不是路由：Rail 属于 Shell，只有留在 Tab 内，
+    // 导航选中态与层级语义才天然正确；rememberSaveable 让它跨播放页往返保留。
+    var detailItem by rememberDetailItemState()
+    // 内嵌播放扩展点：详情页里直接开播（封面框就地变播放器），全屏键才进独占播放页。
+    // 未注册实现时详情页回退为整页播放——缺插件不该让"播放"这个动作消失。
+    val inlinePlayers by remember { kernel.registry.observe<InlinePlaybackProvider>() }
+        .collectAsStateWithLifecycle(initialValue = kernel.registry.query<InlinePlaybackProvider>())
+    val inlinePlayer = inlinePlayers.firstOrNull()
+    /** 点视频的落点分派：类 PC 先看详情；其余形态保持"直接进播放页" */
+    val openDetailOrPlayer: (MediaItem) -> Unit = { item ->
+        if (windowInfo.isDesktopLike) detailItem = item else openPlayer(navigator, item)
+    }
+
     // ---- 媒体数据（扩展点聚合） ----
     // E10：不再本页自建装载器——AsyncImage 经 LocalImageLoader 默认值解析到
     // Application 级 Coil 单例（NonePlayerApplication.newImageLoader）
@@ -181,7 +217,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
 
     val sortedItems = remember(items, sortMode, sortAscending) {
         val comparator: Comparator<MediaItem> = when (sortMode) {
-            SortMode.NAME -> compareBy { it.title.lowercase() }
+            // E42：自然序（E2 排在 E10 前）——共享比较器，与连播队列/详情页列表同一口径
+            SortMode.NAME -> MediaNaturalOrder
             SortMode.ADDED -> compareBy { it.addedAtMs }
             SortMode.DURATION -> compareBy { it.durationMs }
             SortMode.SIZE -> compareBy { it.sizeBytes }
@@ -220,6 +257,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
         selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
     }
     BackHandler(enabled = aggregate != null) { aggregate = null }
+    // 详情页在最上层：后注册的 BackHandler 优先，返回先退详情再谈层级
+    BackHandler(enabled = detailItem != null) { detailItem = null }
 
     // ---- 权限与目录门控 ----
     var permissionTick by remember { mutableIntStateOf(0) }
@@ -282,19 +321,69 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     val recentItems = remember(items) { items.sortedByDescending { it.addedAtMs }.take(8) }
 
     // D2：播放进度接线——「继续观看 / 已看 x% / 封面进度线 / 未看完筛选」的单一数据源。
-    // 播放页/会话层按 mediaId 落盘（DataStore），这里全量收集后经 CompositionLocal 下发，
-    // 卡片与筛选侧只读 [LocalPlaybackProgress]，不再各开 DataStore 订阅。
-    val positions by settings.playbackPositions.collectAsStateWithLifecycle(initialValue = emptyMap())
+    // §8.3 起来源是 Room 历史（DataStore 断点键随 E11 迁移退役）：会话每 5s/暂停/切集
+    // 写入仓库，这里一次读全量再经 CompositionLocal 下发，卡片与筛选只读
+    // [LocalPlaybackProgress]，不再各开订阅。
+    val historyEntries by history.recent.collectAsStateWithLifecycle(initialValue = emptyList())
+    val positions = remember(historyEntries) {
+        historyEntries.associate { it.mediaId to it.positionMs }
+    }
     // 「播放历史 / 最近播放」的时间序：进度值排不出时间序，另取一份 lastAt
-    val lastAt by settings.playbackLastAt.collectAsStateWithLifecycle(initialValue = emptyMap())
+    val lastAt = remember(historyEntries) {
+        historyEntries.associate { it.mediaId to it.lastPlayedAt }
+    }
+    // 下拉刷新（§10 批次 4）：重扫全部来源；指示器跟随 MediaScanned 事件收尾，
+    // 不靠"假转 1 秒"——扫描失败/无目录时也会按时收（超时兜底）
+    var refreshing by remember { mutableStateOf(false) }
+    val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
+    val topBarInset = LocalNpTopBarInset.current
+    val pullIndicatorTop = if (topBarInset == Dp.Unspecified) 8.dp else topBarInset + 8.dp
+    val eventBus = remember { kernel.services.get<EventBus>() }
+
+    fun refresh() {
+        if (refreshing || sources.isEmpty()) return
+        refreshing = true
+        scope.launch {
+            coroutineScope {
+                // 先订阅再触发扫描，避免扫描完成的事件早于订阅到达而错过
+                val waited = async {
+                    withTimeoutOrNull(15_000L) {
+                        eventBus.subscribe<KernelEvent.MediaScanned>().first()
+                    }
+                }
+                sources.filter { it.isAvailable() }.forEach { it.scan() }
+                waited.await()
+            }
+            refreshing = false
+        }
+    }
+
+    // 清空播放历史（D2/§8.3）：破坏性操作，先确认再清
+    var confirmClearHistory by remember { mutableStateOf(false) }
+
+    // ---- 长按菜单（§3.6）状态：被长按的条目 + 卡片矩形（菜单据此锚定）----
+    var contextMenu by remember { mutableStateOf<Pair<MediaItem, Rect>?>(null) }
+    // 收藏键（卡片红心 / 菜单文案 / 我的页联动都读它）
+    val favoriteKeys by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
+    // 收藏键（按收藏时间倒序）——「我的收藏」聚合的排序依据
+    val favoriteKeysList by history.favorites.collectAsStateWithLifecycle(initialValue = emptyList())
+    // 插件贡献的菜单项（ContextMenuItem 扩展点；分享是本插件自己的实现）
+    val contextItems by remember { kernel.registry.observe<ContextMenuItem>() }
+        .collectAsStateWithLifecycle(initialValue = kernel.registry.query<ContextMenuItem>())
+
     CompositionLocalProvider(
         LocalPlaybackProgress provides positions,
         LocalPlaybackLastAt provides lastAt,
+        LocalMediaLongPress provides { item, rect -> contextMenu = item to rect },
     ) {
 
     val title: String
     val subtitle: String
     when {
+        detailItem != null -> {
+            title = "视频详情"
+            subtitle = detailItem!!.folder?.takeIf { it.isNotBlank() } ?: "本地视频"
+        }
         aggregate != null -> {
             val meta = aggregateMeta(aggregate!!)
             title = meta.first
@@ -330,6 +419,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                     subtitle = subtitle,
                     compact = compact,
                     onBack = when {
+                        detailItem != null -> ({ detailItem = null })
                         aggregate != null -> ({ aggregate = null })
                         viewMode == LibraryView.FOLDERS && selectedFolder != null -> ({
                             selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
@@ -337,13 +427,25 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                         else -> null
                     },
                     trailing = {
-                        // 设计稿 topbar 搜索钮常驻（空库也应能进搜索页看引导）
-                        NpIconButton(
-                            icon = NpIcon.Search,
-                            contentDescription = "搜索",
-                            onClick = { navigator.navigate(SEARCH_ROUTE) },
-                            size = if (compact) 40.dp else 44.dp,
-                        )
+                        // 详情页是聚焦页：顶栏只留返回，不再挂搜索入口
+                        if (detailItem == null) {
+                            // §8.3：播放历史聚合里给一个「清空」（确认后清 Room 历史）
+                            if (aggregate == "history") {
+                                NpIconButton(
+                                    icon = NpIcon.Trash,
+                                    contentDescription = "清空播放历史",
+                                    onClick = { confirmClearHistory = true },
+                                    size = if (compact) 40.dp else 44.dp,
+                                )
+                            }
+                            // 设计稿 topbar 搜索钮常驻（空库也应能进搜索页看引导）
+                            NpIconButton(
+                                icon = NpIcon.Search,
+                                contentDescription = "搜索",
+                                onClick = { navigator.navigate(SEARCH_ROUTE) },
+                                size = if (compact) 40.dp else 44.dp,
+                            )
+                        }
                         // 顶栏不再放设置齿轮：设置已经是一个**常驻标签**（紧凑档底栏第 4 项 /
                         // Rail 底部一项），再放一个就是同一个动作两个入口。
                     },
@@ -351,8 +453,53 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
             },
         ) { contentModifier ->
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
-                Column(modifier = contentModifier.fillMaxSize()) {
+                PullToRefreshBox(
+                    isRefreshing = refreshing,
+                    onRefresh = ::refresh,
+                    // 必须把 state 交进去：不传时 Box 内部自建一份，下面 indicator 里那个
+                    // `pullState` 就永远停在 0——下拉手势其实生效了，指示器却始终不出现。
+                    state = pullState,
+                    modifier = contentModifier.fillMaxSize(),
+                    // 内容区从 y=0 起（顶栏是悬浮层），默认指示器会被顶栏盖住——
+                    // 给指示器单独加顶栏高度的偏移，内容本身的内边距不动
+                    indicator = {
+                        androidx.compose.material3.pulltorefresh.PullToRefreshDefaults.Indicator(
+                            state = pullState,
+                            isRefreshing = refreshing,
+                            modifier = Modifier
+                                .align(Alignment.TopCenter)
+                                .padding(top = pullIndicatorTop),
+                        )
+                    },
+                ) {
+                Column(modifier = Modifier.fillMaxSize()) {
                     when {
+                        // 详情页（平板横屏）：整块内容区替换为视频详情，Rail 与选中态不变。
+                        // 同文件夹列表与播放器队列用同一个比较器，顺序与"下一集"一致。
+                        detailItem != null -> {
+                            val detail = detailItem!!
+                            val siblings = remember(detail.id, detail.folder, sortedItems) {
+                                val folder = detail.folder
+                                if (folder.isNullOrBlank()) {
+                                    emptyList()
+                                } else {
+                                    // 与游玩器队列同一比较器（原注释承诺的"顺序一致"）
+                                    sortedItems
+                                        .filter { it.kind == MediaKind.VIDEO && it.folder == folder }
+                                        .sortedWith(MediaNaturalOrder)
+                                }
+                            }
+                            VideoDetailScreen(
+                                item = detail,
+                                siblings = siblings,
+                                resumeMs = positions[detail.id] ?: 0L,
+                                navigator = navigator,
+                                inlinePlayer = inlinePlayer,
+                                onFullscreen = { openPlayer(navigator, it) },
+                                onSelect = { detailItem = it },
+                            )
+                        }
+
                         sources.isEmpty() -> EmptyStage {
                             NpEmptyState(
                                 title = "还没有媒体",
@@ -404,6 +551,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                             all = sortedItems,
                             positions = positions,
                             lastAt = lastAt,
+                            favoriteKeys = favoriteKeysList,
                             sortMode = sortMode,
                             sortAscending = sortAscending,
                             gridColumns = gridColumns,
@@ -414,7 +562,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                             compact = compact,
                             onSort = { scope.launch { settings.setSortMode(it) } },
                             onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
-                            onOpen = { openPlayer(navigator, it) },
+                            onOpen = openDetailOrPlayer,
                             onOpenEpisodes = { episodeSheet = it },
                             onBack = { aggregate = null },
                         )
@@ -437,7 +585,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                             onOpenParent = {
                                 selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
                             },
-                            onOpenVideo = { openPlayer(navigator, it) },
+                            onOpenVideo = openDetailOrPlayer,
                             onOpenEpisodes = { episodeSheet = it },
                         )
 
@@ -447,7 +595,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                             recent = recentItems,
                             folders = folderRoot.children,
                             compact = compact,
-                            onOpen = { openPlayer(navigator, it) },
+                            onOpen = openDetailOrPlayer,
                             onMore = { aggregate = it },
                             onOpenFolder = {
                                 // 首页的"文件夹"区块点进去 = 切到**文件夹 Tab**，
@@ -469,7 +617,72 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                         )
                     }
                 }
+                }
             }
+        }
+
+        // 清空历史确认（破坏性操作不静默执行）
+        if (confirmClearHistory) {
+            androidx.compose.material3.AlertDialog(
+                onDismissRequest = { confirmClearHistory = false },
+                title = { androidx.compose.material3.Text("清空播放历史？") },
+                text = { androidx.compose.material3.Text("将删除全部播放记录与断点，媒体文件本身不受影响。") },
+                confirmButton = {
+                    androidx.compose.material3.TextButton(
+                        onClick = {
+                            confirmClearHistory = false
+                            scope.launch {
+                                history.clearHistory()
+                                android.widget.Toast.makeText(context, "已清空播放历史", android.widget.Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                    ) { androidx.compose.material3.Text("清空") }
+                },
+                dismissButton = {
+                    androidx.compose.material3.TextButton(onClick = { confirmClearHistory = false }) {
+                        androidx.compose.material3.Text("取消")
+                    }
+                },
+            )
+        }
+
+        // 长按菜单（§3.6）：锚定卡片、点外部即收；收藏/分享/详情都在这里收口
+        contextMenu?.let { (menuItem, rect) ->
+            MediaContextMenu(
+                item = menuItem,
+                anchor = rect,
+                isFavorite = HistoryEntry.keyOf(menuItem) in favoriteKeys,
+                extensionItems = contextItems.filter { it.isVisible(menuItem) },
+                onDismiss = { contextMenu = null },
+                onPlay = {
+                    contextMenu = null
+                    openPlayer(navigator, menuItem)
+                },
+                onPlayFromStart = {
+                    contextMenu = null
+                    openPlayer(navigator, menuItem, fromStart = true)
+                },
+                onToggleFavorite = {
+                    contextMenu = null
+                    scope.launch {
+                        val now = history.toggleFavorite(menuItem)
+                        android.widget.Toast.makeText(
+                            context,
+                            if (now) "已加入收藏" else "已取消收藏",
+                            android.widget.Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                },
+                onDetail = if (windowInfo.isDesktopLike) {
+                    {
+                        contextMenu = null
+                        // 详情是页内状态（类 PC）：查看条目而离开当前页的动作交给返回键
+                        detailItem = menuItem
+                    }
+                } else {
+                    null
+                },
+            )
         }
 
         episodeSheet?.let { episodes ->
@@ -846,26 +1059,36 @@ internal fun MediaCardBody(
     val isAudio = item.kind == MediaKind.AUDIO
     val hue = NpMediaColor.itemHue(item.folder, isAudio)
     val progress = item.progressFraction()
+    // 长按菜单的通道（§3.6）：页面提供、卡片消费，避免三层回调透传
+    val longPress = LocalMediaLongPress.current
+    var bounds by remember { mutableStateOf(Rect.Zero) }
     val meta: List<String> = if (showFolderTag) {
         buildList {
+            // E42：文件名解析出的「第 N 集」排在元信息行首（验收：标题 · 第 1 集）
+            item.episodeLabel?.let { add(it) }
             if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
             formatRelativeDate(item.addedAtMs).takeIf { it.isNotEmpty() }?.let { add(it) }
             add(if (isAudio) "音频" else "视频")
         }
     } else {
         buildList {
+            item.episodeLabel?.let { add(it) }
             if (progress > 0.01f && progress < 0.99f) add("已看 ${(progress * 100).toInt()}%")
             if (item.durationMs > 0) add(formatTimestamp(item.durationMs))
             // 设计稿 `v.res`：1080P / 4K / 无损；拿不到就省略（不留「视频」占位，
             // 类型信息 kindtag 已经表达过一次了）
             item.resolutionLabel.takeIf { it.isNotEmpty() }?.let { add(it) }
+            // E42：文件名解析出的编码（HEVC/AVC…），没有就不占位
+            item.videoCodec?.let { add(it) }
         }
     }
     NpMediaCard(
-        title = item.title,
+        // E42：富化出短标题就用它（「标题」而不是「[字幕组] 标题 - 01 [1080p]」）
+        title = item.cardTitle,
         meta = meta,
         onClick = { onOpen(item) },
-        modifier = modifier,
+        onLongClick = longPress?.let { cb -> { cb(item, bounds) } },
+        modifier = modifier.onGloballyPositioned { bounds = it.boundsInWindow() },
         folderTag = if (showFolderTag) item.folder else null,
         folderTagIsAudio = isAudio,
         cover = {
@@ -902,14 +1125,20 @@ internal fun MediaListRow(
     val isAudio = item.kind == MediaKind.AUDIO
     val hue = NpMediaColor.itemHue(item.folder, isAudio)
     val progress = item.progressFraction()
+    val longPress = LocalMediaLongPress.current
+    var bounds by remember { mutableStateOf(Rect.Zero) }
     val meta = buildList {
+        item.episodeLabel?.let { add(it) }
         if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
         formatRelativeDate(item.addedAtMs).takeIf { it.isNotEmpty() }?.let { add(it) }
+        item.videoCodec?.let { add(it) }
     }
     NpListRow(
-        title = item.title,
+        title = item.cardTitle,
         meta = meta,
         onClick = { onOpen(item) },
+        onLongClick = longPress?.let { cb -> { cb(item, bounds) } },
+        modifier = Modifier.onGloballyPositioned { bounds = it.boundsInWindow() },
         compact = compact,
         folderTag = item.folder,
         folderTagIsAudio = isAudio,
@@ -934,7 +1163,7 @@ internal fun MediaListRow(
 
 /** 封面位图：优先扫描时缓存的缩略图，无缓存时对视频现场抽帧；音频用色相占位。 */
 @Composable
-private fun MediaCover(
+internal fun MediaCover(
     item: MediaItem,
     hue: Int,
     modifier: Modifier = Modifier,
@@ -1523,6 +1752,7 @@ private fun AggregateList(
     all: List<MediaItem>,
     positions: Map<String, Long>,
     lastAt: Map<String, Long>,
+    favoriteKeys: List<String>,
     sortMode: SortMode,
     sortAscending: Boolean,
     gridColumns: Int,
@@ -1540,7 +1770,7 @@ private fun AggregateList(
     val ink = LocalNpInk.current
     val gutter = if (compact) 14.dp else 20.dp
 
-    val base = remember(all, mode, positions, lastAt) {
+    val base = remember(all, mode, positions, lastAt, favoriteKeys) {
         when (mode) {
             "continue" -> all.filter { fractionOf(it, positions) in 0.01f..0.99f }
             // 设计稿 `videos.filter(v => v.prog > 0)`，顺序 = 最近播放时间倒序
@@ -1550,6 +1780,12 @@ private fun AggregateList(
             "audios" -> all.filter { it.kind == MediaKind.AUDIO }
             // recent = 按加入时间倒序的全量（首页的 take(8) 只是它的前 8 条）
             "recent" -> all.sortedByDescending { it.addedAtMs }
+            // favorites = 我的收藏（按收藏时间倒序；键匹配走 E73 口径的 media_key）
+            "favorites" -> {
+                val order = favoriteKeys.withIndex().associate { (i, k) -> k to i }
+                all.filter { HistoryEntry.keyOf(it) in order }
+                    .sortedBy { order[HistoryEntry.keyOf(it)] ?: Int.MAX_VALUE }
+            }
             else -> all
         }
     }
@@ -1687,6 +1923,7 @@ internal enum class FilterKey(val key: String, val label: String) {
 private fun aggregateMeta(mode: String): Pair<String, String> = when (mode) {
     "continue" -> "继续观看" to "未看完的视频与音频"
     "history" -> "播放历史" to "按最近播放排序"
+    "favorites" -> "我的收藏" to "收藏的条目"
     "videos" -> "全部视频" to "本地库中的视频文件"
     "audios" -> "全部音频" to "本地库中的纯音频文件"
     else -> "最近添加" to "按加入时间排序"
@@ -1779,18 +2016,28 @@ internal fun fractionOf(item: MediaItem, positions: Map<String, Long>): Float {
 }
 
 /**
+ * 长按菜单通道（§3.6）：页面提供「长按某卡片」的回调，卡片组件消费。
+ * 用 CompositionLocal 而不是三层回调透传——卡片散布在 rail / 网格 / 列表 / 聚合页
+ * 四种版式里，逐层加参数会污染一大片签名；未提供时（如搜索页）自然就没有长按。
+ */
+internal val LocalMediaLongPress =
+    staticCompositionLocalOf<((MediaItem, Rect) -> Unit)?> { null }
+
+/**
  * 跳转播放页：媒体信息经 URL 编码查询参数传递，由播放页插件解析。
  *
  * E55：编码用 `encode(value, "")` 把允许集显式收到"仅 unreserved 字符"。
  * 单参重载会放行 `& = ? +` 一类分隔符，一个含 `&` 的标题
  * （"Rock & Roll.mkv"）就能把后面的 mime/id 参数整段截掉。
  */
-internal fun openPlayer(navigator: Navigator, item: MediaItem) {
+internal fun openPlayer(navigator: Navigator, item: MediaItem, fromStart: Boolean = false) {
     fun enc(value: String) = android.net.Uri.encode(value, "")
     navigator.navigate(
         route = "player?uri=${enc(item.uri)}" +
             "&title=${enc(item.title)}" +
             "&mime=${enc(item.mimeType)}" +
-            "&id=${enc(item.id)}",
+            "&id=${enc(item.id)}" +
+            // § 长按菜单「从头播放」：不恢复断点（路由参数带默认值，属契约增量）
+            (if (fromStart) "&from=start" else ""),
     )
 }

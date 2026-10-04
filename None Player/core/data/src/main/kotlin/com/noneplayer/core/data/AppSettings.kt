@@ -75,6 +75,9 @@ class AppSettings(private val context: Context) {
         /** 仅听音频记忆（§5.1）：下次进同一文件直接进入音频形态 */
         fun audioOnlyKey(mediaId: String) = booleanPreferencesKey("audio_only_$mediaId")
 
+        /** §8.3：历史迁移完成标记（E11：迁移后 DataStore 只留设置项） */
+        val KEY_HISTORY_MIGRATED = booleanPreferencesKey("history_migrated")
+
         /** 最近搜索最多保留 5 条（设计稿 searchView 的 chips 一行放得下） */
         const val MAX_SEARCH_HISTORY = 5
     }
@@ -289,6 +292,20 @@ class AppSettings(private val context: Context) {
                 it.name.startsWith("playback_pos_") && it.name != "playback_pos_"
             }
         }
+
+    // ---- 历史迁移（§8.3 / E11）----
+
+    /**
+     * 历史迁移标记：首次扫描完成后把 DataStore 的断点一次性搬进 Room
+     * （`HistoryRepository.migrateFromDataStore`），随即清掉旧键并置位。
+     * 之后 DataStore 只保留设置项（E11：键不再随媒体数无限增长）。
+     */
+    val historyMigrated: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_HISTORY_MIGRATED] ?: false }
+
+    suspend fun setHistoryMigrated(value: Boolean) {
+        context.dataStore.edit { it[KEY_HISTORY_MIGRATED] = value }
+    }
 
     /** 清除全部播放记忆（断点续播进度 + 最近播放时间），用于设置页「清除播放缓存」。 */
     suspend fun clearPlaybackMemory() {

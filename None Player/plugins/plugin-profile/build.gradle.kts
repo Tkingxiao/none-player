@@ -28,6 +28,7 @@ dependencies {
     implementation(project(":kernel:kernel-api"))
     implementation(project(":kernel:kernel-ui-api"))
     implementation(project(":core:data"))
+    implementation(project(":core:database"))
     implementation(project(":core:media"))
     implementation(project(":core:ui"))
     implementation(libs.androidx.core.ktx)

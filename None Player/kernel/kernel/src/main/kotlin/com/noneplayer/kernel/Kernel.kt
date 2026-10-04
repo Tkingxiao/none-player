@@ -5,6 +5,7 @@ import android.util.Log
 import com.noneplayer.core.common.DefaultDispatcherProvider
 import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
@@ -134,6 +135,8 @@ class Kernel private constructor(
         services.register<DispatcherProvider>(DefaultDispatcherProvider())
         services.register<EventBus>(events)
         services.register<AppSettings>(AppSettings(context.applicationContext))
+        // §8.3 持久层：播放历史/收藏（Room）。内核级服务——库/播放/我的三个插件都读它
+        services.register<HistoryRepository>(HistoryRepository(context.applicationContext))
         services.register<VideoPlayerFactory>(VideoPlayerFactory(registry))
         // 扩展注册表本身也是内核级服务：插件在 onBind 阶段只能拿到 ServiceLocator
         // （onInstall 的 registry 参数要等安装期才来），而 `VideoPlayerFactory` 之类的
