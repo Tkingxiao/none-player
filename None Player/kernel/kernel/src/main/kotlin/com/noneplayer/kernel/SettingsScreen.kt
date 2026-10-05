@@ -45,6 +45,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.media.ProbeMemo
 import com.noneplayer.core.data.ThemeMode
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.NpAppTopBar
@@ -594,6 +595,8 @@ private fun DecoderCapabilityRow() {
     val diagnostics by produceState<List<DecoderDiag>>(initialValue = emptyList(), expanded) {
         if (expanded) value = withContext(Dispatchers.IO) { probeDecodeDiagnostics() }
     }
+    // 批次 8（E39 余项）：最近一次起播探测——排障时先看这里（"刚才那个文件为什么不行"）
+    val lastProbe by ProbeMemo.last.collectAsStateWithLifecycle()
     Column {
         NpSettingRow(
             title = "解码能力检测",
@@ -622,6 +625,31 @@ private fun DecoderCapabilityRow() {
                         color = ink.muted,
                     )
                 } else {
+                    lastProbe?.let { probe ->
+                        Column {
+                            Text(
+                                text = "最近探测",
+                                style = com.noneplayer.core.ui.NpTypography.bodySmall,
+                                color = ink.fg,
+                            )
+                            Text(
+                                text = buildString {
+                                    append(probe.displayName)
+                                    append(" · ")
+                                    if (probe.playable) {
+                                        append(listOfNotNull(probe.videoCodec, probe.hdr, probe.audioChannels).joinToString(" · "))
+                                        if (!probe.audioChannels.isNullOrEmpty() || probe.videoCodec != null) append(" · ")
+                                        append("可播")
+                                    } else {
+                                        append(probe.reason ?: "不可播")
+                                    }
+                                },
+                                style = com.noneplayer.core.ui.NpMonoSmall,
+                                color = if (probe.playable) ink.success else ink.danger,
+                                maxLines = 2,
+                            )
+                        }
+                    }
                     diagnostics.forEach { d ->
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Column(modifier = Modifier.weight(1f)) {

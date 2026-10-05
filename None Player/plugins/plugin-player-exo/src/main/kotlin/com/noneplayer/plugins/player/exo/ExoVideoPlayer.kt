@@ -14,6 +14,7 @@ import androidx.media3.common.Label
 import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaItem.ClippingConfiguration
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.Metadata
 import androidx.media3.common.MimeTypes
@@ -330,7 +331,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentMimeType = mimeType
         currentTitle = title
         currentArtworkUri = artworkUri
-        probeThenLoad(uri) { applyMedia(uri) }
+        probeThenLoad(uri, currentMimeType) { applyMedia(uri) }
     }
 
     /**
@@ -347,14 +348,14 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * ③ 世代号（E58 二次防御）：快速切换 A→B 时，A 的探测协程即便在极端调度下
      *    "取消晚了一步"跑完，落地前也会先核对世代号——不是最新一次就直接丢弃。
      */
-    private fun probeThenLoad(uri: String, apply: () -> Unit) {
+    private fun probeThenLoad(uri: String, expectedMime: String? = null, apply: () -> Unit) {
         prepareJob?.cancel()
         terminalFailure = false
         _state.value = PlaybackState.Buffering
         _decodeNotice.value = null
         val myGeneration = ++prepareGeneration
         prepareJob = scope.launch {
-            val probe = FormatProbe.probe(appContext, uri)
+            val probe = FormatProbe.probe(appContext, uri, expectedMime)
             if (myGeneration != prepareGeneration) return@launch // 已有更新的装载，丢弃
             when (probe) {
                 is FormatProbe.Result.Unplayable -> {
@@ -446,10 +447,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // 播完 4 秒音频并显示"播放结束"，用户只看到**纯黑屏**，无从知道是编码不支持。
         //
         // 这里对**即将播放的那一项**做探测：不可解则不装载队列，直接落结构化失败态。
-        probeThenLoad(items[safeIndex].uri) { applyQueue(mediaItemsOf(items), safeIndex, startPositionMs) }
+        probeThenLoad(items[safeIndex].uri, items[safeIndex].mimeType) {
+            applyQueue(mediaItemsOf(items), safeIndex, startPositionMs)
+        }
     }
 
     /** setQueue 成功路径的装载体（探测通过后调用），保持与探测前的行为一致 */
+    @OptIn(UnstableApi::class)
     private fun applyQueue(
         mediaItems: List<MediaItem>,
         safeIndex: Int,
@@ -498,7 +502,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val items = _queue.value
         if (index !in items.indices) return
         _currentIndex.value = index
-        probeThenLoad(items[index].uri) { applyQueue(mediaItemsOf(items), index, 0L) }
+        probeThenLoad(items[index].uri, items[index].mimeType) {
+            applyQueue(mediaItemsOf(items), index, 0L)
+        }
     }
 
     override fun playNext() {
@@ -517,11 +523,24 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         }
     }
 
-    /** 队列项 → media3 MediaItem（标题/封面/字幕一并带上） */
+    /** 队列项 → media3 MediaItem（标题/封面/字幕/`.cue` 裁剪窗口一并带上） */
+    @OptIn(UnstableApi::class)
     private fun com.noneplayer.core.media.MediaItem.toMediaItem(): MediaItem =
         MediaItem.Builder()
             .setUri(uri)
             .setMimeType(mimeType)
+            .apply {
+                // `.cue` 分轨（§12.4/G4，批次 8）：窗口圈定后 position 从窗口起点计
+                // （seek/断点都是"轨内"语义）。WAV/FLAC 可 seek，无需 allowUnseekableMedia 特批（G4 ④）
+                if (isClipped) {
+                    setClippingConfiguration(
+                        ClippingConfiguration.Builder()
+                            .setStartPositionUs(clipStartUs)
+                            .apply { if (clipEndUs > 0) setEndPositionUs(clipEndUs) }
+                            .build(),
+                    )
+                }
+            }
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(title.ifBlank { null })
@@ -538,6 +557,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     .build(),
             )
             .build()
+
     override fun setSpeed(speed: Float) {
         controller?.playbackParameters = PlaybackParameters(speed)
         _speed.value = speed
@@ -799,6 +819,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         controller = null
     }
 
+    @OptIn(UnstableApi::class)
     private fun applyMedia(mediaUri: String) {
         val c = controller ?: return
         // E74 修复：此前恢复位置只读 c.currentPosition，没有优先消费未落实的
@@ -809,6 +830,20 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val builder = MediaItem.Builder()
             .setUri(mediaUri)
             .setMimeType(currentMimeType)
+            .apply {
+                // `.cue` 分轨（批次 8）：字幕更换会重建当前媒体项——裁剪窗口必须跟着
+                // 复刻，否则重建后窗口丢失、整文件从 0 重播（分轨内 seek/断点全错位）
+                _queue.value.getOrNull(c.currentMediaItemIndex)
+                    ?.takeIf { it.uri == mediaUri && it.isClipped }
+                    ?.let { src ->
+                        setClippingConfiguration(
+                            ClippingConfiguration.Builder()
+                                .setStartPositionUs(src.clipStartUs)
+                                .apply { if (src.clipEndUs > 0) setEndPositionUs(src.clipEndUs) }
+                                .build(),
+                        )
+                    }
+            }
             .setMediaMetadata(
                 MediaMetadata.Builder()
                     .setTitle(currentTitle.ifBlank { null })

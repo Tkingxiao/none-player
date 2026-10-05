@@ -23,6 +23,7 @@ import android.net.Uri
 import androidx.media3.extractor.TrackOutput
 import com.homesoft.exo.extractor.AviExtractorsFactory
 import com.noneplayer.core.media.MediaNames
+import com.noneplayer.core.media.ProbeMemo
 import com.noneplayer.core.media.PlaybackFailure
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary
 import java.io.ByteArrayOutputStream
@@ -59,6 +60,10 @@ object FormatProbe {
             val container: String?,
             val videoCodec: String?,
             val audioCodec: String?,
+            /** HDR 概况（容器声明了 colorTransfer 时）："HDR10" / "HLG"；SDR/未知为 null */
+            val hdr: String? = null,
+            /** 音频声道布局展示名（"2.0" / "5.1"）；未知为 null */
+            val audioChannels: String? = null,
             /**
              * 该媒体只有**软件解码器**可用（§C21 软解前置提示）。
              * 软件解码可以播，但高分辨率/高码率下会掉帧、发热、耗电——
@@ -80,10 +85,15 @@ object FormatProbe {
      * "被取消"却跑完并返回正常结果，静默覆盖新一次 prepare() 的媒体。
      * 显式区分取消异常并继续向上抛出，是修复的关键一步。
      */
-    suspend fun probe(context: Context, uriString: String): Result =
+    suspend fun probe(
+        context: Context,
+        uriString: String,
+        expectedMime: String? = null,
+    ): Result =
         withContext(Dispatchers.IO) {
             try {
-                probeLocal(context.applicationContext, uriString)
+                probeLocal(context.applicationContext, uriString, expectedMime)
+                    .also { recordMemo(uriString, it) }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -91,10 +101,47 @@ object FormatProbe {
             }
         }
 
+    /**
+     * 最近探测摘要（E39 余项 + §12.3 解码诊断，批次 8）：设置页「解码诊断」的
+     * 「最近探测」行来自这里。展示名取地址末段；Unknown 不记录（没有可读结论）。
+     */
+    private fun recordMemo(uriString: String, result: Result) {
+        val displayName = Uri.parse(uriString).lastPathSegment?.substringAfterLast('/') ?: uriString
+        val entry = when (result) {
+            is Result.Playable -> ProbeMemo.Entry(
+                displayName = displayName,
+                container = result.container,
+                videoCodec = result.videoCodec,
+                audioCodec = result.audioCodec,
+                hdr = result.hdr,
+                audioChannels = result.audioChannels,
+                playable = true,
+                reason = null,
+                atMs = System.currentTimeMillis(),
+            )
+            is Result.Unplayable -> ProbeMemo.Entry(
+                displayName = displayName,
+                container = result.failure.container,
+                videoCodec = result.failure.videoCodec,
+                audioCodec = result.failure.audioCodec,
+                hdr = null,
+                audioChannels = null,
+                playable = false,
+                reason = result.failure.reason,
+                atMs = System.currentTimeMillis(),
+            )
+            Result.Unknown -> return
+        }
+        runCatching { ProbeMemo.record(entry) }
+    }
+
     // ---- 内部实现 ----
 
     private val PROBE_SCHEMES = setOf("file", "content")
     private const val MAX_READS = 400
+
+    /** tracksEnded 之后仍无任何 format 时的宽限读轮数（Wav 型：格式在下一轮 read 才来） */
+    private const val GRACE_READS = 8
     private const val LENGTH_HINT = 8L * 1024 * 1024
     private const val MIME_MP4V = "video/mp4v-es"
     private const val MIME_MJPEG = "video/mjpeg"
@@ -116,7 +163,14 @@ object FormatProbe {
     /** profile 判读只需头部字节；截留上限（VOS/VOL/GOV 头远小于此） */
     private const val HEAD_CAP = 4 * 1024
 
-    private fun probeLocal(context: Context, uriString: String): Result {
+    private fun probeLocal(context: Context, uriString: String, expectedMime: String?): Result {
+        // 预期类型决定"没有视频轨"怎么判读（批次 8，音频文件实播暴露）：
+        //  - 音频文件（mime audio/*）：只有音频轨是**正常**，不是失败；
+        //  - 视频文件：缺视频轨照旧拦截（E80——wmv2-clip.avi 的"音频播完无声失败"）；
+        //  - 未知（外部调用没给 mime）：维持旧语义，拦截并给原因（fail-closed 到可读失败）
+        val expectVideo: Boolean? = expectedMime?.let {
+            if (it.startsWith("audio/", true)) false else if (it.startsWith("video/", true)) true else null
+        }
         val uri = Uri.parse(uriString)
         if (uri.scheme?.lowercase() !in PROBE_SCHEMES) return Result.Unknown
 
@@ -187,13 +241,25 @@ object FormatProbe {
                 } else if (result == Extractor.RESULT_END_OF_INPUT) {
                     break
                 }
-                // 轨道表确定后通常即可收尾；但 MPEG-4 ASP 判读（§12.9.4）需要 codec 头字节，
-                // 而 XVID/DivX 的 AVI 常把 VOS/VOL 头内联在首帧（initializationData 为空）。
-                // 这种情况下继续读到抓住首个视频样本的前导字节为止（仍受 MAX_READS 封顶）。
-                if (output.tracksEnded && output.hasEnoughForProfileCheck()) break
+                // 轨道表确定后通常即可收尾；但有两类例外要**多读几轮**：
+                // ① MPEG-4 ASP 判读（§12.9.4）需要 codec 头字节——XVID/DivX 的 AVI 常把
+                //    VOS/VOL 头内联在首帧（initializationData 为空）；
+                // ② WavExtractor 等"先 endTracks、下一次 read 才吐 format"的解封装器
+                //    （批次 8 实测：endTracks 即 break 会拿到 0 条格式，音频分支全灭）。
+                // 收尾条件因此改为：轨道已结束 **且**（有格式 或 宽限轮次用尽）且 mp4v 判读就绪。
+                if (output.tracksEnded) output.graceReads++
+                if (output.tracksEnded &&
+                    (output.formats.isNotEmpty() || output.graceReads > GRACE_READS) &&
+                    output.hasEnoughForProfileCheck()
+                ) break
             }
             matched.release()
-            return output.decide(effectiveContainer)
+            android.util.Log.d(
+                "FormatProbe",
+                "matched=${matched.javaClass.simpleName} expectedMime=$expectedMime expectVideo=$expectVideo " +
+                    "formats=${output.formats.size} mimes=${output.formats.map { it.sampleMimeType }}",
+            )
+            return output.decide(effectiveContainer, expectVideo)
         } finally {
             runCatching { dataSource.close() }
         }
@@ -230,6 +296,31 @@ object FormatProbe {
         }
     }.getOrNull()
 
+    /**
+     * 平台音频解码器查询（批次 8）：与视频版 [hasPlatformDecoder] 同源，
+     * 采样率/声道缺失时按常见档位查询；查询失败 fail-open（视为支持）。
+     */
+    private fun hasPlatformAudioDecoder(format: Format): Boolean {
+        val mime = format.sampleMimeType ?: return true
+        return runCatching {
+            val platform = PlatformMediaFormat.createAudioFormat(
+                mime,
+                if (format.sampleRate != null && format.sampleRate > 0) format.sampleRate else 48_000,
+                if (format.channelCount != null && format.channelCount > 0) format.channelCount else 2,
+            )
+            MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(platform) != null
+        }.getOrDefault(true)
+    }
+
+    /** 声道数 → 常见布局名（§12.3 面板展示用；非标准声道如实给数字） */
+    private fun audioLayoutName(channels: Int): String = when (channels) {
+        1 -> "1.0"
+        2 -> "2.0"
+        6 -> "5.1"
+        8 -> "7.1"
+        else -> "$channels 声道"
+    }
+
     private val Format.isVideoTrack: Boolean
         get() = sampleMimeType?.startsWith("video/") == true
 
@@ -237,6 +328,9 @@ object FormatProbe {
         val formats = mutableListOf<Format>()
         var tracksEnded = false
             private set
+
+        /** endTracks 之后的宽限读轮次（格式迟到型解封装器，见 read 循环注释） */
+        var graceReads = 0
 
         /** 首个视频样本的前导字节（上限 [HEAD_CAP]）——mp4v 无 csd 时的 profile 判读来源 */
         var firstVideoSampleHead: ByteArray? = null
@@ -328,18 +422,41 @@ object FormatProbe {
         }
 
         /** 探测结论：容器/编码名 + 平台解码器查询（含 §12.9.4 profile 求交） */
-        fun decide(containerName: String?): Result {
+        fun decide(containerName: String?, expectVideo: Boolean?): Result {
             val video = formats.firstOrNull { it.isVideoTrack }
             val audio = formats.firstOrNull { it.sampleMimeType?.startsWith("audio/") == true }
             val videoName = MediaNames.videoCodecName(video?.sampleMimeType)
             val audioName = MediaNames.audioCodecName(audio?.sampleMimeType)
 
             if (video == null) {
+                // 纯音频文件（audio/* 预期）：音频轨在、且本机解得动 → 可播
+                if (expectVideo == false && audio != null) {
+                    val audioDecodable = hasPlatformAudioDecoder(audio) || ffmpegSupports(audio.sampleMimeType)
+                    if (audioDecodable) {
+                        return Result.Playable(
+                            container = containerName,
+                            videoCodec = null,
+                            audioCodec = audioName,
+                            audioChannels = audio.channelCount?.takeIf { it > 0 }?.let(::audioLayoutName),
+                        )
+                    }
+                    return Result.Unplayable(
+                        PlaybackFailure.audioCodecUnsupported(containerName, audioName),
+                    )
+                }
                 return Result.Unplayable(PlaybackFailure.unknownVideoCodec(containerName, audioName))
             }
             // 解码能力 = 平台解码器 或 内置 FFmpeg 软解 或 AVI MJPEG 位图软解
             // （播放链是"硬解优先 + 扩展兜底 + MJPEG 位图兜底"，三段的顺序与来源见
             //  plugin-player-exo 的 NpRenderersFactory）
+            // E39 余项：HDR 概况与音频声道——来自容器声明的轨道格式（MKV/MP4 的
+            // 色彩盒、声道数），探测期白拿；拿不到就是 null，不编造
+            val hdr = when (video.colorInfo?.colorTransfer) {
+                C.COLOR_TRANSFER_ST2084 -> "HDR10"
+                C.COLOR_TRANSFER_HLG -> "HLG"
+                else -> null
+            }
+            val audioLayout = audio?.channelCount?.takeIf { it > 0 }?.let(::audioLayoutName)
             val platformVideo = hasPlatformDecoder(video)
             val ffmpegVideo = ffmpegSupports(video.sampleMimeType)
             val bitmapVideo = bitmapRendererSupports(video.sampleMimeType)
@@ -354,6 +471,8 @@ object FormatProbe {
                 container = containerName,
                 videoCodec = videoName,
                 audioCodec = audioName,
+                hdr = hdr,
+                audioChannels = audioLayout,
                 // 平台没有该编码的解码器、只能靠 FFmpeg 或 MJPEG 位图出画时，同样是"仅软解可用"，
                 // 也要给 C21 前置提示（否则用户只会觉得"莫名其妙很卡/很烫"）
                 softwareVideoOnly = onlySoftwareDecoder(video) ||

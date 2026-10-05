@@ -19,7 +19,11 @@ import androidx.core.net.toUri
 import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.core.media.CueSheet
+import com.noneplayer.core.media.kind
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.SubtitleCharset
 import com.noneplayer.kernel.api.CacheProvider
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
@@ -182,6 +186,12 @@ class LocalMediaSource(
             .filterNot { isJunkFile(it.title, it.sizeBytes) }
             // 元数据富化（E34 的消费端）：插件按注册顺序串行富化，失败不拖垮扫描
             .map { enrichAll(it) }
+            // 容器嗅探（§12.4，批次 8）：无扩展名/错扩展名按文件头判容器，
+            // mime 改对才会被引擎的 Extractor 链正确认领
+            .map { sniffMimeCorrection(it) }
+            // 无扩展名文件拾取与 .cue 分轨展开在 queryMediaStore 内完成
+            // （前者的 Files 集合查询、后者的逐文件配对都需要 dataPath/范围参数）
+            .let { items -> items + sniffUnknownFiles(validScopes) }
         // §8.3/E11：首次扫描把 DataStore 的断点迁入 Room，随后清旧键
         migrateHistoryOnce(items)
         // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存，故只看 "ms-" 前缀）
@@ -636,7 +646,8 @@ class LocalMediaSource(
                         },
                     ),
                 )
-                items += item
+                // `.cue` 分轨（§12.4/G4，批次 8）：同名 .cue 在场 → 一张专辑 N 轨
+                items += cueTracksFor(item, dataPath)
             }
         }
         return items
@@ -715,6 +726,160 @@ class LocalMediaSource(
             retriever.release()
         }
     }.getOrNull()
+
+// ================= 批次 8｜容器嗅探与 .cue 分轨（§12.4） =================
+
+/** 读文件头（上限 [maxBytes]）；任何失败返回 null——嗅探永远 fail-open */
+private fun readHead(uri: android.net.Uri, maxBytes: Int): ByteArray? = runCatching {
+    context.contentResolver.openInputStream(uri)?.use { stream ->
+        val buf = ByteArray(maxBytes)
+        var read = 0
+        while (read < maxBytes) {
+            val n = stream.read(buf, read, maxBytes - read)
+            if (n <= 0) break
+            read += n
+        }
+        buf.copyOf(read)
+    }
+}.getOrNull()
+
+/**
+ * 容器嗅探校正（§12.4「错扩展名」）：MediaStore 的 mimeType 按扩展名推，扩展名错了
+ * 它跟着错。文件头**确凿**认出容器且与原 mime 不同源时才覆盖；认不出一律保留原值
+ * （嗅探是 fail-open 的信息增益，不是权威重写）。
+ */
+private fun sniffMimeCorrection(item: MediaItem): MediaItem {
+    // .cue 分轨与原文件同 uri，逐轨重复嗅探纯属浪费 I/O
+    if (item.isClipped) return item
+    val head = readHead(android.net.Uri.parse(item.uri), ContainerSniffer.HEAD_BYTES) ?: return item
+    val sniffed = ContainerSniffer.sniff(head) ?: return item
+    if (sniffed.equals(item.mimeType, true)) return item
+    if (sameContainerFamily(sniffed, item.mimeType)) return item
+    return item.copy(mimeType = sniffed)
+}
+
+/** 同族容器视为一致（audio/x-wav ≡ audio/wav 这类别名），避免无意义的 mime 抖动 */
+private fun sameContainerFamily(a: String, b: String): Boolean {
+    val x = a.lowercase(); val y = b.lowercase()
+    if (x == y) return true
+    val wav = setOf("audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave")
+    return x in wav && y in wav
+}
+
+/**
+ * 拾取 MediaStore 不索引的无扩展名/未知类型文件（§12.4「扩展名缺失」）。
+ *
+ * 范围仍是授权目录（`MediaStore.Files` 集合 + `media_type = 0`，即非媒体行）；
+ * 可见性需要"所有文件访问"（批次 6 的实测结论：只持 READ_MEDIA_* 时这些行
+ * 根本不可见）——没授予就跳过，整条路径 fail-open。嗅探认不出容器的行不进库：
+ * 没有任何 Extractor 认领的文件，塞进库只会变成"点开必失败"的垃圾条目。
+ */
+private fun sniffUnknownFiles(scopes: List<ScanScope>): List<MediaItem> {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
+    if (!runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)) return emptyList()
+    val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
+    val out = mutableListOf<MediaItem>()
+    scopes.forEach { scope ->
+        val (scopeSel, scopeArgs) = scopeSelection(
+            scope,
+            MediaStore.MediaColumns.RELATIVE_PATH,
+            MediaStore.MediaColumns.DATA,
+        ) ?: return@forEach
+        val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} = 0" +
+            (scopeSel?.let { " AND $it" } ?: "")
+        runCatching {
+            context.contentResolver.query(
+                collection,
+                arrayOf(
+                    MediaStore.Files.FileColumns._ID,
+                    MediaStore.Files.FileColumns.DISPLAY_NAME,
+                    MediaStore.Files.FileColumns.SIZE,
+                    MediaStore.Files.FileColumns.DATE_ADDED,
+                    MediaStore.Files.FileColumns.DATA,
+                    MediaStore.MediaColumns.RELATIVE_PATH,
+                ),
+                selection,
+                scopeArgs,
+                null,
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndex(MediaStore.Files.FileColumns._ID)
+                val nameCol = cursor.getColumnIndex(MediaStore.Files.FileColumns.DISPLAY_NAME)
+                val sizeCol = cursor.getColumnIndex(MediaStore.Files.FileColumns.SIZE)
+                val addedCol = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATE_ADDED)
+                val dataCol = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATA)
+                val relCol = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
+                while (cursor.moveToNext()) {
+                    if (idCol < 0 || nameCol < 0) continue
+                    val id = cursor.getLong(idCol)
+                    val uri = ContentUris.withAppendedId(collection, id).toString()
+                    val head = readHead(android.net.Uri.parse(uri), ContainerSniffer.HEAD_BYTES)
+                    val mime = head?.let { ContainerSniffer.sniff(it) } ?: continue
+                    val dataPath = if (dataCol >= 0) cursor.getString(dataCol).orEmpty() else ""
+                    val name = cursor.getString(nameCol).orEmpty()
+                    out += MediaItem(
+                        id = "msf-$id",
+                        sourceId = sourceId,
+                        title = name.substringBeforeLast('.').ifBlank { name },
+                        uri = uri,
+                        mimeType = mime,
+                        sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
+                        addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
+                        folder = folderOf(
+                            dataPath = dataPath,
+                            relativePath = if (relCol >= 0) cursor.getString(relCol) else null,
+                        ),
+                    )
+                }
+            }
+        }.onFailure { Log.w(TAG, "无扩展名文件拾取失败（fail-open 跳过）", it) }
+    }
+    return out
+}
+
+/**
+ * `.cue` 分轨展开（§12.4 / §9.7 G4）：同名 `<音频名>.cue` 在场时，把单文件项
+ * 展开为"一张专辑 N 轨"——每轨指向同一音频文件，窗口由 `clipStartUs/clipEndUs`
+ * 圈定（引擎挂 ClippingConfiguration，G4 ④：WAV/FLAC 可 seek，无需
+ * `allowUnseekableMedia` 特批）。cue 缺失/坏表/无权限读取时**原样返回单文件项**
+ * ——分轨是增益不是门槛，绝不因为展开失败让文件从库里消失。
+ *
+ * G4 前置核对：① 仅听音频（批次 3 ✅）② 队列/选集 UI（批次 1 ✅）
+ * ③ cue 文本 GB18030 转码（复用 SubtitleCharset ✅）④ allowUnseekableMedia 取舍（本注释）。
+ */
+private fun cueTracksFor(file: MediaItem, dataPath: String): List<MediaItem> {
+    if (file.kind != MediaKind.AUDIO || file.durationMs <= 0L || dataPath.isBlank()) {
+        return listOf(file)
+    }
+    val dir = dataPath.substringBeforeLast('/')
+    val stem = dataPath.substringAfterLast('/').substringBeforeLast('.')
+    val cueFile = File(dir, "$stem.cue")
+    if (!cueFile.isFile) return listOf(file)
+    val text = runCatching {
+        // CUE 是纯文本但 GB18030 编码极常见（G4 ③）——复用字幕字符集试探
+        val bytes = cueFile.readBytes()
+        if (bytes.size > 1 shl 20) return listOf(file)
+        SubtitleCharset.decode(bytes).text
+    }.getOrNull() ?: return listOf(file)
+    val sheet = CueSheet.parse(text) ?: return listOf(file)
+    val fileEndUs = file.durationMs * 1000L
+    return sheet.tracks.mapIndexedNotNull { index, track ->
+        val endUs = (sheet.tracks.getOrNull(index + 1)?.startUs ?: fileEndUs)
+            .coerceAtLeast(track.startUs)
+        if (track.startUs >= endUs) return@mapIndexedNotNull null
+        val label = track.title?.takeIf { it.isNotBlank() } ?: "Track %02d".format(track.number)
+        val numberText = "%02d".format(track.number)
+        file.copy(
+            id = "${file.id}#t${track.number}",
+            title = label,
+            displayTitle = "${file.title} · $numberText · $label",
+            durationMs = (endUs - track.startUs) / 1000L,
+            clipStartUs = track.startUs,
+            // 最后一轨到文件尾：clipEndUs 归 0（契约里 0 = 不设终点）
+            clipEndUs = if (endUs >= fileEndUs) 0L else endUs,
+        )
+    }.ifEmpty { listOf(file) }
+}
+
 }
 
 private val JUNK_SUFFIXES = listOf(".part", ".tmp", ".crdownload", ".!qb", ".downloading")

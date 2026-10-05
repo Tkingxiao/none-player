@@ -99,6 +99,14 @@ data class PlaybackFailure(
             suggestion = null,
         )
 
+        /** 音频编码本机不可解（批次 8：纯音频文件的探测分支） */
+        fun audioCodecUnsupported(container: String?, audioCodec: String?) = PlaybackFailure(
+            container = container,
+            audioCodec = audioCodec,
+            reason = "没有可用的解码器播放该音频编码（$audioCodec）。",
+            suggestion = "可转码为 FLAC / AAC / MP3 后重试。",
+        )
+
         fun noPermission() = PlaybackFailure(
             reason = "没有读取该文件的权限，请在系统设置中授予媒体访问权限。",
             suggestion = null,

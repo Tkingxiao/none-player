@@ -17,5 +17,10 @@ class ExoEngineProvider : PlayerEngineProvider {
     override fun create(context: Any): VideoPlayer =
         ExoVideoPlayer(context as android.content.Context)
 
-    override fun supports(mimeType: String): Boolean = mimeType.startsWith("video/")
+    // E88（批次 8 实测暴露）：此前只认领 video/*——MediaStore.Audio 出的 mime
+    // （audio/x-wav 等）全部无引擎，库里的音频文件点开即 IllegalStateException。
+    // 仅听音频此前能活是因为它播的还是 video/* 的文件本体。ExoPlayer 的 Extractor
+    // 链本就认领音频容器（§12.1 ① 裸音频全表支持），audio/* 一并接下。
+    override fun supports(mimeType: String): Boolean =
+        mimeType.startsWith("video/") || mimeType.startsWith("audio/")
 }

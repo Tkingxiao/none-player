@@ -41,7 +41,11 @@ internal suspend fun ensureSessionPlaying(
     val sameMedia = player.currentUri.value == item.uri
     if (!sameMedia) {
         val queue = resolveFolderQueue(registry, item.uri, item.id)
-        val authoritative = queue.firstOrNull { it.uri == item.uri || it.id == item.id }
+        // 先 id 再 uri（与 E79 同一纪律）：`.cue` 分轨的 N 轨共享同一 uri，
+        // uri 优先会永远命中队首那轨——点「第二轨」播「第一轨」（批次 8 实测）。
+        // id 唯一命中本轨；id 不中（重扫换号）才退到 uri。
+        val authoritative = queue.firstOrNull { it.id == item.id && it.id.isNotEmpty() }
+            ?: queue.firstOrNull { it.uri == item.uri }
         // 断点的**读键**必须与写键同源：落盘走 `session.open(authoritative ?: item)`，
         // 而深链/通知重建的路由条目 sourceId 恒为空 → `keyOf` 得到 ":ms-x"，
         // 库里存的是 "local:ms-x"，冷启动续播因此静默从头播（模拟器实测）。

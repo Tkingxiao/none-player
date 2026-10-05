@@ -40,7 +40,19 @@ data class MediaItem(
     val episodeNumber: Int = 0,
     /** 视频编码（文件名解析，如 HEVC / AVC / AV1；null = 未知） */
     val videoCodec: String? = null,
-)
+    /**
+     * `.cue` 分轨（§12.4，批次 8）：本项指向的播放窗口起点（微秒）。
+     * 0 = 从文件头播（普通媒体项 / 分轨的首轨）。
+     * 引擎侧映射 `MediaItem.ClippingConfiguration.startPositionUs`；
+     * 播放位置相对窗口起点（seek/断点都是"第几分的第几轨内"，与整文件坐标无关）。
+     */
+    val clipStartUs: Long = 0,
+    /** `.cue` 分轨：窗口终点（微秒）；0 = 到文件尾。两值同时为 0 即不裁剪 */
+    val clipEndUs: Long = 0,
+) {
+    /** 是否为 `.cue` 分轨项（引擎按此挂 ClippingConfiguration） */
+    val isClipped: Boolean get() = clipStartUs > 0 || clipEndUs > 0
+}
 
 /** 媒体种类：由 mimeType 判定（音频/视频），UI 用它决定角标、图标与分组 */
 enum class MediaKind { VIDEO, AUDIO }

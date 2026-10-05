@@ -133,13 +133,16 @@ fun SearchScreen(navigator: Navigator) {
             emptyList()
         } else {
             // §3.7 匹配域：标题 / 文件夹 / 扩展名。标题按 **cardTitle**（E42 富化后的
-            // 展示名——用户看到的"我的视频"必须能搜到；原名同时保留匹配，搜"[字幕组]"也行）
+            // 展示名——用户看到的"我的视频"必须能搜到；原名同时保留匹配，搜"[字幕组]"也行）。
+            // 批次 8：纯 ASCII 查询词追加拼音域（"ai" 命中「爱…」、"aq" 命中首字母），
+            // 与 LocalSearchProvider 共用 PinyinSearch 一份口径
             val matched = items.filter { item ->
                 item.title.contains(q, ignoreCase = true) ||
                     item.cardTitle.contains(q, ignoreCase = true) ||
                     (item.folder?.contains(q, ignoreCase = true) == true) ||
                     item.title.substringAfterLast('.', "")
-                        .contains(q.removePrefix("."), ignoreCase = true)
+                        .contains(q.removePrefix("."), ignoreCase = true) ||
+                    PinyinSearch.matches(item, q)
             }
             val comparator: Comparator<MediaItem> = when (sortMode) {
                 // E42：自然序（与媒体库/队列同一口径）

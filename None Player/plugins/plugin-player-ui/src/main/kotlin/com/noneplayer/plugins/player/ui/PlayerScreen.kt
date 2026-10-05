@@ -4299,10 +4299,11 @@ internal suspend fun resolveFolderQueue(
     uri: String,
     mediaId: String,
 ): List<MediaItem> {
-    val fallback = listOf(
-        MediaItem(id = mediaId, sourceId = "", title = "", uri = uri, mimeType = "video/mp4"),
-    )
-    if (mediaId.isEmpty()) return fallback
+    // 批次 8（E88 连带修复）：此前无 id 时返回一个**硬编 video/mp4** 的假条目——
+    // 该假条目会一路污染到引擎的起播探测（expectedMime），让音频文件被当成
+    // "缺视频轨的视频"拦成失败。改为返回空队列：上游 ensureSessionPlaying 拿到
+    // 空队列会让 `session.open` 用路由条目本身走单项队列（mime 是路由带来的真值）。
+    if (mediaId.isEmpty()) return emptyList()
     return withContext(Dispatchers.IO) {
         runCatching {
             val sources = registry.query<MediaSourceProvider>()
@@ -4336,8 +4337,8 @@ internal suspend fun resolveFolderQueue(
                 val result = if (siblings.none { it.id == self.id }) siblings + self else siblings
                 return@withContext result
             }
-            fallback
-        }.getOrElse { fallback }
+            emptyList<MediaItem>()
+        }.getOrElse { emptyList() }
     }
 }
 
