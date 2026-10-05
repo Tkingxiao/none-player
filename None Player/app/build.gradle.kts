@@ -46,6 +46,7 @@ dependencies {
     implementation(project(":plugins:plugin-player-ui"))
     implementation(project(":plugins:plugin-profile"))
     implementation(project(":plugins:plugin-enricher-filename"))
+    implementation(project(":plugins:plugin-danmaku"))
 
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)

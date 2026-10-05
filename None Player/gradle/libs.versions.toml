@@ -35,6 +35,9 @@ media3avi = "2.7.1"
 nextlib = "1.11.1-0.16.0"
 coil = "2.7.0"
 junit = "4.13.2"
+# plugin-danmaku 的 JVM 单测补充：android.jar 里 org.xmlpull / org.json 是运行时桩
+kxml2 = "2.3.0"
+android-org-json = "20240303"
 # 插桩测试（androidTest）——§12.9.2 QPel 探测 harness 使用
 androidxTest = "1.6.2"
 androidxTestExt = "1.2.1"
@@ -85,6 +88,8 @@ androidx-window = { group = "androidx.window", name = "window", version.ref = "w
 compose-material-icons = { group = "androidx.compose.material", name = "material-icons-core" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+kxml2 = { group = "net.sf.kxml", name = "kxml2", version.ref = "kxml2" }
+android-org-json = { group = "org.json", name = "json", version.ref = "android-org-json" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTest" }
 androidx-test-ext-junit = { group = "androidx.test.ext", name = "junit", version.ref = "androidxTestExt" }
 
