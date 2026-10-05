@@ -42,3 +42,17 @@ enum class DanmakuFormat(val extension: String) {
         }
     }
 }
+
+/**
+ * 本地屏蔽词匹配（批次 6 设置项）：子串命中即屏蔽，忽略大小写。
+ * 空词表恒不屏蔽；词的取舍完全交给用户（单字词也照办——那是用户的显式选择）。
+ */
+object DanmakuBlocklist {
+    fun isBlocked(text: String, words: List<String>): Boolean =
+        words.any { text.contains(it, ignoreCase = true) }
+}
+
+/** 统一入口：按格式解析 + 屏蔽词过滤 + 时间升序 */
+fun parseDanmakuFile(content: String, format: DanmakuFormat, blocklist: List<String>): List<Danmaku> =
+    DanmakuParsers.parse(content, format)
+        .filter { !DanmakuBlocklist.isBlocked(it.text, blocklist) }
