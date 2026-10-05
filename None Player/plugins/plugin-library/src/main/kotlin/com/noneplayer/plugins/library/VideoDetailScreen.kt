@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.cardTitle
@@ -42,6 +44,7 @@ import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.LocalNpTopBarInset
 import com.noneplayer.core.ui.NpCoverBox
 import com.noneplayer.core.ui.NpIcon
+import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMediaColor
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
@@ -55,6 +58,7 @@ import com.noneplayer.core.ui.formatFileSize
 import com.noneplayer.core.ui.formatRelativeDate
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npPressScale
+import com.noneplayer.core.ui.npShadow
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
@@ -71,8 +75,12 @@ import androidx.compose.runtime.setValue
  * 因此它是 LibraryScreen 的页内状态（[detailItem]），配合 rememberSaveable
  * 跨「进播放页 → 返回」的往返保留；返回键/顶栏返回 = 退出详情。
  *
- * 版式：宽屏双栏（左封面 + 主操作，右标题/元信息/同文件夹列表），窄窗单栏。
- * 同文件夹列表与播放器队列用**同一个比较器**（小写标题、再按原串），
+ * 版式（用户明确要求）：宽屏（≥720dp）双栏——**视频小窗居左，剧集列表（同文件夹）
+ * 常驻右侧**；视频详情（标题/元信息/文件信息）收进播放窗右下角的「详情」按钮，
+ * 点按弹出**浮窗层小窗口**显示，点遮罩 / 关闭键 / 返回键退出。
+ * 窄窗（<720dp）单栏：视频、详情、剧集列表自上而下常显。
+ *
+ * 剧集列表与播放器队列用**同一个比较器**（小写标题、再按原串），
  * 顺序与连播的"下一集"一致，不会出现"列表第 3 项、下一集却跳到第 5 项"。
  */
 @Composable
@@ -120,6 +128,9 @@ internal fun VideoDetailScreen(
             bottom = bottomInset + 28.dp,
         )
         if (twoPane) {
+            // 视频详情弹成**浮窗层小窗口**；剧集列表（同文件夹）默认常驻右侧。
+            // rememberSaveable 让弹窗状态跨播放往返保留——进播放页回来不丢。
+            var showDetail by rememberSaveable { mutableStateOf(false) }
             Row(
                 modifier = Modifier
                     .fillMaxSize()
@@ -143,6 +154,7 @@ internal fun VideoDetailScreen(
                         inlinePlaying = inlinePlaying,
                         onStartInline = ::startPlayback,
                         onFullscreen = { onFullscreen(item) },
+                        onOpenInfo = { showDetail = true },
                     )
                 }
                 Column(
@@ -150,8 +162,11 @@ internal fun VideoDetailScreen(
                         .weight(1f)
                         .verticalScroll(rememberScrollState()),
                 ) {
-                    DetailInfo(item = item, siblings = siblings, onSelect = onSelect)
+                    SiblingList(item = item, siblings = siblings, onSelect = onSelect)
                 }
+            }
+            if (showDetail) {
+                DetailPopup(item = item, onDismiss = { showDetail = false })
             }
         } else {
             Column(
@@ -174,7 +189,11 @@ internal fun VideoDetailScreen(
                     onFullscreen = { onFullscreen(item) },
                 )
                 Spacer(Modifier.height(22.dp))
-                DetailInfo(item = item, siblings = siblings, onSelect = onSelect)
+                DetailMeta(item = item)
+                if (siblings.size > 1) {
+                    Spacer(Modifier.height(22.dp))
+                    SiblingList(item = item, siblings = siblings, onSelect = onSelect)
+                }
             }
         }
     }
@@ -194,6 +213,8 @@ private fun DetailHero(
     inlinePlaying: Boolean,
     onStartInline: () -> Unit,
     onFullscreen: () -> Unit,
+    /** 详情浮窗入口（null/省略 = 窄窗常显详情，不渲染「详情」键） */
+    onOpenInfo: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
@@ -272,16 +293,24 @@ private fun DetailHero(
                     color = ink.muted,
                 )
             }
+            if (onOpenInfo != null) {
+                // 详情浮窗键：与全屏/播放同一行，推到最右（用户要求）
+                Spacer(Modifier.weight(1f))
+                NpPrimaryButton(
+                    text = "详情",
+                    icon = NpIcon.Info,
+                    primary = false,
+                    onClick = onOpenInfo,
+                )
+            }
         }
     }
 }
 
-/** 标题 + 元信息 + 文件信息 + 同文件夹列表 */
+/** 视频详情（标题 + 元信息 + 文件信息）——浮窗内容，窄窗也常显 */
 @Composable
-private fun DetailInfo(
+private fun DetailMeta(
     item: MediaItem,
-    siblings: List<MediaItem>,
-    onSelect: (MediaItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
@@ -330,9 +359,20 @@ private fun DetailInfo(
         if (item.addedAtMs > 0) {
             DetailInfoRow("加入时间", formatRelativeDate(item.addedAtMs), divider = false)
         }
+    }
+}
 
+/** 剧集列表（同文件夹）——宽屏常驻右侧，窄窗跟随详情 */
+@Composable
+private fun SiblingList(
+    item: MediaItem,
+    siblings: List<MediaItem>,
+    onSelect: (MediaItem) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ink = LocalNpInk.current
+    Column(modifier = modifier) {
         if (siblings.size > 1) {
-            Spacer(Modifier.height(22.dp))
             NpSectionHead(title = "同文件夹（${siblings.size}）")
             Spacer(Modifier.height(6.dp))
             siblings.forEachIndexed { index, sibling ->
@@ -370,6 +410,50 @@ private fun DetailInfo(
                     },
                 )
             }
+        }
+    }
+}
+
+/**
+ * 视频详情浮窗层小窗口：标题/元信息/文件信息。
+ * 点遮罩、关闭键或系统返回键退出；内容超窗高时内部滚动。
+ */
+@Composable
+private fun DetailPopup(
+    item: MediaItem,
+    onDismiss: () -> Unit,
+) {
+    val ink = LocalNpInk.current
+    val shape = RoundedCornerShape(NpRadius.card)
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 420.dp)
+                .clip(shape)
+                .background(ink.surface)
+                .border(1.dp, ink.border, shape)
+                .npShadow(ink, shape, elevation = 18.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "视频详情",
+                    style = NpTypography.titleMedium,
+                    color = ink.fg,
+                    modifier = Modifier.weight(1f),
+                )
+                NpIconButton(
+                    icon = NpIcon.Close,
+                    contentDescription = "关闭",
+                    onClick = onDismiss,
+                    size = 36.dp,
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            DetailMeta(item = item)
         }
     }
 }

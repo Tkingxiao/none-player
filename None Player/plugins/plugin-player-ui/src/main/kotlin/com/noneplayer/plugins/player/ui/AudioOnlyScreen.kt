@@ -1,8 +1,6 @@
 package com.noneplayer.plugins.player.ui
 
-import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -30,33 +28,45 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
+import com.noneplayer.core.ui.NpMaskFade
 import com.noneplayer.core.ui.NpRadius
-import com.noneplayer.core.ui.NpTrackBar
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatTimestamp
-import com.noneplayer.core.ui.bouncySpring
+import com.noneplayer.core.ui.npCoverScrim
+import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.npPressScale
+import com.noneplayer.core.ui.npQuality
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.PlaybackState
+import com.noneplayer.plugins.player.ui.controls.WaveformSeekBar
 
 /**
  * 仅听音频整屏页（设计稿 `.audio`，CSS 538-594 / JS enterAudio-renderAudio 1575-1642）——
@@ -97,6 +107,8 @@ fun AudioOnlyScreen(
             .fillMaxSize()
             .background(ink.bg),
     ) {
+        // 封面取色舞台底（§4.7）：先于辉光，辉光在它之上"点亮"顶部。
+        AudioModeBackdrop(coverUri = snapshot.coverUri)
         // 径向 accent 辉光（设计稿 .audio .glow：120%×55% at 50% 2%）
         Box(
             modifier = Modifier
@@ -183,13 +195,20 @@ fun AudioOnlyScreen(
                     .align(Alignment.CenterHorizontally)
                     .padding(vertical = 10.dp),
             )
-            // 进度（设计稿 .audio-track）
+            // 进度（§5.6）：音频模式的主视觉换成装饰波形——同一文件任何时候形状一致，
+            // 但比一根细线更像"这里有一段内容"。视频页仍用 §5.4 的实线条，
+            // 波形放在画面上会误导"这是音频文件"。
+            val quality = npQuality()
+            val bufferedMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp)) {
-                NpTrackBar(
-                    progress = snapshot.progress,
-                    onSeek = { fraction ->
-                        (snapshot.durationMs * fraction).let { player.seekTo(it.toLong()) }
-                    },
+                WaveformSeekBar(
+                    mediaKey = HistoryEntry.keyOf(snapshot.item),
+                    durationMs = snapshot.durationMs,
+                    positionMs = snapshot.positionMs,
+                    bufferedFraction = if (snapshot.durationMs > 0)
+                        bufferedMs.toFloat() / snapshot.durationMs else 0f,
+                    barCount = quality.waveformBars,
+                    onSeek = { player.seekTo(it) },
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
@@ -266,7 +285,7 @@ fun AudioOnlyScreen(
                     enabled = snapshot.hasNext,
                 )
                 NpIconButton(
-                    icon = NpIcon.List,
+                    icon = NpIcon.QueueMusic,
                     contentDescription = "播放列表",
                     onClick = onOpenEpisodes,
                     size = 44.dp,
@@ -320,10 +339,23 @@ fun AudioOnlyScreen(
                     )
                 }
                 // 倍速选择条：与播放页同一交互（点钮 → 钮下列表），不走底部弹层
+                // M21：锚在钮上的紧凑菜单走 `Field`；默认的 fadeIn()/fadeOut() 是 150ms
+                // LinearOutSlowIn，和其余钮上菜单不同曲线，同屏会读出两种"出现"的节奏。
+                val speedSlideAllowed = npDisplacementAllowed()
                 androidx.compose.animation.AnimatedVisibility(
                     visible = speedPickerVisible,
-                    enter = androidx.compose.animation.fadeIn(),
-                    exit = androidx.compose.animation.fadeOut(),
+                    enter = androidx.compose.animation.fadeIn(
+                        animationSpec = npMotion(Motion.Field),
+                    ) +
+                        androidx.compose.animation.slideInVertically(
+                            animationSpec = npMotion(Motion.Field),
+                        ) { if (speedSlideAllowed) it else 0 },
+                    exit = androidx.compose.animation.fadeOut(
+                        animationSpec = npMotion(Motion.Field),
+                    ) +
+                        androidx.compose.animation.slideOutVertically(
+                            animationSpec = npMotion(Motion.Field),
+                        ) { if (speedSlideAllowed) it else 0 },
                 ) {
                     SpeedChoiceRow(
                         speed = speed,
@@ -334,6 +366,100 @@ fun AudioOnlyScreen(
             }
             Spacer(modifier = Modifier.height(32.dp))
         }
+    }
+}
+
+/**
+ * 音频模式舞台底（§4.7 + §9.5）：封面铺满 → 放大 1.35 去掉留白边 → 模糊或马赛克 →
+ * 主色 @0.30 叠加 → 顶部 `ink.bg` @0.55 渐隐。
+ *
+ * **两条柔化路径**（§9.5 是全应用唯一允许的 blur 落点，因为被模糊的是一张静态图）：
+ * - API 31+ 且档位给了半径 → `Modifier.blur`（内部即 `RenderEffect`），
+ *   半径取 `NpMotionQuality.imageBlurRadiusDp`（平衡 24dp / 全效 60dp），
+ *   源图按 `NpMotionQuality.imageBlurDownsample` 降采样，GPU 采样点数随之下降。
+ * - 其余（API 26–30、轻量档 radius=0）→ 8×8 最近邻放大成马赛克 + 1dp 格线压缝。
+ *   读起来是"故意的像素点阵"而不是"图坏了"，成本恒定。
+ *
+ * 无封面时整块底只剩 `ink.bg`：主色取到 null 时叠加色就是 Transparent，
+ * 顶部渐隐仍然画（它垫的是页面底，不该随封面有无而变化）。
+ */
+@Composable
+private fun AudioModeBackdrop(coverUri: String?, modifier: Modifier = Modifier) {
+    val ink = LocalNpInk.current
+    val quality = npQuality()
+    val renderEffectSupported = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S
+    val blurRadiusDp = quality.imageBlurRadiusDp
+    val mosaic = !renderEffectSupported || blurRadiusDp <= 0f
+    // 马赛克路径只要 8 像素；模糊路径按档位降采样（1/2 → 256，1/4 → 128）
+    val sourceLongestPx = if (mosaic) 8 else (512 / quality.imageBlurDownsample).coerceAtLeast(96)
+    val cover = rememberCoverBitmap(coverUri, sourceLongestPx)
+    // 主色：切集时算一次（§9.4），切集过渡由 npCoverScrim 的单条 AccentShift 颜色动画插值
+    val accent = npCoverScrim(coverUri)
+    val bitmap = cover
+    Box(modifier = modifier.fillMaxSize()) {
+        if (bitmap != null) {
+            androidx.compose.foundation.Image(
+                bitmap = bitmap.asImageBitmap(),
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                // 马赛克靠"不做滤波的最近邻放大"成立；平滑路径交给 blur 去做
+                filterQuality = if (mosaic) FilterQuality.None else FilterQuality.High,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        // 1.35 的过放是为了让模糊/马赛克后的边缘不露出页面底
+                        scaleX = 1.35f
+                        scaleY = 1.35f
+                    }
+                    .then(
+                        if (mosaic) Modifier else Modifier.blur(blurRadiusDp.dp),
+                    ),
+            )
+        }
+        if (mosaic && bitmap != null) {
+            // 1dp 格线压在 8×8 的分块缝上（§9.5 近似方案的收尾）：
+            // 缝不压就会读成"图裂了"，压了才读成"点阵"。
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val line = 1.dp.toPx()
+                for (i in 1 until 8) {
+                    val at = size.width * i / 8f
+                    val down = size.height * i / 8f
+                    drawRect(
+                        color = ink.bg.copy(alpha = 0.5f),
+                        topLeft = Offset(at - line / 2f, 0f),
+                        size = Size(line, size.height),
+                    )
+                    drawRect(
+                        color = ink.bg.copy(alpha = 0.5f),
+                        topLeft = Offset(0f, down - line / 2f),
+                        size = Size(size.width, line),
+                    )
+                }
+            }
+        }
+        // 主色叠加：默认一层平涂；全效档换成上重下轻的渐变（§9.6 accentGradient）
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .then(
+                    if (quality.accentGradient) {
+                        Modifier.background(
+                            Brush.verticalGradient(
+                                0f to accent.copy(alpha = 0.42f),
+                                1f to accent.copy(alpha = 0.12f),
+                            ),
+                        )
+                    } else {
+                        Modifier.background(accent.copy(alpha = 0.30f))
+                    },
+                ),
+        )
+        NpMaskFade(
+            color = ink.bg,
+            size = 200.dp,
+            fromTop = true,
+            startAlpha = 0.55f,
+        )
     }
 }
 
@@ -392,10 +518,26 @@ private fun VinylDisc(
     // 唱臂角度：播放落针 2°，暂停抬起 -24°（设计稿 .tonearm）
     val tonearmAngle by animateFloatAsState(
         targetValue = if (isPlaying) 2f else -24f,
-        animationSpec = bouncySpring(Motion.Tonearm),
+        animationSpec = npMotion(Motion.Tonearm, bouncy = true),
         label = "tonearm",
     )
-    Box(modifier = modifier.aspectRatio(1f)) {
+    // M23：整页 crossfade 之外，唱片自己从 0.92 涨到 1——"被放到机上"的一点体积感。
+    // 轻量档 / Reduce Motion 把缩放归零，只留页面的交叉淡入。
+    var placed by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { placed = true }
+    val discScale by animateFloatAsState(
+        targetValue = if (placed) 1f else if (npDisplacementAllowed()) 0.92f else 1f,
+        animationSpec = npMotion(Motion.Scheme),
+        label = "discEntrance",
+    )
+    Box(
+        modifier = modifier
+            .graphicsLayer {
+                scaleX = discScale
+                scaleY = discScale
+            }
+            .aspectRatio(1f),
+    ) {
         // 唱片本体
         Box(
             modifier = Modifier

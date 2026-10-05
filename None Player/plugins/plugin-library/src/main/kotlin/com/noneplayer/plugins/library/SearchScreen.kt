@@ -17,8 +17,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -70,6 +71,10 @@ import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSegmented
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.npClickable
+import com.noneplayer.core.ui.npItemFadeSpec
+import com.noneplayer.core.ui.npMaskFadeEdges
+import com.noneplayer.core.ui.npStaggeredEntry
+import com.noneplayer.core.ui.npStaggerWindow
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.get
@@ -304,6 +309,7 @@ private fun RecentSearches(
     onPick: (String) -> Unit,
 ) {
     if (history.isEmpty()) return
+    val ink = LocalNpInk.current
     Column(modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Box(modifier = Modifier.padding(horizontal = gutter)) {
             NpEyebrow(text = "最近搜索")
@@ -311,7 +317,9 @@ private fun RecentSearches(
         LazyRow(
             contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(top = 10.dp),
+            modifier = Modifier
+                .padding(top = 10.dp)
+                .npMaskFadeEdges(ink.bg),
         ) {
             items(history, key = { it }) { term ->
                 NpChip(
@@ -341,6 +349,9 @@ private fun SearchResults(
     onOpen: (MediaItem) -> Unit,
 ) {
     val ink = LocalNpInk.current
+    // 换词 = 新的一屏结果：窗口跟着 query 重新起，结果集每次入场都错峰一次
+    val staggerWindow = npStaggerWindow(query)
+    val itemFade = npItemFadeSpec()
     // 有 query 就必然已经 commit 过历史（点结果 / 回车 / 点 chip 都会提交）
     if (viewStyle == "list") {
         LazyColumn(
@@ -366,8 +377,15 @@ private fun SearchResults(
             if (results.isEmpty()) {
                 item(key = "empty") { SearchEmpty(query = query) }
             }
-            items(results, key = { "${it.sourceId}:${it.id}" }) { item ->
-                MediaListRow(item = item, compact = compact, onOpen = onOpen)
+            itemsIndexed(results, key = { _, item -> "${item.sourceId}:${item.id}" }) { index, item ->
+                MediaListRow(
+                    item = item,
+                    compact = compact,
+                    onOpen = onOpen,
+                    modifier = Modifier
+                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .npStaggeredEntry(index, staggerWindow),
+                )
             }
         }
         return
@@ -397,12 +415,12 @@ private fun SearchResults(
         if (results.isEmpty()) {
             item(key = "empty", span = { GridItemSpan(maxLineSpan) }) { SearchEmpty(query = query) }
         }
-        items(results, key = { "${it.sourceId}:${it.id}" }) { item ->
+        gridItemsIndexed(results, key = { _, item -> "${item.sourceId}:${item.id}" }) { index, item ->
             MediaCardBody(
                 item = item,
                 onOpen = onOpen,
                 showFolderTag = true,
-                modifier = Modifier.animateItem(),
+                modifier = Modifier.animateItem().npStaggeredEntry(index, staggerWindow),
             )
         }
     }

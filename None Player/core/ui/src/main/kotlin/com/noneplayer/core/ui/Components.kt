@@ -6,6 +6,7 @@ import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -37,19 +38,24 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -60,6 +66,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 
 /**
@@ -106,12 +114,19 @@ fun Modifier.npPressScale(
         durationMs = Motion.Press,
         label = "npPressScale",
     )
+    // M1 触觉（§7.5 `Tap`）在**抬起成键**时下发：按下去滑走、或长按改走 `Long`，
+    // 都不该响。放在这一处=卡片/图标按钮/底栏按钮一次铺满（§6 M1「补铺到 BarCtlButton」）。
+    val haptics = rememberNpHaptics()
+    val tap = {
+        haptics.performHaptic(NpHaptic.Tap)
+        onClick()
+    }
     val clickModifier = if (onLongClick == null) {
         Modifier.clickable(
             interactionSource = source,
             indication = null,
             enabled = enabled,
-            onClick = onClick,
+            onClick = tap,
         )
     } else {
         // combinedClickable 才会把"长按"与"点击"分开派发；无长按时保留原 clickable
@@ -119,8 +134,11 @@ fun Modifier.npPressScale(
             interactionSource = source,
             indication = null,
             enabled = enabled,
-            onClick = onClick,
-            onLongClick = onLongClick,
+            onClick = tap,
+            onLongClick = {
+                haptics.performHaptic(NpHaptic.Long)
+                onLongClick()
+            },
         )
     }
     return this
@@ -184,6 +202,23 @@ fun Modifier.npClickable(
 )
 
 /**
+ * 「视觉小、命中 44」分离（§3.1 红线 / §14 #13）：**方形状**可点元素专用。
+ *
+ * 命中区（=本节点的槽位）至少 [NpDimens.touchTarget]；**视觉**由调用方在里层再画
+ * [size]，所以 38dp 的圆角底色、24dp 的图标都还是设计稿那么大，长出来的只有透明边距。
+ *
+ * 为什么是"撑槽位"而不是"外溢命中区"：先写过一版 `size(视觉) → wrapContentSize(unbounded)
+ * → requiredSize(44)`，思路是槽位不动、让可点层居中溢出。实测（uiautomator 逐节点量边界）
+ * 溢出层在**主轴方向被邻居裁掉**——40dp 的钮仍报 40dp 宽，等于没修。撑槽位是笨办法，
+ * 但它量得到、也不依赖 Compose 的无障碍边界怎么算。
+ *
+ * 代价说清楚：同一排里每个钮的间距会按 (44 - 视觉) 变宽（传输键 +4dp、底栏键 +12dp），
+ * 行高不变（这些钮的行本来就 ≥48dp）。
+ */
+fun Modifier.npTouchTarget(size: Dp): Modifier = this
+    .size(maxOf(size, NpDimens.touchTarget))
+
+/**
  * `.iconbtn`：44dp 命中区 / 12dp 圆角 / 未选 muted、选中 accent + accentSoft 底。
  *
  * 设计稿里 38–44dp 的图标按钮遍布顶栏、迷你条、播放页。统一在这里，
@@ -211,24 +246,35 @@ fun NpIconButton(
     )
     Box(
         modifier = modifier
-            .size(size)
-            .clip(RoundedCornerShape(NpRadius.button))
-            .background(background)
+            .npTouchTarget(size)
             .npPressScale(onClick = onClick, pressedScale = 0.90f, enabled = enabled),
         contentAlignment = Alignment.Center,
     ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = contentDescription,
-            tint = if (enabled) color else ink.muted.copy(alpha = 0.45f),
-            modifier = Modifier.size(iconSize),
-        )
+        // 视觉层单独一层：选中底色 `.background` 必须只画到 [size]，
+        // 画在外层就变成 44dp 的色块（§14 #13 要的是"命中 44 / 视觉 38"，不是把钮放大）。
+        Box(
+            modifier = Modifier
+                .size(size)
+                .clip(RoundedCornerShape(NpRadius.button))
+                .background(background),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = if (enabled) color else ink.muted.copy(alpha = 0.45f),
+                modifier = Modifier.size(iconSize),
+            )
+        }
     }
 }
 
 /**
- * `.chip`：丸形过滤/标签。选中态是**实心 accent + 底字反色**（设计稿 `.chip.on`），
- * 不是描边高亮——胶囊底本身就是"已选中"的信号。
+ * `.chip`（§5.7）：丸形过滤/标签。
+ *
+ * 选中 = `accentSoft` 底 + `accent` 字 + `accentLine` 描边；未选 = `fgFaint` 底 + `muted` 字。
+ * 切换走 `Snappy / Field=150`（颜色是"一次性状态变化"，不许线性），并落一次 `Tick` 触觉——
+ * chips 是**一键切换**的控件，点了不响就等于没点到。
  */
 @Composable
 fun NpChip(
@@ -238,40 +284,54 @@ fun NpChip(
     modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
+    val haptics = rememberNpHaptics()
+    val colorSpec = npMotion<Color>(Motion.Field, easing = NpEasing.Snappy)
     val border by animateColorAsState(
-        when {
-            selected -> ink.accent
-            else -> ink.border
-        },
-        silkSpring(Motion.Field),
+        if (selected) ink.accentLine else ink.border,
+        colorSpec,
         label = "chipBorder",
     )
     val background by animateColorAsState(
-        if (selected) ink.accent else Color.Transparent,
-        silkSpring(Motion.Field),
+        if (selected) ink.accentSoft else ink.fgFaint,
+        colorSpec,
         label = "chipBg",
     )
     val content by animateColorAsState(
-        if (selected) ink.bg else ink.muted,
-        silkSpring(Motion.Field),
+        if (selected) ink.accent else ink.muted,
+        colorSpec,
         label = "chipFg",
     )
+    // 命中层高到 44dp（§14 #13），视觉层仍是设计稿的 34dp 丸形：底色/描边只画里层。
+    // chip 不走 [npTouchTarget]（那是方形状钮的方形槽位），这里宽度由内容决定，
+    // 所以外层只钉高度——代价是过滤行真的变高 10dp，换来的是与邻居零重叠。
     Box(
         modifier = modifier
-            .heightIn(min = NpDimens.chipHeight)
-            .clip(RoundedCornerShape(NpRadius.chip))
-            .background(background)
-            .border(1.dp, border, RoundedCornerShape(NpRadius.chip))
-            .npPressScale(onClick = onClick, pressedScale = 0.96f)
-            .padding(horizontal = 14.dp, vertical = 7.dp),
+            .heightIn(min = NpDimens.touchTarget)
+            .npPressScale(
+                onClick = {
+                    haptics.performHaptic(NpHaptic.Tick)
+                    onClick()
+                },
+                pressedScale = 0.96f,
+            ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            text = text,
-            style = MaterialTheme0.chipText,
-            color = content,
-            maxLines = 1,
-        )
+        Box(
+            modifier = Modifier
+                .heightIn(min = NpDimens.chipHeight)
+                .clip(RoundedCornerShape(NpRadius.chip))
+                .background(background)
+                .border(1.dp, border, RoundedCornerShape(NpRadius.chip))
+                .padding(horizontal = 14.dp, vertical = 7.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = text,
+                style = MaterialTheme0.chipText,
+                color = content,
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -505,6 +565,12 @@ fun NpSwitch(
  *
  * 设计稿 `.empty .ring{border:2px dashed}` 且环内放一枚 `np-ico lg`：
  * 虚线读作"容器还在等内容"，实线会像"封死的空盒子"。
+ *
+ * **M15（§5.8）**：环按 `Bubble`(500ms, Silk) 一路画出来，文案在起手 120ms 后淡入，
+ * 动作按钮 `bouncySpring(Switch)` 弹入。三件事有先后，用户读到的才是"这里在长东西"
+ * 而不是"整块内容闪了一下"。
+ * 动画**只在首次进入播**——同页复用（切 Tab 回来、重组）直接给终态，
+ * 否则每次看见空态都要陪它演半秒；轻量档 `emptyStroke=false` 同样直接给终态（§9.6）。
  */
 @Composable
 fun NpEmptyState(
@@ -515,20 +581,50 @@ fun NpEmptyState(
     onAction: (() -> Unit)? = null,
 ) {
     val ink = LocalNpInk.current
+    val quality = npQuality()
+    val ringSpec = npMotion<Float>(Motion.Bubble, easing = NpEasing.Silk)
+    val copySpec = npMotion<Float>(Motion.Field, easing = NpEasing.Silk)
+    val actionSpec = npMotion<Float>(Motion.Switch, bouncy = true)
+    val copyDelayMs = npDuration(Motion.ReduceFade)
+    val scaleAllowed = npDisplacementAllowed()
+
+    var strokePlayed by rememberSaveable { mutableStateOf(false) }
+    val ring = remember { Animatable(0f) }
+    val copy = remember { Animatable(0f) }
+    val action = remember { Animatable(0f) }
+
+    LaunchedEffect(Unit) {
+        if (!quality.emptyStroke || strokePlayed) {
+            // 不播也要落到终态，否则动画关了空态就永远是半透明的
+            ring.snapTo(1f)
+            copy.snapTo(1f)
+            action.snapTo(1f)
+            strokePlayed = true
+            return@LaunchedEffect
+        }
+        launch { ring.animateTo(1f, ringSpec) }
+        delay(copyDelayMs.toLong())
+        copy.animateTo(1f, copySpec)
+        action.animateTo(1f, actionSpec)
+        strokePlayed = true
+    }
+
     Column(
         modifier = modifier
             .fillMaxWidth()
             .padding(horizontal = 20.dp, vertical = 70.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        // 设计稿 `.empty .ring`：64px 虚线圆环 + 环内一枚 muted 图标
+        // 设计稿 `.empty .ring`：64dp 虚线圆环 + 环内一枚 muted 图标
         Box(
             modifier = Modifier
                 .size(64.dp)
                 .drawBehind {
-                    drawCircle(
+                    drawArc(
                         color = ink.border,
-                        radius = size.minDimension / 2f - 1.dp.toPx(),
+                        startAngle = -90f,
+                        sweepAngle = 360f * ring.value,
+                        useCenter = false,
                         style = Stroke(
                             width = 2.dp.toPx(),
                             pathEffect = PathEffect.dashPathEffect(
@@ -543,7 +639,9 @@ fun NpEmptyState(
                 imageVector = NpIcon.Folder,
                 contentDescription = null,
                 tint = ink.muted,
-                modifier = Modifier.size(28.dp),
+                modifier = Modifier
+                    .size(28.dp)
+                    .alpha(copy.value),
             )
         }
         Text(
@@ -551,20 +649,32 @@ fun NpEmptyState(
             style = NpTypography.titleSmall.copy(fontSize = 16.sp),
             color = ink.fg,
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 16.dp),
+            modifier = Modifier
+                .padding(top = 16.dp)
+                .alpha(copy.value),
         )
         Text(
             text = message,
             style = NpTypography.bodySmall,
             color = ink.muted,
             textAlign = TextAlign.Center,
-            modifier = Modifier.padding(top = 8.dp),
+            modifier = Modifier
+                .padding(top = 8.dp)
+                .alpha(copy.value),
         )
         if (actionLabel != null && onAction != null) {
             NpPrimaryButton(
                 text = actionLabel,
                 onClick = onAction,
-                modifier = Modifier.padding(top = 18.dp),
+                modifier = Modifier
+                    .padding(top = 18.dp)
+                    .alpha(action.value)
+                    .graphicsLayer {
+                        // 弹入的位移/缩放归 Reduce Motion 管：不许动时就只剩淡入
+                        val scale = if (scaleAllowed) 0.92f + 0.08f * action.value else 1f
+                        scaleX = scale
+                        scaleY = scale
+                    },
             )
         }
     }
@@ -623,27 +733,35 @@ fun NpSkeleton(
     shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(NpRadius.card),
 ) {
     val ink = LocalNpInk.current
-    val transition = rememberInfiniteTransition(label = "sk")
-    val shift by transition.animateFloat(
-        initialValue = -1f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(1200, easing = LinearEasing),
-            repeatMode = RepeatMode.Restart,
-        ),
-        label = "skShift",
-    )
-    Box(
-        modifier = modifier
-            .clip(shape)
-            .background(
-                Brush.linearGradient(
-                    colors = listOf(ink.surface, ink.surface2, ink.surface),
-                    start = Offset(shift * 400f - 400f, 0f),
-                    end = Offset(shift * 400f + 400f, 0f),
-                ),
+    // M13：流光圈长走 `Shimmer` 令牌；轻量档（`quality.shimmer=false`）直接给静态骨架——
+    // 骨架屏本意是"我在加载"，在慢机上跑无限动画反而和真正的内容抢帧。
+    val shimmerEnabled = npQuality().shimmer
+    // 关掉时**不建**无限动画：留着它即便零位移也每帧回调，而骨架屏正是和真正内容
+    // 抢帧的那一方——轻量档要的是"别动"，不是"动得慢一点"。
+    val shift = if (shimmerEnabled) {
+        val transition = rememberInfiniteTransition(label = "sk")
+        transition.animateFloat(
+            initialValue = -1f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(npDuration(Motion.Shimmer), easing = LinearEasing),
+                repeatMode = RepeatMode.Restart,
             ),
-    )
+            label = "skShift",
+        ).value
+    } else {
+        0f
+    }
+    val bg: Brush = if (shimmerEnabled) {
+        Brush.linearGradient(
+            colors = listOf(ink.surface, ink.surface2, ink.surface),
+            start = Offset(shift * 400f - 400f, 0f),
+            end = Offset(shift * 400f + 400f, 0f),
+        )
+    } else {
+        SolidColor(ink.surface)
+    }
+    Box(modifier = modifier.clip(shape).background(bg))
 }
 
 /**
@@ -754,7 +872,8 @@ fun NpPageScaffold(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .fillMaxWidth()
-                        .npGlassChrome(ink)
+                        // L2 条配方：不透明底 + 顶高光 + 底发丝线（`.topbar{border-bottom}`）
+                        .npGlassSurface(ink, topHighlight = true, bottomHairline = true)
                         .onSizeChanged { topBarPx = it.height },
                 ) {
                     Box(
@@ -769,14 +888,6 @@ fun NpPageScaffold(
                             )
                             .align(Alignment.TopCenter),
                     ) { topBar() }
-                    // 顶栏底边发丝线（设计稿 `.topbar{border-bottom:1px solid var(--border)}`）
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .fillMaxWidth()
-                            .height(1.dp)
-                            .background(ink.border),
-                    )
                 }
             }
         }

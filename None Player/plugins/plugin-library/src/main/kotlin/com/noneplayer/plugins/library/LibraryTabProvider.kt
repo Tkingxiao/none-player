@@ -8,7 +8,12 @@ import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.TabProvider
 
 /**
- * 首页 Tab——全部媒体封面墙（route "home"，位于主界面 Shell 首位）。
+ * 首页 Tab——Home 版式（封面墙 + 继续观看 / 文件夹 / 音频区块，route "home"，
+ * 位于主界面 Shell 首位）。
+ *
+ * 视图**固定为 VIDEOS**：文件夹浏览已独立成"文件夹"Tab，首页不该再受
+ * 持久化视图偏好影响——旧版本把"文件夹视图"存进 `library_view` 后没有任何
+ * UI 能改回来，用户实报"首页变成文件夹界面"就是这个残留偏好作祟。
  *
  * 图标用 [NpIcon] 而不是 `androidx.compose.material.icons`：设计稿的导航图标是
  * 24 视口 / 2px 描边的 monoline，与 Material 的 filled 变体不是一套语言，
@@ -26,7 +31,7 @@ class LibraryTabProvider : TabProvider {
 
     override fun register(builder: NavGraphBuilder, navigator: Navigator) {
         builder.composable(route) {
-            LibraryScreen(navigator = navigator)
+            LibraryScreen(navigator = navigator, forcedView = LibraryView.VIDEOS)
         }
     }
 }

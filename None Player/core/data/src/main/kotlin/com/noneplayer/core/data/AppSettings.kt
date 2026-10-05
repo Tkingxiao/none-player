@@ -5,6 +5,7 @@ import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -43,12 +44,12 @@ class AppSettings(private val context: Context) {
 
     private companion object {
         val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
+        val KEY_MOTION_LEVEL = intPreferencesKey("motion_level")
         val KEY_SORT_MODE = stringPreferencesKey("library_sort_mode")
         val KEY_SORT_ASC = booleanPreferencesKey("library_sort_asc")
         val KEY_SCAN_FOLDER = stringPreferencesKey("scan_folder_uri")
         val KEY_SCAN_FOLDERS = stringPreferencesKey("scan_folder_uris")
         val KEY_GRID_COLUMNS = stringPreferencesKey("library_grid_columns")
-        val KEY_LIBRARY_VIEW = stringPreferencesKey("library_view")
         val KEY_LIST_VIEW_STYLE = stringPreferencesKey("library_view_style")
         val KEY_PLAYBACK_SPEED = stringPreferencesKey("playback_speed")
         val KEY_SEARCH_HISTORY = stringPreferencesKey("search_history")
@@ -75,6 +76,12 @@ class AppSettings(private val context: Context) {
         /** 仅听音频记忆（§5.1）：下次进同一文件直接进入音频形态 */
         fun audioOnlyKey(mediaId: String) = booleanPreferencesKey("audio_only_$mediaId")
 
+        /** 手动选择的弹幕文件（批次 6）：按视频 uri 记忆，渲染层优先于同名自动匹配 */
+        fun danmakuManualKey(videoUri: String) = stringPreferencesKey("danmaku_manual_$videoUri")
+
+        /** 弹幕本地屏蔽词（批次 6）：换行分隔的原始串 */
+        val KEY_DANMAKU_BLOCKLIST = stringPreferencesKey("danmaku_blocklist")
+
         /** §8.3：历史迁移完成标记（E11：迁移后 DataStore 只留设置项） */
         val KEY_HISTORY_MIGRATED = booleanPreferencesKey("history_migrated")
 
@@ -95,6 +102,21 @@ class AppSettings(private val context: Context) {
 
     suspend fun setThemeMode(mode: ThemeMode) {
         context.dataStore.edit { it[KEY_THEME_MODE] = mode.name }
+    }
+
+    /**
+     * 「性能模式」档位序（R13）：0 轻量 / 1 平衡 / 2 全效，默认平衡。
+     *
+     * 存档位序而不是语义串，是因为这里（`core:data`）不该依赖 `core:ui`——
+     * 真正的档位定义（倍率、模糊半径、开关）是 `NpMotionQuality.fromLevel(level)`，
+     * 由 app 层读出来后喂给 `NonePlayerTheme`。越界值在读取时就夹回，
+     * 以免手工改偏好文件把界面推进一个不存在的档位。
+     */
+    val motionLevel: Flow<Int> = context.dataStore.data
+        .map { (it[KEY_MOTION_LEVEL] ?: 1).coerceIn(0, 2) }
+
+    suspend fun setMotionLevel(level: Int) {
+        context.dataStore.edit { it[KEY_MOTION_LEVEL] = level.coerceIn(0, 2) }
     }
 
     // ---- 媒体库 ----
@@ -121,7 +143,7 @@ class AppSettings(private val context: Context) {
         context.dataStore.edit { it[KEY_SORT_ASC] = ascending }
     }
 
-    /** 网格列数（"2" 或 "3"），默认双列 */
+    /** 网格列数（紧凑档用，"1"/"2"/"3"），默认双列（设计稿 `.tier-compact .grid.v`） */
     val gridColumns: Flow<Int> = context.dataStore.data
         .map { it[KEY_GRID_COLUMNS]?.toIntOrNull() ?: 2 }
 
@@ -129,19 +151,10 @@ class AppSettings(private val context: Context) {
         context.dataStore.edit { it[KEY_GRID_COLUMNS] = columns.toString() }
     }
 
-    // ---- 媒体库视图（全部视频 / 按文件夹） ----
-
-    /** 主页视图模式，默认全部视频 */
-    val libraryView: Flow<LibraryView> = context.dataStore.data.map { prefs ->
-        when (prefs[KEY_LIBRARY_VIEW]) {
-            LibraryView.FOLDERS.name -> LibraryView.FOLDERS
-            else -> LibraryView.VIDEOS
-        }
-    }
-
-    suspend fun setLibraryView(view: LibraryView) {
-        context.dataStore.edit { it[KEY_LIBRARY_VIEW] = view.name }
-    }
+    // ---- 媒体库视图 ----
+    // （"主页视图模式"已随标题行视图切换的移除而删除：`library_view` 键不再读取，
+    // 旧安装里残留的 FOLDERS 值曾把首页钉死在文件夹界面。KEY_LIST_VIEW_STYLE
+    // 的 "library_view_style" 是另一个键，勿混淆。）
 
     /**
      * 网格 / 列表视图风格（设计稿 viewToggle 的 `state.view`，四屏共用 + 跨会话记忆）。
@@ -350,5 +363,86 @@ class AppSettings(private val context: Context) {
 
     suspend fun setAudioOnlyPreferred(mediaId: String, value: Boolean) {
         context.dataStore.edit { it[audioOnlyKey(mediaId)] = value }
+    }
+
+    // ---- 弹幕（批次 6，plugin-danmaku）----
+    // 渲染层尚未接入（PlaybackOverlay 落地时消费）；设置面板先行提供入口，
+    // 与 scanner 的模式一致——偏好集中在本类，插件只贡献 UI 区块。
+
+    /** 弹幕总开关，默认开 */
+    val danmakuEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[booleanPreferencesKey("danmaku_enabled")] ?: true }
+
+    suspend fun setDanmakuEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[booleanPreferencesKey("danmaku_enabled")] = enabled }
+    }
+
+    /**
+     * 显示区域 = 弹幕层占屏幕高度的比例上限。规格四档：
+     * 1/4 (0.25) / 1/3 (0.33) / 半屏 (0.5) / 全屏 (1.0)，默认半屏。
+     */
+    val danmakuAreaFraction: Flow<Float> = context.dataStore.data
+        .map { it[stringPreferencesKey("danmaku_area")]?.toFloatOrNull() ?: 0.5f }
+
+    suspend fun setDanmakuAreaFraction(fraction: Float) {
+        context.dataStore.edit { it[stringPreferencesKey("danmaku_area")] = fraction.toString() }
+    }
+
+    /** 滚动速度倍率（1.0 = 标准速度），默认 1.0 */
+    val danmakuSpeed: Flow<Float> = context.dataStore.data
+        .map { it[stringPreferencesKey("danmaku_speed")]?.toFloatOrNull() ?: 1f }
+
+    suspend fun setDanmakuSpeed(speed: Float) {
+        context.dataStore.edit { it[stringPreferencesKey("danmaku_speed")] = speed.toString() }
+    }
+
+    /** 同屏密度上限（条数），0 = 不限，默认 0 */
+    val danmakuMaxOnScreen: Flow<Int> = context.dataStore.data
+        .map { it[intPreferencesKey("danmaku_density")] ?: 0 }
+
+    suspend fun setDanmakuMaxOnScreen(max: Int) {
+        context.dataStore.edit { it[intPreferencesKey("danmaku_density")] = max }
+    }
+
+    /** 字号倍率（1.0 = 标准），默认 1.0 */
+    val danmakuFontScale: Flow<Float> = context.dataStore.data
+        .map { it[stringPreferencesKey("danmaku_font_scale")]?.toFloatOrNull() ?: 1f }
+
+    suspend fun setDanmakuFontScale(scale: Float) {
+        context.dataStore.edit { it[stringPreferencesKey("danmaku_font_scale")] = scale.toString() }
+    }
+
+    /** 不透明度（0..1），默认 1.0 */
+    val danmakuAlpha: Flow<Float> = context.dataStore.data
+        .map { it[stringPreferencesKey("danmaku_alpha")]?.toFloatOrNull() ?: 1f }
+
+    suspend fun setDanmakuAlpha(alpha: Float) {
+        context.dataStore.edit { it[stringPreferencesKey("danmaku_alpha")] = alpha.toString() }
+    }
+
+    /** 本地屏蔽词表：换行分隔的原始串 */
+    val danmakuBlocklistRaw: Flow<String> = context.dataStore.data
+        .map { it[KEY_DANMAKU_BLOCKLIST] ?: "" }
+
+    suspend fun setDanmakuBlocklistRaw(raw: String) {
+        context.dataStore.edit { it[KEY_DANMAKU_BLOCKLIST] = raw }
+    }
+
+    /** 屏蔽词已拆分成词表（按换行/逗号切，去空白去重）；空串 = 无屏蔽 */
+    val danmakuBlocklist: Flow<List<String>> = danmakuBlocklistRaw.map { raw ->
+        raw.split('\n', ',', '，')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .distinct()
+    }
+
+    /** 某视频手动选择的弹幕文件地址；null = 未手动选择（走同名自动匹配） */
+    fun danmakuManualUri(videoUri: String): Flow<String?> = context.dataStore.data
+        .map { it[danmakuManualKey(videoUri)] }
+
+    suspend fun setDanmakuManualUri(videoUri: String, uri: String?) {
+        context.dataStore.edit { prefs ->
+            if (uri == null) prefs.remove(danmakuManualKey(videoUri)) else prefs[danmakuManualKey(videoUri)] = uri
+        }
     }
 }

@@ -1,7 +1,6 @@
 package com.noneplayer.core.ui
 
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +27,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.boundsInWindow
@@ -121,6 +121,7 @@ fun NpFilterSelect(
                 NpFilterMenu(
                     options = options,
                     selected = selected,
+                    alignEnd = alignEnd,
                     onSelect = {
                         onSelect(it)
                         open = false
@@ -164,6 +165,9 @@ private class DropdownPositionProvider(
  * 独立出来是因为设置页的"主题 / 默认倍速 / 字幕语言"也会复用同一个形状——
  * 圆角 14dp、6dp 内边距、每项 10/12dp 内缩。这三处若各自实现，
  * 弹层的圆角与行高一定会分叉。
+ *
+ * [alignEnd] 要和调用方的定位一致：M21 要求菜单从**靠锚点的那角**长出来，
+ * 弹层一律在触发器下方，所以纵向原点固定在顶边，横向随对齐端走。
  */
 @Composable
 fun NpFilterMenu(
@@ -171,16 +175,24 @@ fun NpFilterMenu(
     selected: String,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
+    alignEnd: Boolean = false,
 ) {
     val ink = LocalNpInk.current
     val shape = RoundedCornerShape(14.dp)
-    // 设计稿 `.fsel.open .fsel-menu`：scale(.96)→1 + opacity，.16s ease-out
+    // M21：origin-aware scale 0.95→1 + fade `Field`（设计稿 `.fsel.open .fsel-menu` 的 .96/.16s 收编到令牌）
+    val scaleAllowed = npDisplacementAllowed()
+    val scaleFrom = if (scaleAllowed) 0.95f else 1f
     var shown by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { shown = true }
     val entrance by animateFloatAsState(
-        targetValue = if (shown) 1f else 0.96f,
-        animationSpec = tween(Motion.Field, easing = NpEasing.Silk),
+        targetValue = if (shown) 1f else scaleFrom,
+        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
         label = "fselEntrance",
+    )
+    val layerAlpha by animateFloatAsState(
+        targetValue = if (shown) 1f else 0f,
+        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        label = "fselAlpha",
     )
     Column(
         modifier = modifier
@@ -190,9 +202,10 @@ fun NpFilterMenu(
             .width(IntrinsicSize.Max)
             .widthIn(min = 184.dp, max = 300.dp)
             .graphicsLayer {
+                transformOrigin = TransformOrigin(if (alignEnd) 1f else 0f, 0f)
                 scaleX = entrance
                 scaleY = entrance
-                alpha = 0.4f + 0.6f * ((entrance - 0.96f) / 0.04f).coerceIn(0f, 1f)
+                this.alpha = layerAlpha
             }
             .clip(shape)
             .background(ink.surface)
@@ -252,6 +265,8 @@ fun NpSegmented(
     icons: List<ImageVector?>? = null,
 ) {
     val ink = LocalNpInk.current
+    // 分段控件是"页内 Tab"：切档给一次刻度触觉（M4），按下不缩放（它靠胶囊表达选中）。
+    val haptics = rememberNpHaptics()
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(12.dp))
@@ -279,7 +294,13 @@ fun NpSegmented(
                     )
                     // 设计稿 `.seg button.on`：surface 底 + `0 1px 3px 黑14%` 微投影
                     .then(if (on) Modifier.npShadow(ink, RoundedCornerShape(9.dp), elevation = 3.dp) else Modifier)
-                    .npClickable { onSelect(option) }
+                    // M4（§7.5 `Tick`）：点已选中项没有状态变化，不该响。
+                    .npClickable {
+                        if (!on) {
+                            haptics.performHaptic(NpHaptic.Tick)
+                            onSelect(option)
+                        }
+                    }
                     .padding(horizontal = 10.dp, vertical = 7.dp),
                 contentAlignment = Alignment.Center,
             ) {

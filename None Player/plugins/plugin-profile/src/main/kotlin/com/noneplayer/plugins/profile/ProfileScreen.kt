@@ -13,7 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -55,6 +55,9 @@ import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpSectionHead
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.npMaskFadeEdges
+import com.noneplayer.core.ui.npStaggeredEntry
+import com.noneplayer.core.ui.npStaggerWindow
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.Navigator
@@ -238,12 +241,20 @@ private fun ProfileScreen(navigator: Navigator) {
                                 }
                             }
                             Spacer(modifier = Modifier.height(14.dp))
+                            // 首屏窗口在容器外层取一次：rail 滚到后面的卡片不再补播入场
+                            val staggerWindow = npStaggerWindow()
                             LazyRow(
+                                modifier = Modifier.npMaskFadeEdges(ink.bg),
                                 contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
-                                items(favoriteItems, key = { "${it.sourceId}:${it.id}" }) { item ->
-                                    NpCarouselItem {
+                                itemsIndexed(
+                                    favoriteItems,
+                                    key = { _, item -> "${item.sourceId}:${item.id}" },
+                                ) { index, item ->
+                                    NpCarouselItem(
+                                        modifier = Modifier.npStaggeredEntry(index, staggerWindow),
+                                    ) {
                                         RecentCard(
                                             item = item,
                                             onOpen = { openPlayer(navigator, item) },
@@ -284,12 +295,19 @@ private fun ProfileScreen(navigator: Navigator) {
                                 message = "播放过的条目会出现在这里。先在媒体库里开始播放任意一条。",
                             )
                         } else {
+                            val staggerWindow = npStaggerWindow()
                             LazyRow(
+                                modifier = Modifier.npMaskFadeEdges(ink.bg),
                                 contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
-                                items(recent, key = { "${it.sourceId}:${it.id}" }) { item ->
-                                    NpCarouselItem {
+                                itemsIndexed(
+                                    recent,
+                                    key = { _, item -> "${item.sourceId}:${item.id}" },
+                                ) { index, item ->
+                                    NpCarouselItem(
+                                        modifier = Modifier.npStaggeredEntry(index, staggerWindow),
+                                    ) {
                                         RecentCard(
                                             item = item,
                                             onOpen = { openPlayer(navigator, item) },

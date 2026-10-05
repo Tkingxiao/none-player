@@ -4,7 +4,6 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.net.toUri
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -30,6 +29,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
@@ -57,8 +57,13 @@ import com.noneplayer.core.ui.NpMediaColor
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpOptRow
 import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.ui.npDuration
+import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.npShadow
 import com.noneplayer.kernel.api.ContextMenuItem
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -85,13 +90,36 @@ internal fun MediaContextMenu(
     val ink = LocalNpInk.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
-    var shown by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { shown = true }
+    // M21：锚定菜单从**靠锚点的那角**长出来（下方展开=左上角）。缩放只有 5%，
+    // 少数翻到上方的卡片读起来差别在 1dp 内，不值得为它把定位结果回灌到组合期。
+    val scaleAllowed = npDisplacementAllowed()
+    val scaleFrom = if (scaleAllowed) 0.95f else 1f
+    val exitMs = npDuration(Motion.Field)
+    var visible by remember { mutableStateOf(false) }
+    var exitJob by remember { mutableStateOf<Job?>(null) }
+    LaunchedEffect(Unit) { visible = true }
     val entrance by animateFloatAsState(
-        targetValue = if (shown) 1f else 0.92f,
-        animationSpec = tween(Motion.Field, easing = NpEasing.Silk),
-        label = "mediaContextMenu",
+        targetValue = if (visible) 1f else scaleFrom,
+        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        label = "mediaContextMenuScale",
     )
+    val layerAlpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        label = "mediaContextMenuAlpha",
+    )
+    // 每一项都先退场再执行：父级回调一律把 contextMenu 置空，直接调会让 Popup 当场卸载。
+    fun requestDismiss(after: () -> Unit) {
+        if (!visible) return
+        visible = false
+        exitJob?.cancel()
+        exitJob = scope.launch {
+            delay(exitMs.toLong())
+            onDismiss()
+            after()
+        }
+    }
+    val withDismiss: (() -> Unit) -> (() -> Unit) = { action -> { requestDismiss(action) } }
     val isAudio = item.kind == MediaKind.AUDIO
     val hue = NpMediaColor.itemHue(item.folder, isAudio)
     val subtitle = buildList {
@@ -103,16 +131,17 @@ internal fun MediaContextMenu(
         popupPositionProvider = remember(anchor) {
             ContextMenuPositionProvider(anchor, with(density) { 8.dp.toPx().roundToInt() })
         },
-        onDismissRequest = onDismiss,
+        onDismissRequest = { requestDismiss {} },
         properties = PopupProperties(focusable = true),
     ) {
         Column(
             modifier = Modifier
                 .width(276.dp)
                 .graphicsLayer {
+                    transformOrigin = TransformOrigin(0f, 0f)
                     scaleX = entrance
                     scaleY = entrance
-                    alpha = 0.4f + 0.6f * ((entrance - 0.92f) / 0.08f).coerceIn(0f, 1f)
+                    this.alpha = layerAlpha
                 }
                 .clip(RoundedCornerShape(16.dp))
                 .background(ink.surface)
@@ -169,23 +198,22 @@ internal fun MediaContextMenu(
                     .background(ink.border),
             )
 
-            ContextMenuRow(icon = NpIcon.Play, label = "播放", onClick = onPlay)
-            ContextMenuRow(icon = NpIcon.Rotate, label = "从头播放", onClick = onPlayFromStart)
+            ContextMenuRow(icon = NpIcon.Play, label = "播放", onClick = withDismiss(onPlay))
+            ContextMenuRow(icon = NpIcon.Rotate, label = "从头播放", onClick = withDismiss(onPlayFromStart))
             ContextMenuRow(
                 icon = NpIcon.Heart,
                 label = if (isFavorite) "取消收藏" else "加入收藏",
                 active = isFavorite,
-                onClick = onToggleFavorite,
+                onClick = withDismiss(onToggleFavorite),
             )
-            onDetail?.let { detail -> ContextMenuRow(icon = NpIcon.Info, label = "详情", onClick = detail) }
+            onDetail?.let { detail -> ContextMenuRow(icon = NpIcon.Info, label = "详情", onClick = withDismiss(detail)) }
             // 插件贡献项（当前：本插件自己的「分享」，见 [ShareContextMenuItem]）
             extensionItems.forEach { ext ->
                 ContextMenuRow(
                     icon = ext.icon as? ImageVector ?: NpIcon.Dots,
                     label = ext.label,
                     onClick = {
-                        onDismiss()
-                        scope.launch { ext.onClick(item) }
+                        requestDismiss { scope.launch { ext.onClick(item) } }
                     },
                 )
             }

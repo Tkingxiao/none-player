@@ -1,7 +1,6 @@
 package com.noneplayer.plugins.player.ui
 
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -25,9 +24,12 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,17 +53,25 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatTimestamp
+import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.ui.npDuration
+import com.noneplayer.core.ui.npMotion
+import com.noneplayer.core.ui.npTouchTarget
 import com.noneplayer.kernel.api.NpChapter
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.NpTrackType
 import kotlin.math.roundToInt
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * 全屏形态的选项菜单体系（本轮 E80 收口）。
@@ -93,12 +103,17 @@ class FsMenuAnchor(
     val aboveLimitRect: Rect? = null,
 )
 
-/** 菜单容器：暗色玻璃 + 锚点定位 + 纵向滚动（超出可用高度时内部滚动） */
+/**
+ * 菜单容器：暗色玻璃 + 锚点定位 + 纵向滚动（超出可用高度时内部滚动）
+ *
+ * [content] 收到的 `dismiss` 是**带动画的收起**：菜单里的每一项都该走它而不是直接
+ * 让父级置空页面——父级一置空 Popup 就当场卸载，退场动画没有机会播。
+ */
 @Composable
 fun FsDropdown(
     anchor: FsMenuAnchor,
     onDismiss: () -> Unit,
-    content: @Composable ColumnScope.() -> Unit,
+    content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
     val density = LocalDensity.current
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
@@ -120,12 +135,39 @@ fun FsDropdown(
     }
     val maxHeight = minOf(space, screenHeight * 0.72f).coerceAtLeast(180.dp)
 
-    var shown by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { shown = true }
+    // M21：锚点在原点（顶栏⋯在上沿、底栏钮在下沿），缩放两个轴一起走才像"从按钮长出来"，
+    // 只缩 Y 会读成面板被压扁。轻量档/Reduce Motion 把缩放归零 → 纯淡入淡出。
+    val scaleAllowed = npDisplacementAllowed()
+    val scaleFrom = if (scaleAllowed) 0.95f else 1f
+    val exitMs = npDuration(Motion.Field)
+    val scope = rememberCoroutineScope()
+    // 退场由容器撑着：先把 visible 落下、动画跑完才回调真正的 onDismiss。
+    var visible by remember { mutableStateOf(false) }
+    var exitJob by remember { mutableStateOf<Job?>(null) }
+    // 换了锚点 = 重新开了一次菜单（包括"退场没跑完又点开别处"）：取消待卸载并重新入场。
+    // 页内 drill-in 不换锚点，所以推进/返回不会重播入场。
+    LaunchedEffect(anchor) {
+        exitJob?.cancel()
+        visible = true
+    }
+    val requestDismiss: () -> Unit = {
+        if (visible) {
+            visible = false
+            exitJob = scope.launch {
+                delay(exitMs.toLong())
+                onDismiss()
+            }
+        }
+    }
     val entrance by animateFloatAsState(
-        targetValue = if (shown) 1f else 0.92f,
-        animationSpec = tween(Motion.Field, easing = NpEasing.Silk),
-        label = "fsMenuEntrance",
+        targetValue = if (visible) 1f else scaleFrom,
+        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        label = "fsMenuScale",
+    )
+    val layerAlpha by animateFloatAsState(
+        targetValue = if (visible) 1f else 0f,
+        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        label = "fsMenuAlpha",
     )
 
     Popup(
@@ -136,7 +178,7 @@ fun FsDropdown(
                 marginPx = with(density) { margin.toPx().roundToInt() },
             )
         },
-        onDismissRequest = onDismiss,
+        onDismissRequest = requestDismiss,
         properties = PopupProperties(focusable = true),
     ) {
         Column(
@@ -145,15 +187,16 @@ fun FsDropdown(
                 .heightIn(max = maxHeight)
                 .graphicsLayer {
                     transformOrigin = TransformOrigin(0.5f, if (anchor.preferAbove) 1f else 0f)
+                    scaleX = entrance
                     scaleY = entrance
-                    alpha = 0.35f + 0.65f * ((entrance - 0.92f) / 0.08f).coerceIn(0f, 1f)
+                    this.alpha = layerAlpha
                 }
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color.Black.copy(alpha = 0.88f))
                 .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
                 .verticalScroll(rememberScrollState())
                 .padding(vertical = 6.dp),
-            content = content,
+            content = { content(requestDismiss) },
         )
     }
 }
@@ -223,6 +266,8 @@ fun FsMenuBackRow(title: String, onBack: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // 命中 44dp 红线（§14 #13）：页头也是可点项（点它=返回），只靠 9dp 上下内边距是 ~42dp。
+            .heightIn(min = NpDimens.touchTarget)
             .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onBack)
             .padding(horizontal = 10.dp, vertical = 9.dp),
@@ -247,6 +292,14 @@ fun FsMenuBackRow(title: String, onBack: () -> Unit) {
 }
 
 /**
+ * 危险项在**画面之上**的颜色。
+ *
+ * 不能用 `ink.danger`：整层下拉菜单永远压在视频上（深色 scrim + 白字），和应用主题无关，
+ * 亮色主题下 `ink.danger`（.55 明度）在白字旁边几乎读不出来。
+ */
+private val OnMediaDanger = Color(0xFFFF6B6B)
+
+/**
  * 菜单行：图标（可选）+ 文字 + 右侧值/勾选/箭头。
  *
  * [check] 非 null 时展示勾选位（未选中也占位，避免选中瞬间文字被挤动）；
@@ -264,13 +317,16 @@ fun FsMenuRow(
     danger: Boolean = false,
 ) {
     val tint = when {
-        danger -> Color(0xFFFF6B6B)
+        danger -> OnMediaDanger
         active -> MaterialTheme.colorScheme.primary
         else -> Color.White
     }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // 命中 44dp 红线（§14 #13）：只靠 9dp 上下内边距撑出来是 ~38dp。
+            // 面板本身限高 72% 且内部可滚（见本文件菜单容器），行高加 6dp 不会顶出屏幕。
+            .heightIn(min = NpDimens.touchTarget)
             .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 9.dp),
@@ -406,27 +462,35 @@ fun FsLoopChips(loopMode: NpLoopMode, onPick: (NpLoopMode) -> Unit) {
             NpLoopMode.ALL to NpIcon.Sound,
         ).forEach { (mode, icon) ->
             val on = loopMode == mode
+            // 命中层 [npTouchTarget] 把槽位撑到 44dp（§14 #13），视觉层仍是设计稿 `.fs-opt`
+            // 的 38dp 方块——底色/描边只画视觉层，否则一排四枚会连成一条 44dp 的粗带。
             Box(
                 modifier = Modifier
-                    .size(38.dp)
-                    .clip(RoundedCornerShape(11.dp))
-                    .background(
-                        if (on) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.06f),
-                    )
-                    .border(
-                        1.dp,
-                        if (on) Color.Transparent else Color.White.copy(alpha = 0.18f),
-                        RoundedCornerShape(11.dp),
-                    )
+                    .npTouchTarget(38.dp)
                     .clickable { onPick(mode) },
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = loopLabel(mode),
-                    tint = if (on) MaterialTheme.colorScheme.onPrimary else Color.White,
-                    modifier = Modifier.size(18.dp),
-                )
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(RoundedCornerShape(11.dp))
+                        .background(
+                            if (on) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.06f),
+                        )
+                        .border(
+                            1.dp,
+                            if (on) Color.Transparent else Color.White.copy(alpha = 0.18f),
+                            RoundedCornerShape(11.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = loopLabel(mode),
+                        tint = if (on) MaterialTheme.colorScheme.onPrimary else Color.White,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
         }
     }
@@ -490,22 +554,22 @@ fun FsMainMenuContent(
         FsMenuRow(
             label = "选集",
             value = "${queueIndex + 1} / $queueSize",
-            icon = NpIcon.List,
+            icon = NpIcon.QueueMusic,
             chevron = true,
             onClick = { onPage(FsMenuPage.EPISODES) },
         )
     }
     FsMenuTitle("更多")
     FsMenuRow(label = "音轨", icon = NpIcon.Sound, chevron = true, onClick = { onPage(FsMenuPage.AUDIO) })
-    FsMenuRow(label = "画面", icon = NpIcon.GridView, chevron = true, onClick = { onPage(FsMenuPage.PICTURE) })
+    FsMenuRow(label = "画面", icon = NpIcon.AspectRatio, chevron = true, onClick = { onPage(FsMenuPage.PICTURE) })
     if (hasChapters) {
         FsMenuRow(label = "章节", icon = NpIcon.ListView, chevron = true, onClick = { onPage(FsMenuPage.CHAPTERS) })
     }
     FsMenuRow(label = "画中画", icon = NpIcon.Pip, onClick = onPip)
-    FsMenuRow(label = "截图", icon = NpIcon.Clock, onClick = onScreenshot)
+    FsMenuRow(label = "截图", icon = NpIcon.Screenshot, onClick = onScreenshot)
     FsMenuRow(
         label = sleepLabel,
-        icon = NpIcon.Moon,
+        icon = NpIcon.SleepTimer,
         active = sleepActive,
         onClick = onSleep,
     )
@@ -658,6 +722,7 @@ fun FsPictureMenuContent(
     FsMenuTitle("画面变换")
     FsMenuRow(
         label = "左右镜像",
+        icon = NpIcon.Mirror,
         check = mirrored,
         active = mirrored,
         onClick = { onMirror(!mirrored) },
@@ -670,18 +735,31 @@ fun FsPictureMenuContent(
     )
 }
 
-/** 章节页：列表 + 当前章标记 */
+/**
+ * 章节页：列表 + 当前章标记。
+ *
+ * §9.2：位置以 [State] 传入并折成派生的"当前章下标"——进度上报约 250ms 一次，
+ * 直接逐行比对会让整张下拉菜单跟着重画（它是浮在播放画面上的重组热点）。
+ */
 @Composable
 fun FsChaptersMenuContent(
     chapters: List<NpChapter>,
-    positionMs: Long,
+    positionMs: State<Long>,
     onSelect: (NpChapter) -> Unit,
     onBack: () -> Unit,
 ) {
+    val activeIndex = remember(chapters) {
+        derivedStateOf {
+            val position = positionMs.value
+            chapters.indexOfFirst { chapter ->
+                position in chapter.startMs until
+                    (chapter.endMs.takeIf { it > chapter.startMs } ?: Long.MAX_VALUE)
+            }
+        }
+    }
     FsMenuBackRow(title = "章节（${chapters.size}）", onBack = onBack)
     chapters.forEachIndexed { index, chapter ->
-        val current = positionMs in chapter.startMs until
-            (chapter.endMs.takeIf { it > chapter.startMs } ?: Long.MAX_VALUE)
+        val current = index == activeIndex.value
         FsMenuRow(
             label = "${index + 1}. ${chapter.title}",
             value = formatTimestamp(chapter.startMs),

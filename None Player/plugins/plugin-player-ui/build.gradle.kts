@@ -37,4 +37,6 @@ dependencies {
 
     // 编译期插件发现：由 kernel-ksp 生成 PlayerUiPluginIndex
     ksp(project(":kernel:kernel-ksp"))
+
+    testImplementation(libs.junit)
 }

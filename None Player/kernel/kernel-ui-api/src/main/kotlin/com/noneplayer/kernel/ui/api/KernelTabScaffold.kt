@@ -1,18 +1,19 @@
 package com.noneplayer.kernel.ui.api
 
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
@@ -35,6 +36,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -44,7 +46,6 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
@@ -64,7 +65,17 @@ import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.currentBackStackEntryAsState
+import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.NpEasing
+import com.noneplayer.core.ui.NpHaptic
 import com.noneplayer.core.ui.NoneMark
+import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.ui.npDuration
+import com.noneplayer.core.ui.npGlassChrome
+import com.noneplayer.core.ui.npGlassSurface
+import com.noneplayer.core.ui.rememberNpHaptics
+import com.noneplayer.core.ui.silkSpring
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
@@ -183,10 +194,18 @@ fun KernelTabScaffold(
     val chromes by remember { kernel.registry.observe<BottomChromeProvider>() }
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<BottomChromeProvider>())
     val sortedChromes = remember(chromes) { chromes.sortedBy { it.order } }
+    // §8.2 路径 A：类 PC 档的右栏（内联播放栏）贡献者。同时只用一个（按 order 取首个），
+    // 多栏分屏不在本批范围。
+    val panes by remember { kernel.registry.observe<DetailPaneProvider>() }
+        .collectAsStateWithLifecycle(initialValue = kernel.registry.query<DetailPaneProvider>())
+    val sortedPanes = remember(panes) { panes.sortedBy { it.order } }
 
     // 切 Tab：栈内永远只保留一个 Tab（E53），状态靠 saveState/restoreState 成对保留。
+    val haptics = rememberNpHaptics()
     fun selectTab(route: String) {
         if (currentRoute == route) return
+        // M4（§7.5 `Tick`）：真正换了目的地才响——点当前 Tab 没有状态变化。
+        haptics.performHaptic(NpHaptic.Tick)
         val topDestinationId = tabNavController.currentDestination?.id
         tabNavController.navigate(route) {
             if (topDestinationId != null) {
@@ -213,6 +232,11 @@ fun KernelTabScaffold(
         }
     }
 
+    // 时长读在组合期：下面的 lambda 跑在 TransitionScope，取不到 LocalNpMotionQuality。
+    val tabSwapMs = npDuration(Motion.Tab)
+    // §7.2：Tab 切换 = fade + scale 0.98→1，**不做**横向整页滑动（半路卡住的感觉）。
+    // 0.98 是位移的一种，轻量档 / Reduce Motion 下并掉，只留淡入淡出。
+    val tabScaleIn = if (npDisplacementAllowed()) 0.98f else 1f
     val navHost: @Composable (Modifier) -> Unit = { modifier ->
         NavHost(
             navController = tabNavController,
@@ -220,11 +244,23 @@ fun KernelTabScaffold(
             modifier = modifier,
             // Tab 之间是**平级目的地**，不做方向性滑动，只做一次短交叉淡入。
             // 必须显式声明：NavHost 默认转场是 `tween(700)`，切一次标签要 0.7s
-            // 才"到位"，是整壳里最慢的一处响应（见 SHELL_TAB_SWAP_MS）。
-            enterTransition = { fadeIn(tween(SHELL_TAB_SWAP_MS)) },
-            exitTransition = { fadeOut(tween(SHELL_TAB_SWAP_MS)) },
-            popEnterTransition = { fadeIn(tween(SHELL_TAB_SWAP_MS)) },
-            popExitTransition = { fadeOut(tween(SHELL_TAB_SWAP_MS)) },
+            // 才"到位"，是整壳里最慢的一处响应。
+            enterTransition = {
+                fadeIn(tween(tabSwapMs, easing = NpEasing.Silk)) +
+                    scaleIn(initialScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.Silk))
+            },
+            exitTransition = {
+                fadeOut(tween(tabSwapMs, easing = NpEasing.SilkExit)) +
+                    scaleOut(targetScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.SilkExit))
+            },
+            popEnterTransition = {
+                fadeIn(tween(tabSwapMs, easing = NpEasing.Silk)) +
+                    scaleIn(initialScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.Silk))
+            },
+            popExitTransition = {
+                fadeOut(tween(tabSwapMs, easing = NpEasing.SilkExit)) +
+                    scaleOut(targetScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.SilkExit))
+            },
             builder = tabGraph,
         )
     }
@@ -263,7 +299,16 @@ fun KernelTabScaffold(
                 Column(
                     modifier = Modifier.onSizeChanged { bottomBarPx = it.height },
                 ) {
-                    sortedChromes.forEach { chrome -> chrome.Render(navigator) }
+                    // §8.5：迷你条收进 safeDrawing 的横向安全区（横屏刘海在左右时，
+                    // 条上的按钮会压在刘海下）。竖向安全区不在这里——它由下方的
+                    // Tab 栏自己收，两处都收会重复一段导航栏高度。
+                    Column(
+                        modifier = Modifier.windowInsetsPadding(
+                            WindowInsets.safeDrawing.only(WindowInsetsSides.Horizontal),
+                        ),
+                    ) {
+                        sortedChromes.forEach { chrome -> chrome.Render(navigator) }
+                    }
                     NpBottomTabBar(
                         tabs = sortedTabs,
                         currentRoute = currentRoute,
@@ -280,6 +325,16 @@ fun KernelTabScaffold(
         // （设计稿 `.mini{position:absolute;bottom:0}`），同样通过
         // LocalNpBottomInset 让各页避让。Rail 消费左侧/竖向安全区，
         // 内容列消费右侧/底部——横屏刘海、手势导航条在哪一侧都不遮挡。
+        //
+        // §8.2 路径 A（本批）：类 PC 档再切一栏——列表列与播放栏并列，
+        // 画面常驻右侧，浏览列表时播放不中断。这一栏有内容时迷你条不再渲染
+        // （它已被右栏取代，同一条"正在播放"信息不该占两处 UI）。
+        //
+        // 档位取 `isDesktopLike` 而不是 §12 那行写的"Expanded"：Expanded 含**竖屏**
+        // 宽窗（如 840×1200 平板竖持），切栏会把列表压到 280dp、卡片掉成单列，
+        // 反而比单栏更难用；§8.1 表里"路径 A 先行"那一行本来也标在 isDesktopLike。
+        val pane = sortedPanes.firstOrNull()
+        val paneInUse = pane != null && windowInfo.isDesktopLike && pane.isOccupied()
         Row(modifier = Modifier.fillMaxSize()) {
             NpNavRail(
                 tabs = sortedTabs,
@@ -296,14 +351,55 @@ fun KernelTabScaffold(
                         ),
                     ),
             ) {
-                navHost(Modifier.fillMaxSize())
-                Column(
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .fillMaxWidth()
-                        .onSizeChanged { bottomBarPx = it.height },
-                ) {
-                    sortedChromes.forEach { chrome -> chrome.Render(navigator) }
+                // **结构恒定**：NavHost 与右栏始终长在同一个组合分支里，切栏只改宽度。
+                // 把 NavHost 写进 if/else 两个分支会让它整棵子树被重建——实测表现为
+                // "开始播放的那一瞬间被踢回首页 Tab，详情页/文件夹层级/滚动位置全丢"。
+                //
+                // `LocalNpPaneOccupied` 必须包住 **navHost**（不只是右栏）：页面里的
+                // 内联画面要靠它让位，一台播放器只有一个输出 Surface。
+                CompositionLocalProvider(LocalNpPaneOccupied provides paneInUse) {
+                    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                        // §8.1 类 PC 行：列表 320–400、播放 ≥480。
+                        // 取窗口宽的 30% 再夹进区间——固定 360dp 在 1280dp 窗口里
+                        // 会让列表列显得过窄、播放栏过大，比例失衡。
+                        // 那条 480dp 下限优先：窗口不宽时缩列表，不缩画面。
+                        val listWidth = if (paneInUse) {
+                            (maxWidth * 0.30f)
+                                .coerceIn(320.dp, 400.dp)
+                                .coerceAtMost((maxWidth - 480.dp).coerceAtLeast(280.dp))
+                        } else {
+                            maxWidth
+                        }
+                        Row(modifier = Modifier.fillMaxSize()) {
+                            navHost(
+                                Modifier
+                                    .fillMaxHeight()
+                                    .width(listWidth),
+                            )
+                            if (pane != null && paneInUse) {
+                                pane.Render(
+                                    navigator = navigator,
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight(),
+                                )
+                            }
+                        }
+                    }
+                }
+                if (paneInUse) {
+                    // 进分栏后底部没有悬浮条：清掉上一档遗留的实测高度，
+                    // 否则列表列会在底部留出正好一条迷你条高的空白。
+                    LaunchedEffect(Unit) { bottomBarPx = 0 }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .onSizeChanged { bottomBarPx = it.height },
+                    ) {
+                        sortedChromes.forEach { chrome -> chrome.Render(navigator) }
+                    }
                 }
             }
         }
@@ -314,23 +410,10 @@ fun KernelTabScaffold(
 }
 
 // ---- 条配方（投影无法表达的 alpha 常量，集中一处）----
-// 数值逐条取自设计稿：--accent-soft = accent @ 16%、
-// --edge = #fff @ 8%（暗）/ 55%（亮）、Tab 栏描边 = --border。
+// 数值取自设计稿：--accent-soft = accent @ 16%。
+// （原来的 --edge / --border 两个常量已并入 core:ui 的 npGlassSurface 配方，
+//   见 界面设计路线.md §4.1–§4.2：条底与两根线只由 ink 令牌表达，不再各页自算 alpha。）
 private const val SHELL_ACCENT_SOFT_ALPHA = 0.16f
-private const val SHELL_EDGE_ALPHA_DARK = 0.08f
-private const val SHELL_EDGE_ALPHA_LIGHT = 0.55f
-
-/** 选中态切换刚度（设计稿 `.16s --ease-out` 的 spring 换算值）。 */
-private const val SHELL_STIFFNESS = 3200f
-
-/**
- * Tab 内容交叉淡入时长（ms）。
- *
- * NavHost 默认转场是 `tween(700)`——切一次标签要 0.7s 才到位，是整壳里最慢的
- * 一处响应。Tab 之间是平级目的地，不做方向性滑动，只做一次短交叉淡入即可。
- * 180ms 落在"用户可感知即时"（≤150ms 反馈 + 少量过渡）的区间内。
- */
-private const val SHELL_TAB_SWAP_MS = 180
 
 /**
  * `.tabbar`：底部 Tab 栏（**不透明**）。
@@ -350,35 +433,17 @@ private fun NpBottomTabBar(
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
-    val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val edge = Color.White.copy(alpha = if (isDark) SHELL_EDGE_ALPHA_DARK else SHELL_EDGE_ALPHA_LIGHT)
+    val ink = LocalNpInk.current
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background),
+            // L2 条配方（§4）：不透明底 + 顶高光（ink.edge，中间段内缩淡出）
+            // + 顶发丝线（ink.border，即设计稿 `.tabbar{border-top}`）。
+            // 此前这三行是就地手写的两份 background + gradient，与 core:ui 的配方各表；
+            // 收编后顶栏 / 迷你条 / Tab 栏三处共用同一个 modifier。
+            .npGlassSurface(ink, topHighlight = true, topHairline = true),
     ) {
-        // 顶边：1px 发丝描边 + 高光。设计稿 `.tabbar{border-top:1px solid var(--border)}`
-        // 与 `.topbar::after` 是同一套"玻璃有边"的语言。
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(MaterialTheme.colorScheme.outlineVariant),
-        )
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .padding(horizontal = 32.dp)
-                .height(1.dp)
-                .background(
-                    Brush.horizontalGradient(
-                        listOf(Color.Transparent, edge, Color.Transparent),
-                    ),
-                ),
-        )
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -421,6 +486,7 @@ private fun NpNavRail(
 ) {
     val accent = MaterialTheme.colorScheme.primary
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val ink = LocalNpInk.current
     val isDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
     // pinnedToEnd 的项（设置）被一个 weight 推到底部——空间上的分离承载
     // "它不是并列的内容区，而是关于这个应用"这层语义（设计稿 `.rail .spacer`）。
@@ -443,7 +509,9 @@ private fun NpNavRail(
         modifier = Modifier
             .fillMaxHeight()
             .width(80.dp)
-            .background(MaterialTheme.colorScheme.background),
+            // L2 竖条：同一条底色的口径（§4.1）。Rail 是竖的，npGlassSurface 的
+            // 两根横线用不上，所以只取它的底——仍经同一个 modifier，不各写一份。
+            .npGlassChrome(ink),
     ) {
         Column(
             modifier = Modifier
@@ -535,10 +603,7 @@ private fun NpRailItem(
 ) {
     val tint by animateColorAsState(
         targetValue = if (selected) accent else muted,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = SHELL_STIFFNESS,
-        ),
+        animationSpec = silkSpring(Motion.Press),
         label = "railTint",
     )
     val background by animateColorAsState(
@@ -547,18 +612,12 @@ private fun NpRailItem(
         } else {
             Color.Transparent
         },
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = SHELL_STIFFNESS,
-        ),
+        animationSpec = silkSpring(Motion.Press),
         label = "railBg",
     )
     val scale = animateFloatAsState(
         targetValue = if (selected) 1f else 0.98f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = SHELL_STIFFNESS,
-        ),
+        animationSpec = silkSpring(Motion.Press),
         label = "railScale",
     )
     // 按压缩放（设计稿 `.rail-btn:active{transform:scale(.94)}`）
@@ -566,10 +625,7 @@ private fun NpRailItem(
     val pressed by interaction.collectIsPressedAsState()
     val pressScale = animateFloatAsState(
         targetValue = if (pressed) 0.94f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = SHELL_STIFFNESS,
-        ),
+        animationSpec = silkSpring(Motion.Press),
         label = "railPress",
     )
     // 「Filled, not outlined」：选中从描边变实心（设计稿 `.rail-btn.on .np-ico{fill:currentColor}`）
@@ -624,10 +680,7 @@ private fun NpTabItem(
 ) {
     val tint by animateColorAsState(
         targetValue = if (selected) accent else muted,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = SHELL_STIFFNESS,
-        ),
+        animationSpec = silkSpring(Motion.Press),
         label = "tabTint",
     )
     // 按压缩放（设计稿 `:active` 语言的 tabbar 版本，取 chip 的 .96 档）
@@ -635,10 +688,7 @@ private fun NpTabItem(
     val pressed by interaction.collectIsPressedAsState()
     val pressScale = animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
-        animationSpec = spring(
-            dampingRatio = Spring.DampingRatioNoBouncy,
-            stiffness = SHELL_STIFFNESS,
-        ),
+        animationSpec = silkSpring(Motion.Press),
         label = "tabPress",
     )
     val shownIcon = if (selected) selectedIcon ?: icon else icon

@@ -35,4 +35,6 @@ dependencies {
     // 直接引用须显式声明，否则 lint 的 UseKtx 会提示且依赖关系是隐式的
     implementation(libs.androidx.core.ktx)
     debugApi(libs.compose.ui.tooling)
+
+    testImplementation(libs.junit)
 }

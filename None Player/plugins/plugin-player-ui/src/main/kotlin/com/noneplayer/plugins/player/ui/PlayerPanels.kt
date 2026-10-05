@@ -21,6 +21,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -226,15 +228,28 @@ private fun ToggleLine(label: String, checked: Boolean, onChecked: (Boolean) -> 
 /**
  * 章节抽屉（§12.5）：复用选集面板的版式（下半屏 + 半透明 scrim）。
  * 当前章 = position 落在其 [NpChapter.startMs, endMs) 区间。
+ *
+ * §9.2：位置以 [State] 传入、读在本面板内，并折成"当前章下标"这一个派生值。
+ * 进度约 250ms 上报一次，若逐行判区间，每跳一次整个章节列表就重组一次；
+ * 派生值只在**换章**时才通知，列表因此基本静止。
  */
 @Composable
 fun ChaptersPanel(
     chapters: List<NpChapter>,
-    positionMs: Long,
+    positionMs: State<Long>,
     onSelect: (NpChapter) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val activeIndex = remember(chapters) {
+        derivedStateOf {
+            val position = positionMs.value
+            chapters.indexOfFirst { chapter ->
+                position in chapter.startMs until
+                    (chapter.endMs.takeIf { it > chapter.startMs } ?: Long.MAX_VALUE)
+            }
+        }
+    }
     Box(
         modifier = modifier
             .fillMaxSize()
@@ -262,8 +277,10 @@ fun ChaptersPanel(
                     modifier = Modifier.padding(16.dp),
                 )
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                    itemsIndexed(chapters) { index, chapter ->
-                        val current = positionMs in chapter.startMs until (chapter.endMs.takeIf { it > chapter.startMs } ?: Long.MAX_VALUE)
+                    // 章节表随条目一次性换页，本身不增删，故只给稳定 key（M24 的 fade+collapse
+                // 是为"会增删的列表"准备的——队列/收藏），这里加 animateItem 只会白跑动画
+                itemsIndexed(chapters, key = { _, chapter -> chapter.startMs }) { index, chapter ->
+                        val current = index == activeIndex.value
                         Row(
                             verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier

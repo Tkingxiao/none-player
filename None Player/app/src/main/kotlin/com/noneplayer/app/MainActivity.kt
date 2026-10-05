@@ -34,8 +34,11 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.ThemeMode
+import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NoneMark
 import com.noneplayer.core.ui.NonePlayerTheme
+import com.noneplayer.core.ui.npDuration
 import com.noneplayer.kernel.BootState
 import com.noneplayer.kernel.Kernel
 import com.noneplayer.kernel.api.PermissionProvider
@@ -81,6 +84,8 @@ class MainActivity : ComponentActivity() {
             val app = application as NonePlayerApplication
             val themeMode by (app.kernel.services.get<AppSettings>())
                 .themeMode.collectAsStateWithLifecycle(app.initialThemeMode)
+            val motionLevel by (app.kernel.services.get<AppSettings>())
+                .motionLevel.collectAsStateWithLifecycle(1)
             // E45/E52：形态判定层的**唯一注入点**（§13.2）——全应用一次判定，
             // 经 LocalNpWindowInfo 下发；各页面一律消费它，不得各自读 LocalConfiguration
             // 做档位分支（唯一例外是"窗口是否横向"，见 NpWindowInfo 文档注释）。
@@ -111,12 +116,19 @@ class MainActivity : ComponentActivity() {
                     ThemeMode.LIGHT -> false
                     ThemeMode.DARK -> true
                 },
+                // 性能模式（R13）：用户档位在这里进内核，`NonePlayerTheme` 负责与
+                // 设备自动档取低者、再叠加播放中降档后下发 LocalNpMotionQuality。
+                // §9.4 的 decodingVideo 待批次 5 后段接（会话在插件内部，app 够不着）。
+                motionQuality = com.noneplayer.core.ui.NpMotionQuality.fromLevel(motionLevel),
+                isDesktopLike = windowInfo.isDesktopLike,
             ) {
                 val state by kernel.bootState.collectAsStateWithLifecycle()
-                // 启动屏 → 主界面交叉淡入，避免生硬切换
+                // 启动屏 → 主界面交叉淡入，避免生硬切换。
+                // M17 的 280 落到 `NavEnter`（启动就是第一次"入页"）；曲线显式给 Silk，
+                // 默认的 FastOutSlowIn 和 KernelNavHost 里后续所有入页不是同一条速度。
                 Crossfade(
                     targetState = state,
-                    animationSpec = tween(280),
+                    animationSpec = tween(npDuration(Motion.NavEnter), easing = NpEasing.Silk),
                     label = "boot",
                 ) { s ->
                     when (s) {

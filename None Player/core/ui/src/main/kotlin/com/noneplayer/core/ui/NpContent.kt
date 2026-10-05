@@ -67,6 +67,12 @@ object NpMediaColor {
     /** 音频统一色相（设计稿 `itemHue` 对音频返回 258）。 */
     private const val AUDIO_HUE = 258
 
+    /**
+     * 音频标识青：`accent(258)` 落在 226..280 那一段的蓝（#73B2FF），读起来不像"音频"，
+     * 所以设计稿给音频单独定了一支青。标签与波形条共用这一支，两处不许各写一遍。
+     */
+    val audioTint = Color(0xFF0EC7DE)
+
     /** 由文件夹名稳定映射到一个色相（同名必同色，跨会话不变）。 */
     fun folderHue(name: String?): Int {
         val key = name ?: "local"
@@ -126,7 +132,7 @@ fun NpKindTag(
     modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
-    val tint = if (isAudio) Color(0xFF0EC7DE) else ink.accent
+    val tint = if (isAudio) NpMediaColor.audioTint else ink.accent
     Row(
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
@@ -264,7 +270,7 @@ fun NpMiniProgress(
     // 进度线是"匀速走"的读法，spring 回弹会让它看起来在抖。
     val animated by animateFloatAsState(
         targetValue = progress.coerceIn(0f, 1f),
-        animationSpec = tween(durationMillis = Motion.MiniProgress, easing = LinearEasing),
+        animationSpec = tween(durationMillis = npDuration(Motion.MiniProgress), easing = LinearEasing),
         label = "npMiniProgress",
     )
     Box(
@@ -363,7 +369,7 @@ fun NpCoverBox(
         content()
         if (showKindTag) {
             if (compactKindTag) {
-                val tint = if (isAudio) Color(0xFF0EC7DE) else ink.accent
+                val tint = if (isAudio) NpMediaColor.audioTint else ink.accent
                 Box(
                     modifier = Modifier
                         .align(Alignment.TopStart)
@@ -567,9 +573,7 @@ fun NpListRow(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(NpRadius.card))
-            .background(ink.surface)
-            .border(1.dp, ink.border, RoundedCornerShape(NpRadius.card))
+            .npCardSurface(ink, RoundedCornerShape(NpRadius.card))
             .hoverable(interactionSource = interactionSource, enabled = hoverEnabled)
             .npPressScale(
                 onClick = onClick,

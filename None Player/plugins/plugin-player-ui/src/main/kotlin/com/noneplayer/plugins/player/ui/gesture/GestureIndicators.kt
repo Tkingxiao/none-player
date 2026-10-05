@@ -26,10 +26,13 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.formatTimestamp
+import com.noneplayer.core.ui.npDuration
 import kotlin.math.abs
 
 /**
@@ -154,8 +157,10 @@ fun GestureIndicatorVisibility(
 ) {
     AnimatedVisibility(
         visible = visible,
-        enter = fadeIn(tween(90)),
-        exit = fadeOut(tween(180)),
+        // M10：出现 `Field`(150)、消失 `Hover`(100)——原先 90/180 正好写反，
+        // 侧条"啪"地跳出、又慢慢消失，读数时机被拉长的是最不该等的退场。
+        enter = fadeIn(tween(npDuration(Motion.Field), easing = NpEasing.Silk)),
+        exit = fadeOut(tween(npDuration(Motion.Hover), easing = NpEasing.SilkExit)),
     ) {
         content()
     }

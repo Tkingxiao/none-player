@@ -169,6 +169,53 @@ object NpIcon {
         stroke("NpList", "M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01")
     }
 
+    // ---- 批次 5 补的 5 枚（§3.7）----
+    // 它们不是新语义，而是**收编借用工位**：画面比例此前借 GridView、截图与睡眠
+    // 定时此前都借 Clock/Moon、播放列表此前借 List。借用会让"看图认功能"失效——
+    // 同一枚字形在两个入口出现，用户只能靠文字。
+
+    /** 画面比例：画框 + 对角线 + 左下角定位块 */
+    val AspectRatio: ImageVector by lazy {
+        stroke(
+            "NpAspectRatio",
+            "M4 5h16a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1z" +
+                "M8 16 16 8" +
+                "M8 12.5V16h3.5",
+        )
+    }
+
+    /** 左右镜像：中轴 + 两只相向三角 */
+    val Mirror: ImageVector by lazy {
+        stroke("NpMirror", "M12 4v16M6 7v10l4-5zM18 7v10l-4-5z")
+    }
+
+    /** 截图：取景四角 + 中心镜头 */
+    val Screenshot: ImageVector by lazy {
+        stroke(
+            "NpScreenshot",
+            "M4 9V6a2 2 0 0 1 2-2h3" +
+                "M15 4h3a2 2 0 0 1 2 2v3" +
+                "M20 15v3a2 2 0 0 1-2 2h-3" +
+                "M9 20H6a2 2 0 0 1-2-2v-3" +
+                "M9.5 12a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0-5 0",
+        )
+    }
+
+    /** 睡眠定时：钟面 + 时分针 + 一枚 Z */
+    val SleepTimer: ImageVector by lazy {
+        stroke(
+            "NpSleepTimer",
+            "M4 12a8 8 0 1 0 16 0a8 8 0 1 0-16 0" +
+                "M12 8.5V12l2.5 1.5" +
+                "M15.5 2.5h5l-5 4h5",
+        )
+    }
+
+    /** 播放列表：三行 + 右下角播放三角 */
+    val QueueMusic: ImageVector by lazy {
+        stroke("NpQueueMusic", "M4 7h12M4 12h12M4 17h7M16.5 14.5v5l4.5-2.5z")
+    }
+
     /** 倍速：断口圆环 + 指针 */
     val Speed: ImageVector by lazy { stroke("NpSpeed", "M12 12l4-3M12 20a8 8 0 1 0-8-8") }
 

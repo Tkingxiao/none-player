@@ -39,10 +39,13 @@ import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.formatTimestamp
+import com.noneplayer.core.ui.npDuration
+import com.noneplayer.core.ui.npTouchTarget
 import com.noneplayer.plugins.player.ui.controls.NpSeekBar
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.PlaybackState
@@ -51,6 +54,7 @@ import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
+import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -114,8 +118,13 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         var dragPositionMs by remember { mutableFloatStateOf(0f) }
         var scrubWasPlaying by remember { mutableStateOf(false) }
 
-        // 播放中控制层自动隐藏；拖动进度条期间不隐藏
-        LaunchedEffect(controlsVisible, state, userDragging) {
+        // 播放中控制层自动隐藏；拖动进度条期间不隐藏。
+        // §8.4：指针环境（类 PC 窗口 / 接着鼠标触控板）里不隐藏——内嵌栏常在一边陪着
+        // 列表被浏览，栏一藏用户想换个倍速就得先点一下画面把栏唤回来。
+        val windowInfo = LocalNpWindowInfo.current
+        val pointerAttached = windowInfo.isDesktopLike || windowInfo.isHoverable
+        LaunchedEffect(controlsVisible, state, userDragging, pointerAttached) {
+            if (pointerAttached) return@LaunchedEffect
             if (controlsVisible && state == PlaybackState.Playing && !userDragging) {
                 delay(INLINE_CONTROLS_AUTO_HIDE_MS)
                 controlsVisible = false
@@ -151,8 +160,8 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
             )
             AnimatedVisibility(
                 visible = controlsVisible,
-                enter = fadeIn(animationSpec = tween(Motion.Field)),
-                exit = fadeOut(animationSpec = tween(Motion.Field)),
+                enter = fadeIn(animationSpec = tween(npDuration(Motion.Field), easing = NpEasing.Silk)),
+                exit = fadeOut(animationSpec = tween(npDuration(Motion.Field), easing = NpEasing.SilkExit)),
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .background(
@@ -193,7 +202,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                     ) {
                         IconButton(
                             onClick = { if (playing) player.pause() else player.play() },
-                            modifier = Modifier.size(34.dp),
+                            modifier = Modifier.npTouchTarget(34.dp),
                         ) {
                             if (playing) {
                                 PauseGlyph(tint = Color.White, barWidth = 4.dp, barHeight = 16.dp)
@@ -217,7 +226,10 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             style = NpMonoSmall,
                             color = Color.White.copy(alpha = 0.8f),
                         )
-                        IconButton(onClick = onFullscreen, modifier = Modifier.size(34.dp)) {
+                        IconButton(
+                            onClick = onFullscreen,
+                            modifier = Modifier.npTouchTarget(34.dp),
+                        ) {
                             Icon(
                                 imageVector = NpIcon.Expand,
                                 contentDescription = "全屏播放",

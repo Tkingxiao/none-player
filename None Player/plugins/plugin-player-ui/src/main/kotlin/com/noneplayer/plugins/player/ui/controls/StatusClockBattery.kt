@@ -45,7 +45,12 @@ internal fun StatusClockBattery(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
-    val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    // 跟随系统的 12/24 小时制：写死 "HH:mm" 会在 12 小时制设备上和系统栏差 12 小时
+    // （实测系统栏 12:55、自绘 00:55，看着像时钟坏了）。
+    val timeFormat = remember(context) {
+        val pattern = if (android.text.format.DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm"
+        SimpleDateFormat(pattern, Locale.getDefault())
+    }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     var batteryPercent by remember { mutableIntStateOf(readBatteryPercent(context)) }
 

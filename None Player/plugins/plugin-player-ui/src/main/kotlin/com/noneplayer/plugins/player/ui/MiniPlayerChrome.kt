@@ -20,7 +20,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -30,12 +34,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.kind
 import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.NpCoverAccent
 import com.noneplayer.core.ui.NpDimens
+import com.noneplayer.core.ui.NpHaptic
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMediaColor
@@ -46,7 +52,9 @@ import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npClickable
-import com.noneplayer.core.ui.npGlassChrome
+import com.noneplayer.core.ui.npGlassSurface
+import com.noneplayer.core.ui.npMotion
+import com.noneplayer.core.ui.rememberNpHaptics
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.BottomChromeProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
@@ -83,10 +91,27 @@ class MiniPlayerChrome : BottomChromeProvider {
         val nowPlaying by session.nowPlaying.collectAsStateWithLifecycle()
         val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
 
+        val miniVisible = nowPlaying != null
+        val haptics = rememberNpHaptics()
+        // M3（§7.5 `LightTap`）：出现与收起各回执一次，与 `Panel` 动画同帧起步。
+        // 冷启动就带着会话时条是"一直在那"，不是刚出现——初值直接取当前状态把它滤掉。
+        var lastVisible by remember { mutableStateOf(miniVisible) }
+        LaunchedEffect(miniVisible) {
+            if (miniVisible != lastVisible) {
+                lastVisible = miniVisible
+                haptics.performHaptic(NpHaptic.LightTap)
+            }
+        }
+
         AnimatedVisibility(
             visible = nowPlaying != null,
-            enter = fadeIn() + expandVertically(),
-            exit = fadeOut() + shrinkVertically(),
+            // M3：迷你条的显隐带"内容让位"（expand/shrink），两者共用 `Panel`(180) 的 spring。
+            // 默认的 fadeIn()/expandVertically() 是 150ms linear-ish，和底栏其余部分的
+            // 手感对不上；这里显式落到令牌上，档位与 Reduce Motion 才能一起生效。
+            enter = fadeIn(animationSpec = npMotion(Motion.Panel)) +
+                expandVertically(animationSpec = npMotion(Motion.Panel)),
+            exit = fadeOut(animationSpec = npMotion(Motion.Panel)) +
+                shrinkVertically(animationSpec = npMotion(Motion.Panel)),
         ) {
             // nowPlaying 在退出动画期间会变 null，逐帧读取需要兜底快照
             val snapshot = nowPlaying ?: return@AnimatedVisibility
@@ -94,16 +119,10 @@ class MiniPlayerChrome : BottomChromeProvider {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // 实底：条底与页面底同色（不透明），滚动内容从下面经过。
-                    .npGlassChrome(ink),
+                    // L2 条配方（§4）：不透明底 + 顶高光 + 顶发丝线——
+                    // 与 Tab 栏、顶栏同一个 modifier，三处不再各写一份线。
+                    .npGlassSurface(ink, topHighlight = true, topHairline = true),
             ) {
-                // 顶边发丝描边——与 Tab 栏共用同一套"玻璃有边"的语言
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(1.dp)
-                        .background(ink.border),
-                )
                 Box(modifier = Modifier.fillMaxWidth()) {
                     // 左缘 2dp accent 进度线：品牌色只在"正在播放"的这一条上常驻
                     Box(
@@ -154,8 +173,14 @@ class MiniPlayerChrome : BottomChromeProvider {
         }
     }
 
-    /** 转义路由参数：标题可能含 `&`/`=`/中文/空格，裸露拼进 route 会截断参数 */
-    private fun encode(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
+    /**
+     * 转义路由参数：标题可能含 `&`/`=`/中文/空格，裸露拼进 route 会截断参数。
+     *
+     * 编码约定与媒体库 `openPlayer`、服务侧深链（`Uri.Builder.appendQueryParameter`）
+     * 统一为 `Uri.encode(value, "")`（E55）：`URLEncoder` 把空格写成 `+`，
+     * 而查询参数按 URI 规范解码时 `+` 就是加号，标题会变成 "Big+Buck+Bunny"。
+     */
+    private fun encode(value: String): String = android.net.Uri.encode(value, "")
 }
 
 /**
@@ -318,8 +343,62 @@ private fun MiniCover(snapshot: NowPlaying) {
                 contentDescription = snapshot.title,
                 modifier = Modifier.fillMaxWidth(),
                 contentScale = ContentScale.Crop,
+                // 40dp @ 3x ≈ 120px：解到 144 已经比显示尺寸更清晰
+                maxLongestPx = 144,
             )
         }
+    }
+}
+
+/**
+ * 封面位图：**按目标显示尺寸采样解码**，不整张解出来。
+ *
+ * 原先唯一的实现直接把原图 `decodeStream` 给一个 40dp 缩略图用——一张 1080p 海报
+ * 就是 ~8MB 堆内存 + 一次全尺寸解码，而迷你条是每次切集都会走的路径。
+ * 两段式（先 `inJustDecodeBounds` 只读尺寸，再按 1/2ⁿ 解）把成本压到与显示尺寸同阶。
+ *
+ * 键含 [maxLongestPx]：同一个 uri 在迷你条（40dp）与音频模式底（全屏）要的分辨率
+ * 本来就不同，共用一张大图等于两头都付最贵的那份代价。
+ */
+@Composable
+internal fun rememberCoverBitmap(uriString: String?, maxLongestPx: Int): android.graphics.Bitmap? {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val bitmap by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(
+        initialValue = null,
+        key1 = uriString,
+        key2 = maxLongestPx,
+    ) {
+        value = uriString?.let { target ->
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { decodeSampledCover(context, target, maxLongestPx) }.getOrNull()
+            }
+        }
+    }
+    return bitmap
+}
+
+private fun decodeSampledCover(
+    context: android.content.Context,
+    uriString: String,
+    maxLongestPx: Int,
+): android.graphics.Bitmap? {
+    // 扫描器给的封面是绝对路径，必须先补成 file:// 才能过 ContentResolver
+    val uri = NpCoverAccent.coverUriOf(uriString)
+    val resolver = context.contentResolver
+    // 第一段只读尺寸：`decodeStream` 返回的是 Bitmap，`inJustDecodeBounds` 下它**恒为 null**，
+    // 所以这里不能拿返回值判成败（写了 `?: return null` 会让每张封面都解不出来），
+    // 成败看 `outWidth`。
+    val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    resolver.openInputStream(uri)?.use { stream ->
+        android.graphics.BitmapFactory.decodeStream(stream, null, bounds)
+    }
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    val longest = maxOf(bounds.outWidth, bounds.outHeight)
+    var sample = 1
+    while (longest / sample > maxLongestPx) sample *= 2
+    val opts = android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+    return resolver.openInputStream(uri)?.use { stream ->
+        android.graphics.BitmapFactory.decodeStream(stream, null, opts)
     }
 }
 
@@ -329,21 +408,9 @@ internal fun MiniCoverImage(
     contentDescription: String?,
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
+    maxLongestPx: Int = 256,
 ) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val bitmap by androidx.compose.runtime.produceState<android.graphics.Bitmap?>(
-        initialValue = null,
-        key1 = uriString,
-    ) {
-        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching {
-                val uri = uriString.toUri()
-                context.contentResolver.openInputStream(uri)?.use { stream ->
-                    android.graphics.BitmapFactory.decodeStream(stream)
-                }
-            }.getOrNull()
-        }
-    }
+    val bitmap = rememberCoverBitmap(uriString, maxLongestPx)
     val image = bitmap
     if (image != null) {
         androidx.compose.foundation.Image(

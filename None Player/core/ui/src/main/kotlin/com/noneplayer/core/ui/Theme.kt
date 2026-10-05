@@ -93,10 +93,17 @@ private val DarkColors: ColorScheme = darkColorScheme().applyInk(NpInkDark)
  * 选择 PixelCopy 而非 GraphicsLayer 录制：Compose 的延迟图层机制会让
  * `drawContent()` 录制漏掉走独立 RenderNode 的内容（卡片/面板等），抓帧不完整；
  * PixelCopy 直接取合成后的窗口像素，所见即所得（降采样，淡化期间肉眼无差）。
+ *
+ * 性能档位（[motionQuality]）传的是**用户显式选的那一档**，null 表示"跟随自动判定"：
+ * 实际生效值 = 用户档与设备自动档的**低者**，再叠加播放中降档（§9.6/§9.4）。
+ * 这条规则的唯一落点就在这里，组件侧一律只读 [LocalNpMotionQuality]。
  */
 @Composable
 fun NonePlayerTheme(
     darkTheme: Boolean = isSystemInDarkTheme(),
+    motionQuality: NpMotionQuality? = null,
+    isDesktopLike: Boolean = false,
+    decodingVideo: Boolean = false,
     content: @Composable () -> Unit,
 ) {
     val context = LocalContext.current
@@ -109,6 +116,13 @@ fun NonePlayerTheme(
     // 不下发的话，每个卡片节点各自 remember 一次 ContentResolver 读取——
     // 列表项滚出/滚回会重新组合、重新读，是滚动期一笔纯浪费。
     val reduceMotion = remember(context) { readSystemReduceMotion(context) }
+    // 性能档位：设备实况 → 用户上限 → 播放中降档，三步在一个地方算完再下发。
+    // 组件只读 [LocalNpMotionQuality]，不许自己判 SDK / 内存 / 播放状态。
+    val effectiveQuality = remember(motionQuality, isDesktopLike, decodingVideo) {
+        val auto = autoMotionQuality(context, isDesktopLike, decodingVideo)
+        val base = motionQuality?.let { NpMotionQuality.lowerOf(it, auto) } ?: auto
+        if (decodingVideo) base.forPlayback() else base
+    }
 
     LaunchedEffect(darkTheme) {
         // 已经切过了（例如快速连点后 effect 重跑）：把可能残留的冻结帧摘掉再退出。
@@ -126,7 +140,10 @@ fun NonePlayerTheme(
             }
             appliedDark = darkTheme
             if (captured != null) {
-                frozenAlpha.animateTo(0f, tween(SCHEME_ANIMATION_MS, easing = LinearEasing))
+                // 这里在协程里，调不到 @Composable 的 npDuration，就按同一份 effectiveQuality
+                // 折算——不折的话"移除动画"设备上切主题仍会淡出 300ms。
+                val ms = if (reduceMotion) 0 else effectiveQuality.scaled(SCHEME_ANIMATION_MS)
+                frozenAlpha.animateTo(0f, tween(ms, easing = LinearEasing))
             }
         } finally {
             // **必须在 finally 里摘帧**：`animateTo` 在 effect 被取消时会抛
@@ -149,6 +166,7 @@ fun NonePlayerTheme(
             CompositionLocalProvider(
                 LocalNpInk provides if (appliedDark) NpInkDark else NpInkLight,
                 LocalNpReduceMotion provides reduceMotion,
+                LocalNpMotionQuality provides effectiveQuality,
                 content = content,
             )
         }

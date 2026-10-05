@@ -20,6 +20,11 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.NpEasing
+import com.noneplayer.core.ui.npDuration
+import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.ui.rememberReduceMotion
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.observe
 import kotlinx.coroutines.flow.Flow
@@ -106,6 +111,16 @@ fun KernelNavHost(
         deepLinkIntents?.collect { navController.handleDeepLink(it) }
     }
 
+    // 时长读在组合期：`npDuration` 要取 LocalNpMotionQuality，而下面 NavHost 的
+    // enter/exit lambda 跑在过渡作用域里，拿不到组合上下文。
+    // Reduce Motion 下整页只剩淡入淡出，且收成 `ReduceFade`(120)——路由位移是最容易被
+    // 晕眩感抓住的一类动画，系统「移除动画」必须能一次把它压掉。
+    val reduceMotion = rememberReduceMotion()
+    val navFadeMs = if (reduceMotion) npDuration(Motion.ReduceFade) else npDuration(Motion.NavFade)
+    val navEnterMs = npDuration(Motion.NavEnter)
+    val navExitMs = if (reduceMotion) npDuration(Motion.ReduceFade) else npDuration(Motion.NavExit)
+    val navSlideAllowed = npDisplacementAllowed()
+
     NavHost(
         navController = navController,
         startDestination = SHELL_ROUTE,
@@ -114,14 +129,20 @@ fun KernelNavHost(
         // 关于/插件页）不经过 Shell——不在这里铺底，它们会露出窗口默认背景
         // （浅色系统主题下的白色），暗色主题下就是"顶栏黑、内容白"的断头效果。
         modifier = modifier.background(MaterialTheme.colorScheme.background),
-        // iOS push 式转场：新页自右轻滑入场，返回时反向滑出；进出伴随淡入淡出
+        // iOS push 式转场：新页自右轻滑入场，返回时反向滑出；进出伴随淡入淡出。
+        // 时长走 §7.2 的 Nav* 令牌（Q20：裸 tween 例外清零），档位换算在组合期完成——
+        // 下面的 lambda 跑在 EnterTransitionScope 里，读不到组合上下文。
         enterTransition = {
-            fadeIn(tween(240)) + slideInHorizontally(tween(280)) { it / 4 }
+            fadeIn(tween(navFadeMs, easing = NpEasing.Silk)) +
+                slideInHorizontally(tween(navEnterMs, easing = NpEasing.Silk)) { if (navSlideAllowed) it / 4 else 0 }
         },
-        exitTransition = { fadeOut(tween(180)) },
-        popEnterTransition = { fadeIn(tween(240)) },
+        exitTransition = { fadeOut(tween(navExitMs, easing = NpEasing.SilkExit)) },
+        popEnterTransition = { fadeIn(tween(navFadeMs, easing = NpEasing.Silk)) },
         popExitTransition = {
-            fadeOut(tween(180)) + slideOutHorizontally(tween(280)) { it / 4 }
+            // 返回时旧页往**左**退出（`-it/4`）：与 push 的入场方向成对，
+            // 写成 `it / 4` 会让"返回"读成"又推进了一页"。
+            fadeOut(tween(navExitMs, easing = NpEasing.SilkExit)) +
+                slideOutHorizontally(tween(navEnterMs, easing = NpEasing.SilkExit)) { if (navSlideAllowed) -it / 4 else 0 }
         },
         builder = graphBuilder,
     )

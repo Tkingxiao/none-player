@@ -5,9 +5,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
@@ -17,11 +19,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlin.math.min
 
 
 /**
@@ -38,10 +42,16 @@ import androidx.compose.ui.unit.dp
  */
 
 /**
- * 条材质：**不透明底** + 顶边 1px 高光 + 可选底边发丝线。
+ * 条材质：**不透明底** + 顶边 1px 高光 + 可选顶/底发丝线。
  *
  * 用于 `.topbar` / `.playerbar` / `.mini` / `.tabbar`——它们**贴在滚动内容之上**，
  * 所以不给投影（投影会把"浮层"读成"卡片"），层次只靠高光与描边表达。
+ *
+ * 两根线各有语义，别混用（§4.2 / §4.3）：
+ * - [topHighlight] 是**高光**：`ink.edge`，只画中间一段（两端内缩 16dp 后淡出），
+ *   说"这里有一块实体的边、光从上方来"。四边等亮就没有玻璃味。
+ * - [topHairline] / [bottomHairline] 是**发丝线**：`ink.border` 实色通栏，
+ *   说"内容到此被干净切断"，只在语义边界出现。
  *
  * 不透明是刻意的：半透明条会让滚动内容透出来干扰阅读，且迫使每帧做一次
  * 背后取样。层次改由 1px 发丝线承担，视觉更稳、绘制更省。
@@ -59,13 +69,10 @@ fun Modifier.npGlassSurface(
         if (topHairline) {
             Modifier.drawWithContent {
                 drawContent()
-                val y = 0.6f.dp.toPx()
                 drawLine(
-                    brush = Brush.horizontalGradient(
-                        listOf(Color.Transparent, ink.edge, Color.Transparent),
-                    ),
-                    start = Offset(0f, y),
-                    end = Offset(size.width, y),
+                    color = ink.border,
+                    start = Offset(0f, 0.5f.dp.toPx()),
+                    end = Offset(size.width, 0.5f.dp.toPx()),
                     strokeWidth = 1.dp.toPx(),
                 )
             }
@@ -161,6 +168,10 @@ fun Modifier.npTopHairline(ink: InkTokens): Modifier = drawWithContent {
  *
  * Compose 的 `shadow` 没有 spread 参数，用一个居中构图的大 elevation + 透明 ambient
  * 近似：负扩散的效果是投影比元素本身窄，读起来是"浮起来"而不是"描了一圈黑边"。
+ *
+ * elevation 乘上档位的 [NpMotionQuality.shadowFactor]：阴影是逐帧的高斯，轻量档减半
+ * （18→9dp）换回的是滚动期一整块离屏合成。**只缩高度不改颜色与规则**——
+ * "只有 L3 有阴影、L2 永不、L1 卡片无阴影"这条分层纪律在三档都一样。
  */
 @Composable
 fun Modifier.npShadow(
@@ -168,7 +179,7 @@ fun Modifier.npShadow(
     shape: Shape,
     elevation: Dp = 18.dp,
 ): Modifier = this.shadow(
-    elevation = elevation,
+    elevation = elevation * npQuality().shadowFactor,
     shape = shape,
     clip = false,
     ambientColor = ink.shadowColor.copy(alpha = if (ink.isDark) 0.40f else 0.14f),
@@ -204,13 +215,13 @@ fun NpGlass(
 /**
  * 外壳条（顶栏 / 标签栏 / 迷你条）的底色：**不透明**。
  *
- * 此前这里是设计稿 `backdrop-filter: blur(22px)` 的落地（Haze 离屏模糊 +
- * 内容层 `hazeSource` 取样）。用户明确要求标签栏与顶栏不做半透明后，模糊
- * 已经**不可见**——不透明底之后没有任何"背后的内容"可模糊——而它仍是每次
- * 滚动/切换都要付出的一次全屏离屏渲染，是掉帧的主要来源。故一并移除。
+ * 定稿依据是 R1：**禁止**任何背后有滚动内容或视频帧的面做模糊——逐帧全屏离屏采样
+ * 是列表滚动掉帧的最大单一来源，而条底一旦不透明，模糊就没有可被看见的对象。
+ * 层次改由"光"表达：顶边 1px 高光（[npTopHairline]）说"这里有一块实体的边"，
+ * 发丝线说"内容到此被干净切断"。
  *
- * 顶边 1px 高光与底边发丝线由调用点自行叠加（见 [npGlassSurface] / 各条实现），
- * 这里只负责"底色是实心的"这一条事实。
+ * 横向的条一律走 [npGlassSurface]（它就是"这块底 + 那两根线"的完整配方）；
+ * 只剩竖条（`.rail`）用得上这个裸底——它没有"顶边"可言。
  */
 fun Modifier.npGlassChrome(ink: InkTokens): Modifier = this.background(ink.glass)
 
@@ -228,5 +239,99 @@ fun NpLeadLine(modifier: Modifier = Modifier) {
             .fillMaxWidth()
             .height(NpDimens.railLeadLine)
             .background(LocalNpInk.current.accent),
+    )
+}
+
+/**
+ * L4 渐隐遮罩（§4.5，R11）：一块"和它要遮住的那个底同色"的渐变，
+ * 用来把滚动内容干净地收进条下 / 画面边缘，而不是让内容被硬切一刀。
+ *
+ * 它**不是**模糊的替代品：不采样背后像素，只画一层带 alpha 渐变的实心色，
+ * 所以零离屏成本——这正是 R1 之后本应用唯一允许的"边缘柔化"手段。
+ *
+ * 两处纪律：
+ * - [color] 必须等于被遮住的底（页面底取 `ink.bg`、Sheet 内取 `ink.surface`）。
+ *   亮色主题下**不许**出现黑渐变——会读成"脏边"；只有遮在**视频画面**上才允许纯黑
+ *   （视频不是主题色，四种主题下它都是那块亮的东西）。
+ * - [startAlpha] 默认 0.9 而非 1.0：留一点"底下还在动"的暗示，
+ *   完全不透的边带会读成一条色块压在内容上。
+ */
+@Composable
+fun NpMaskFade(
+    color: Color,
+    modifier: Modifier = Modifier,
+    vertical: Boolean = true,
+    fromTop: Boolean = true,
+    size: Dp = 88.dp,
+    startAlpha: Float = 0.9f,
+    stops: Float = 0.55f,
+) {
+    fun at(alpha: Float) = color.copy(alpha = alpha)
+    // 中段过渡位按渐变**起点**算：fromTop=false 时整条曲线镜像，
+    // 否则"从下往上渐隐"会变成"下面先淡掉"，读起来方向反了。
+    val gradientStops = if (fromTop) {
+        arrayOf(0f to at(startAlpha), stops to at(startAlpha * 0.30f), 1f to at(0f))
+    } else {
+        val mirrored = 1f - stops
+        arrayOf(0f to at(0f), mirrored to at(startAlpha * 0.30f), 1f to at(startAlpha))
+    }
+    val brush = if (vertical) {
+        Brush.verticalGradient(*gradientStops)
+    } else {
+        Brush.horizontalGradient(*gradientStops)
+    }
+    Box(
+        modifier = modifier
+            .then(if (vertical) Modifier.fillMaxWidth().height(size) else Modifier.width(size).fillMaxHeight())
+            .background(brush),
+    )
+}
+
+/**
+ * [NpMaskFade] 的 modifier 形态，专供**横滑列表两端**（§4.5 第三处）：
+ * 左右各一条 [fadeSize] 宽的渐隐带，颜色同页面底。
+ *
+ * 之所以是 modifier 而不是两个叠在上面的 [NpMaskFade]：rail 的容器就是 `LazyRow`，
+ * 用组合形态得为每个 rail 多包一层 Box + 两次 align，五处重复；
+ * 这里在 `drawWithContent` 之后补两次 `drawRect`，成本与语义都完全一致。
+ *
+ * 两端**常驻**而不按滚动位置显隐是有意的：rail 有 `contentPadding`（14–20dp gutter），
+ * 渐隐最强的那一段正好落在留白上，摸不到第一格的封面；
+ * 换来的是不需要读 `LazyListState`、滚到底也不会看到"色带跳一下"。
+ */
+fun Modifier.npMaskFadeEdges(
+    color: Color,
+    fadeSize: Dp = 24.dp,
+    startAlpha: Float = 0.9f,
+): Modifier = drawWithContent {
+    drawContent()
+    val band = min(fadeSize.toPx(), size.width / 2f)
+    if (band <= 0f) return@drawWithContent
+    val h = size.height
+    fun at(alpha: Float) = color.copy(alpha = alpha)
+    drawRect(
+        brush = Brush.horizontalGradient(
+            colorStops = arrayOf(
+                0f to at(startAlpha),
+                0.55f to at(startAlpha * 0.30f),
+                1f to at(0f),
+            ),
+            startX = 0f,
+            endX = band,
+        ),
+        size = Size(band, h),
+    )
+    drawRect(
+        brush = Brush.horizontalGradient(
+            colorStops = arrayOf(
+                0f to at(0f),
+                0.45f to at(startAlpha * 0.30f),
+                1f to at(startAlpha),
+            ),
+            startX = size.width - band,
+            endX = size.width,
+        ),
+        topLeft = Offset(size.width - band, 0f),
+        size = Size(band, h),
     )
 }

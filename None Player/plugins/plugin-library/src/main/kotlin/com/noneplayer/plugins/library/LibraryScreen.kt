@@ -7,6 +7,8 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -28,7 +30,9 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -80,12 +84,14 @@ import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.LocalNpTopBarInset
 import com.noneplayer.core.ui.NpAppTopBar
 import com.noneplayer.core.ui.NpCarouselItem
+import com.noneplayer.core.ui.NpChip
 import com.noneplayer.core.ui.NpCoverBox
 import com.noneplayer.core.ui.NpCoverPlaceholder
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEmptyState
 import com.noneplayer.core.ui.NpFilterSelect
 import com.noneplayer.core.ui.NpFolderCard
+import com.noneplayer.core.ui.NpHaptic
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpListRow
@@ -99,6 +105,7 @@ import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSectionHead
 import com.noneplayer.core.ui.NpSettingRow
+import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpSegmented
 import com.noneplayer.core.ui.NpSheet
 import com.noneplayer.core.ui.NpSkeleton
@@ -107,7 +114,12 @@ import com.noneplayer.core.ui.formatFileSize
 import com.noneplayer.core.ui.formatRelativeDate
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npClickable
+import com.noneplayer.core.ui.npItemFadeSpec
 import com.noneplayer.core.ui.npPressScale
+import com.noneplayer.core.ui.npMaskFadeEdges
+import com.noneplayer.core.ui.npStaggeredEntry
+import com.noneplayer.core.ui.npStaggerWindow
+import com.noneplayer.core.ui.rememberNpHaptics
 import com.noneplayer.kernel.api.ContextMenuItem
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.coroutineScope
@@ -123,6 +135,7 @@ import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
+import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.NpTabChannel
@@ -138,14 +151,15 @@ import kotlinx.coroutines.launch
  * 排序方式/视图风格/列数经 AppSettings 持久化；扫描目录未选择时引导选择
  * （不选择文件夹不扫描）。
  *
- * [forcedView] 供 Tab 使用：指定后视图固定（如"文件夹"Tab），
- * 且标题行不再显示视图切换项；null 时跟随用户持久化偏好。
+ * [forcedView] 必传：决定本页渲染哪套版式（首页 = VIDEOS，文件夹 Tab = FOLDERS）。
+ * 曾经它可空、回落到持久化偏好 `libraryView`——该偏好的写入入口（标题行视图切换）
+ * 移除后，旧数据会把首页永久钉在文件夹界面（用户实报），于是收窄为必传。
  *
  * 状态机：无来源 → 空状态；缺权限 → 授权引导；未选目录 → 选择文件夹；
  * 有目录未扫描 → 开始扫描；有数据 → 封面墙/文件夹卡片。
  */
 @Composable
-fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
+fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val kernel = LocalKernel.current
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -163,12 +177,11 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     val sortAscending by settings.sortAscending.collectAsStateWithLifecycle(false)
     val gridColumns by settings.gridColumns.collectAsStateWithLifecycle(2)
     val folderUris by settings.scanFolderUris.collectAsStateWithLifecycle(initialValue = emptyList())
-    val prefView by settings.libraryView.collectAsStateWithLifecycle(LibraryView.VIDEOS)
     // 设计稿 viewToggle 的 `state.view`：网格 / 列表，跨页面共用并持久化
     val listViewStyle by settings.listViewStyle.collectAsStateWithLifecycle("grid")
     val onViewStyle: (String) -> Unit = { scope.launch { settings.setListViewStyle(it) } }
-    // forcedView 供 Tab 固定视图；普通入口跟随用户持久化偏好
-    val viewMode = forcedView ?: prefView
+    // 视图由调用方（Tab）固定：首页 Home 版式、文件夹 Tab 文件夹版式
+    val viewMode = forcedView
     // B5 修复：rememberSaveable，横竖屏切换/进程回收后文件夹选中态不丢
     var selectedFolder by rememberSaveable { mutableStateOf<String?>(null) }
     // 页内层级：聚合列表（继续观看 / 全部视频 / …）不下探到导航栈，
@@ -187,7 +200,12 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     // 未注册实现时详情页回退为整页播放——缺插件不该让"播放"这个动作消失。
     val inlinePlayers by remember { kernel.registry.observe<InlinePlaybackProvider>() }
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<InlinePlaybackProvider>())
-    val inlinePlayer = inlinePlayers.firstOrNull()
+    // §8.2 路径 A：外壳已经把右栏让给播放器时，详情页不再自带内联画面——
+    // 一台播放器只有一个输出 Surface，两处同时挂会把先挂的那个顶成黑屏。
+    // 此时详情页的「播放」= 要整页播放器（窗口化），不是要沉浸全屏；
+    // 显式的全屏意图留给播放页里那个 ⛶。
+    val paneOccupied = LocalNpPaneOccupied.current
+    val inlinePlayer = if (paneOccupied) null else inlinePlayers.firstOrNull()
     /** 点视频的落点分派：类 PC 先看详情；其余形态保持"直接进播放页" */
     val openDetailOrPlayer: (MediaItem) -> Unit = { item ->
         if (windowInfo.isDesktopLike) detailItem = item else openPlayer(navigator, item)
@@ -339,10 +357,13 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     val topBarInset = LocalNpTopBarInset.current
     val pullIndicatorTop = if (topBarInset == Dp.Unspecified) 8.dp else topBarInset + 8.dp
     val eventBus = remember { kernel.services.get<EventBus>() }
+    val haptics = rememberNpHaptics()
 
     fun refresh() {
         if (refreshing || sources.isEmpty()) return
         refreshing = true
+        // M14（§7.5 `Tick`）：真的开始重扫才响——空来源/正在扫时按下去没有变化，不该给反馈
+        haptics.performHaptic(NpHaptic.Tick)
         scope.launch {
             coroutineScope {
                 // 先订阅再触发扫描，避免扫描完成的事件早于订阅到达而错过
@@ -381,7 +402,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
     val subtitle: String
     when {
         detailItem != null -> {
-            title = "视频详情"
+            // 顶栏标题直接用视频名（卡片同款展示名），不再写死「视频详情」
+            title = detailItem!!.cardTitle
             subtitle = detailItem!!.folder?.takeIf { it.isNotBlank() } ?: "本地视频"
         }
         aggregate != null -> {
@@ -495,7 +517,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                                 resumeMs = positions[detail.id] ?: 0L,
                                 navigator = navigator,
                                 inlinePlayer = inlinePlayer,
-                                onFullscreen = { openPlayer(navigator, it) },
+                                // 详情页内嵌画面的 ⛶ = 明确的全屏意图（落地成沉浸）；
+                                // 右栏已接管播放时这里是"要整页播放器"，保持窗口化（§14 #16）
+                                onFullscreen = { openPlayer(navigator, it, immersive = !paneOccupied) },
                                 onSelect = { detailItem = it },
                             )
                         }
@@ -555,6 +579,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                             sortMode = sortMode,
                             sortAscending = sortAscending,
                             gridColumns = gridColumns,
+                            onGridColumns = { scope.launch { settings.setGridColumns(it) } },
                             viewStyle = listViewStyle,
                             onViewStyle = onViewStyle,
                             filter = filter,
@@ -572,6 +597,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                             selected = currentFolder,
                             positions = positions,
                             gridColumns = gridColumns,
+                            onGridColumns = { scope.launch { settings.setGridColumns(it) } },
                             sortMode = sortMode,
                             sortAscending = sortAscending,
                             viewStyle = listViewStyle,
@@ -630,6 +656,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView? = null) {
                 confirmButton = {
                     androidx.compose.material3.TextButton(
                         onClick = {
+                            // §5.5 危险变体（`Warning`）：在**确认落下**的那一帧响，
+                            // 不是打开对话框时——对话框出现是询问，不是后果。
+                            haptics.performHaptic(NpHaptic.Warning)
                             confirmClearHistory = false
                             scope.launch {
                                 history.clearHistory()
@@ -948,7 +977,9 @@ private fun FolderRailOrGrid(
         )
     }
     if (compact) {
+        val ink = LocalNpInk.current
         LazyRow(
+            modifier = Modifier.npMaskFadeEdges(ink.bg),
             contentPadding = PaddingValues(horizontal = gutter),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -1026,13 +1057,17 @@ private fun MediaRail(
     compact: Boolean,
     onOpen: (MediaItem) -> Unit,
 ) {
+    val ink = LocalNpInk.current
     val gutter = if (compact) 14.dp else 20.dp
+    // 首屏窗口取在容器外层：rail 右端滚进来的卡片不再补播入场动画
+    val staggerWindow = npStaggerWindow()
     LazyRow(
+        modifier = Modifier.npMaskFadeEdges(ink.bg),
         contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        items(items, key = { "${it.sourceId}:${it.id}" }) { item ->
-            NpCarouselItem {
+        itemsIndexed(items, key = { _, item -> "${item.sourceId}:${item.id}" }) { index, item ->
+            NpCarouselItem(modifier = Modifier.npStaggeredEntry(index, staggerWindow)) {
                 MediaCardBody(item = item, onOpen = onOpen)
             }
         }
@@ -1121,6 +1156,7 @@ internal fun MediaListRow(
     item: MediaItem,
     compact: Boolean,
     onOpen: (MediaItem) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val isAudio = item.kind == MediaKind.AUDIO
     val hue = NpMediaColor.itemHue(item.folder, isAudio)
@@ -1138,7 +1174,7 @@ internal fun MediaListRow(
         meta = meta,
         onClick = { onOpen(item) },
         onLongClick = longPress?.let { cb -> { cb(item, bounds) } },
-        modifier = Modifier.onGloballyPositioned { bounds = it.boundsInWindow() },
+        modifier = modifier.onGloballyPositioned { bounds = it.boundsInWindow() },
         compact = compact,
         folderTag = item.folder,
         folderTagIsAudio = isAudio,
@@ -1257,6 +1293,7 @@ private fun FolderBrowser(
     selected: FolderNode?,
     positions: Map<String, Long>,
     gridColumns: Int,
+    onGridColumns: (Int) -> Unit,
     sortMode: SortMode,
     sortAscending: Boolean,
     viewStyle: String,
@@ -1281,6 +1318,8 @@ private fun FolderBrowser(
     val shownVideos = remember(node.directVideos, filter, positions) {
         filterList(node.directVideos, filter, positions)
     }
+    val staggerWindow = npStaggerWindow(node.path)
+    val itemFade = npItemFadeSpec()
 
     LazyVerticalGrid(
         // 设计稿 compact 档媒体网格恒 2 列（`.tier-compact .grid.v` 607）：
@@ -1327,6 +1366,9 @@ private fun FolderBrowser(
                 filterEnabled = node.totalCount > 0,
                 viewStyle = viewStyle,
                 onViewStyle = onViewStyle,
+                gridColumns = gridColumns,
+                onGridColumns = onGridColumns,
+                compact = compact,
                 sortMode = sortMode,
                 sortAscending = sortAscending,
                 onSort = onSort,
@@ -1338,7 +1380,7 @@ private fun FolderBrowser(
                 name = child.name,
                 countLabel = "${child.totalCount} 项",
                 onClick = { onOpenFolder(child) },
-                modifier = Modifier.animateItem(),
+                modifier = Modifier.animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade),
                 cover = {
                     FolderCover(
                         node = child,
@@ -1348,23 +1390,32 @@ private fun FolderBrowser(
             )
         }
         if (viewStyle == "list") {
-            items(
+            gridItemsIndexed(
                 shownVideos,
-                key = { "video:${it.sourceId}:${it.id}" },
-                span = { GridItemSpan(maxLineSpan) },
-            ) { item ->
-                MediaListRow(item = item, compact = compact, onOpen = onOpenVideo)
+                key = { _, item -> "video:${item.sourceId}:${item.id}" },
+                span = { _, _ -> GridItemSpan(maxLineSpan) },
+            ) { index, item ->
+                MediaListRow(
+                    item = item,
+                    compact = compact,
+                    onOpen = onOpenVideo,
+                    modifier = Modifier
+                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .npStaggeredEntry(index, staggerWindow),
+                )
             }
         } else {
-            items(
+            gridItemsIndexed(
                 shownVideos,
-                key = { "video:${it.sourceId}:${it.id}" },
-            ) { item ->
+                key = { _, item -> "video:${item.sourceId}:${item.id}" },
+            ) { index, item ->
                 MediaCardBody(
                     item = item,
                     onOpen = onOpenVideo,
                     showFolderTag = true,
-                    modifier = Modifier.animateItem(),
+                    modifier = Modifier
+                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .npStaggeredEntry(index, staggerWindow),
                 )
             }
         }
@@ -1630,11 +1681,12 @@ private fun gridMinCell(gridColumns: Int): Dp =
     if (gridColumns <= 2) 176.dp else 120.dp
 
 /**
- * 网格列数：紧凑档恒 2 列（设计稿 `.tier-compact .grid.v{grid-template-columns:repeat(2,1fr)}`），
- * 其余档自适应。
+ * 网格列数（§5.7）：**列数偏好只在紧凑档生效**——紧凑档没有自适应可言，用户说几列就几列
+ * （默认 2 列，与设计稿 `.tier-compact .grid.v` 同值）；`Medium/Expanded` 的列数由窗口宽度
+ * 决定（E47），把"双列/三列"摆给它们是欺骗，所以视图面板里那排列数 chips 只在紧凑档出现。
  */
 internal fun gridColumnsFor(compact: Boolean, gridColumns: Int): GridCells =
-    if (compact) GridCells.Fixed(2) else GridCells.Adaptive(gridMinCell(gridColumns))
+    if (compact) GridCells.Fixed(gridColumns) else GridCells.Adaptive(gridMinCell(gridColumns))
 
 /**
  * 筛选键 → 列表（设计稿 `filterList`）。
@@ -1659,10 +1711,17 @@ internal fun filterList(
 }
 
 /**
- * 控件行（设计稿 `.sec-head` 右侧那三个控件）：筛选 fsel + 伸缩 + 视图切换 + 排序 + 升降序。
+ * 控件行（§5.7）：第一行 筛选 + 升降序 + 视图钮，第二行**排序 chips 横排**。
+ *
+ * 排序不再是下拉：四个档位本身就值得占一排——一键切换、当前档位一眼可见。
+ * 原先它是 `NpFilterSelect`（点开→列表→选），改档要两次点击，而且选中态藏在
+ * 触发钮的文字里，不看那两个字就不知道现在按什么排。
+ *
+ * 视图模式（网格/列表）与列数收进面板：列数只在紧凑档出现——`Medium/Expanded`
+ * 下列数由窗口宽度自适应，给用户一个"双列/三列"开关是欺骗（§5.7）。
  *
  * 升降序用**文字**而不是图标：设计稿的 `I.sortIco` 是"上下双箭头"，正序倒序画的是
- * 同一个字形，只靠颜色区分等于让用户猜。这里给一个 28dp 的文字 pill（升序/降序），
+ * 同一个字形，只靠颜色区分等于让用户猜。这里给一个 34dp 的文字 pill（升序/降序），
  * 一眼可读，且与左侧 `.fsel-btn` 的圆角描边同族。
  */
 @Composable
@@ -1672,67 +1731,115 @@ private fun ControlsRow(
     filterEnabled: Boolean,
     viewStyle: String,
     onViewStyle: (String) -> Unit,
+    gridColumns: Int,
+    onGridColumns: (Int) -> Unit,
+    compact: Boolean,
     sortMode: SortMode,
     sortAscending: Boolean,
     onSort: (SortMode) -> Unit,
     onToggleAscending: (Boolean) -> Unit,
 ) {
     val ink = LocalNpInk.current
-    Row(
+    var viewSheetVisible by rememberSaveable { mutableStateOf(false) }
+    Column(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        NpFilterSelect(
-            label = FilterKey.labelOf(filter),
-            icon = NpIcon.Film,
-            options = FilterKey.entries.map { it.label },
-            selected = FilterKey.labelOf(filter),
-            onSelect = { label -> onFilter(FilterKey.keyOf(label)) },
-            enabled = filterEnabled,
-        )
-        Spacer(modifier = Modifier.weight(1f))
-        // 设计稿 folderView 控件行顺序：filter → sort → view（视图切换排在排序之后）
-        NpFilterSelect(
-            label = sortMode.label,
-            icon = NpIcon.Sort,
-            options = SortMode.entries.map { it.label },
-            selected = sortMode.label,
-            onSelect = { label ->
-                SortMode.entries.firstOrNull { it.label == label }?.let(onSort)
-            },
-            alignEnd = true,
-        )
-        Box(
-            modifier = Modifier
-                .height(NpDimens.chipHeight)
-                .clip(RoundedCornerShape(NpRadius.chip))
-                .border(
-                    width = 1.dp,
-                    color = if (sortAscending) ink.accentLine else ink.border,
-                    shape = RoundedCornerShape(NpRadius.chip),
-                )
-                .npPressScale(onClick = { onToggleAscending(!sortAscending) }, pressedScale = 0.96f)
-                .padding(horizontal = 12.dp),
-            contentAlignment = Alignment.Center,
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Text(
-                text = if (sortAscending) "升序" else "降序",
-                style = NpMonoSmall,
-                color = if (sortAscending) ink.accent else ink.muted,
-                maxLines = 1,
+            NpFilterSelect(
+                label = FilterKey.labelOf(filter),
+                icon = NpIcon.Film,
+                options = FilterKey.entries.map { it.label },
+                selected = FilterKey.labelOf(filter),
+                onSelect = { label -> onFilter(FilterKey.keyOf(label)) },
+                enabled = filterEnabled,
+            )
+            Spacer(modifier = Modifier.weight(1f))
+            Box(
+                modifier = Modifier
+                    .height(NpDimens.chipHeight)
+                    .clip(RoundedCornerShape(NpRadius.chip))
+                    .border(
+                        width = 1.dp,
+                        color = if (sortAscending) ink.accentLine else ink.border,
+                        shape = RoundedCornerShape(NpRadius.chip),
+                    )
+                    .npPressScale(onClick = { onToggleAscending(!sortAscending) }, pressedScale = 0.96f)
+                    .padding(horizontal = 12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = if (sortAscending) "升序" else "降序",
+                    style = NpMonoSmall,
+                    color = if (sortAscending) ink.accent else ink.muted,
+                    maxLines = 1,
+                )
+            }
+            NpIconButton(
+                icon = if (viewStyle == "list") NpIcon.ListView else NpIcon.GridView,
+                contentDescription = "视图模式",
+                onClick = { viewSheetVisible = true },
+                selected = viewSheetVisible,
             )
         }
-        // 设计稿 viewToggle：网格/列表切换（34dp 图标 seg）
-        NpSegmented(
-            options = listOf("grid", "list"),
-            selected = viewStyle,
-            icons = listOf(NpIcon.GridView, NpIcon.ListView),
-            itemWidth = 34.dp,
-            onSelect = onViewStyle,
-        )
+        // 排序 chips（§5.7）：窄屏放不下四枚就横滑，不缩字号、不改标签
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 4.dp)
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            SortMode.entries.forEach { mode ->
+                NpChip(
+                    text = mode.label,
+                    selected = mode == sortMode,
+                    onClick = { if (mode != sortMode) onSort(mode) },
+                )
+            }
+        }
+    }
+    if (viewSheetVisible) {
+        NpSheet(onDismiss = { viewSheetVisible = false }, title = "视图") {
+            Text(
+                text = "视图模式",
+                style = NpMonoSmall,
+                color = ink.muted,
+            )
+            NpSegmented(
+                options = listOf("网格", "列表"),
+                selected = if (viewStyle == "list") "列表" else "网格",
+                onSelect = { onViewStyle(if (it == "列表") "list" else "grid") },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+            )
+            if (compact) {
+                Text(
+                    text = "列数",
+                    style = NpMonoSmall,
+                    color = ink.muted,
+                    modifier = Modifier.padding(top = NpSpace.md),
+                )
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(top = 8.dp),
+                ) {
+                    (1..3).forEach { count ->
+                        NpChip(
+                            text = "$count 列",
+                            selected = count == gridColumns,
+                            onClick = { if (count != gridColumns) onGridColumns(count) },
+                        )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1756,6 +1863,7 @@ private fun AggregateList(
     sortMode: SortMode,
     sortAscending: Boolean,
     gridColumns: Int,
+    onGridColumns: (Int) -> Unit,
     viewStyle: String,
     onViewStyle: (String) -> Unit,
     filter: String,
@@ -1799,6 +1907,8 @@ private fun AggregateList(
     val episodes = remember(multi, all) {
         multi.firstOrNull()?.folder?.let { f -> all.filter { it.folder == f } }.orEmpty()
     }
+    val staggerWindow = npStaggerWindow(mode)
+    val itemFade = npItemFadeSpec()
 
     LazyVerticalGrid(
         columns = gridColumnsFor(compact, gridColumns),
@@ -1848,6 +1958,9 @@ private fun AggregateList(
                 filterEnabled = true,
                 viewStyle = viewStyle,
                 onViewStyle = onViewStyle,
+                gridColumns = gridColumns,
+                onGridColumns = onGridColumns,
+                compact = compact,
                 sortMode = sortMode,
                 sortAscending = sortAscending,
                 onSort = onSort,
@@ -1872,20 +1985,32 @@ private fun AggregateList(
             }
         }
         if (viewStyle == "list") {
-            items(
+            gridItemsIndexed(
                 shown,
-                key = { "${it.sourceId}:${it.id}" },
-                span = { GridItemSpan(maxLineSpan) },
-            ) { item ->
-                MediaListRow(item = item, compact = compact, onOpen = onOpen)
+                key = { _, item -> "${item.sourceId}:${item.id}" },
+                span = { _, _ -> GridItemSpan(maxLineSpan) },
+            ) { index, item ->
+                MediaListRow(
+                    item = item,
+                    compact = compact,
+                    onOpen = onOpen,
+                    modifier = Modifier
+                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .npStaggeredEntry(index, staggerWindow),
+                )
             }
         } else {
-            items(shown, key = { "${it.sourceId}:${it.id}" }) { item ->
+            gridItemsIndexed(
+                shown,
+                key = { _, item -> "${item.sourceId}:${item.id}" },
+            ) { index, item ->
                 MediaCardBody(
                     item = item,
                     onOpen = onOpen,
                     showFolderTag = true,
-                    modifier = Modifier.animateItem(),
+                    modifier = Modifier
+                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .npStaggeredEntry(index, staggerWindow),
                 )
             }
         }
@@ -2029,8 +2154,16 @@ internal val LocalMediaLongPress =
  * E55：编码用 `encode(value, "")` 把允许集显式收到"仅 unreserved 字符"。
  * 单参重载会放行 `& = ? +` 一类分隔符，一个含 `&` 的标题
  * （"Rock & Roll.mkv"）就能把后面的 mime/id 参数整段截掉。
+ *
+ * [immersive]：详情页内嵌播放点「全屏」那一条路径带 `fs=1`——类 PC 档的播放页
+ * 默认窗口化（§14 #16「不隐藏系统栏」），只有明确的全屏意图才落地成沉浸。
  */
-internal fun openPlayer(navigator: Navigator, item: MediaItem, fromStart: Boolean = false) {
+internal fun openPlayer(
+    navigator: Navigator,
+    item: MediaItem,
+    fromStart: Boolean = false,
+    immersive: Boolean = false,
+) {
     fun enc(value: String) = android.net.Uri.encode(value, "")
     navigator.navigate(
         route = "player?uri=${enc(item.uri)}" +
@@ -2038,6 +2171,7 @@ internal fun openPlayer(navigator: Navigator, item: MediaItem, fromStart: Boolea
             "&mime=${enc(item.mimeType)}" +
             "&id=${enc(item.id)}" +
             // § 长按菜单「从头播放」：不恢复断点（路由参数带默认值，属契约增量）
-            (if (fromStart) "&from=start" else ""),
+            (if (fromStart) "&from=start" else "") +
+            (if (immersive) "&fs=1" else ""),
     )
 }

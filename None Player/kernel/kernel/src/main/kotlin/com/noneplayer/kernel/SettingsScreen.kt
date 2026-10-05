@@ -160,6 +160,14 @@ class SettingsViewModel(private val settings: AppSettings) : ViewModel() {
     fun setThemeMode(mode: ThemeMode) {
         viewModelScope.launch { settings.setThemeMode(mode) }
     }
+
+    /** 「性能模式」档位序（R13）：0 轻量 / 1 平衡 / 2 全效，默认平衡 */
+    val motionLevel: StateFlow<Int> = settings.motionLevel
+        .stateIn(viewModelScope, SharingStarted.Eagerly, 1)
+
+    fun setMotionLevel(level: Int) {
+        viewModelScope.launch { settings.setMotionLevel(level) }
+    }
 }
 
 @Composable
@@ -177,6 +185,7 @@ private fun KernelSettingsScreen(
         },
     )
     val themeMode by vm.themeMode.collectAsStateWithLifecycle()
+    val motionLevel by vm.motionLevel.collectAsStateWithLifecycle()
     // 设计稿的主题行图标反映**当前解析后的明暗**（system 跟随系统）
     val darkNow = when (themeMode) {
         ThemeMode.LIGHT -> false
@@ -255,6 +264,18 @@ private fun KernelSettingsScreen(
                                     ?.let(vm::setThemeMode)
                             },
                         )
+                        ValuePickerRow(
+                            title = "性能模式",
+                            // 仪表盘：这一档管的是"开销换多少视觉"，与倍速同类不同值
+                            icon = NpIcon.Speed,
+                            value = MOTION_LEVEL_LABELS[motionLevel.coerceIn(0, 2)],
+                            options = MOTION_LEVEL_LABELS,
+                            onSelect = { label ->
+                                MOTION_LEVEL_LABELS.indexOf(label)
+                                    .takeIf { it >= 0 }
+                                    ?.let(vm::setMotionLevel)
+                            },
+                        )
                         DecoderCapabilityRow()
                         // 插件 / 关于：App 的**正向**增量（设计稿这里只有一行"版本"）。
                         // 两者各自是独立二级页——插件是产品的核心概念且随运行时可增减，
@@ -311,6 +332,14 @@ private fun EyebrowBlock(text: String, gutter: Dp) {
 
 /** 可选的默认倍速档位（设计稿 speed sheet 的 3×2 网格同一组值）。 */
 private val SPEED_OPTIONS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+
+/**
+ * 「性能模式」三档文案（R13），下标即档位序，与 `NpMotionQuality.fromLevel(0/1/2)` 同序。
+ *
+ * 内核骨架层不引 `core:ui` 的档位定义（§13.2 分层）——这里只出文案，
+ * 倍率/模糊/开关那一整套取值由 app 层把档位序换算成 `NpMotionQuality` 喂给主题。
+ */
+private val MOTION_LEVEL_LABELS = listOf("轻量", "平衡", "全效")
 
 private fun speedText(f: Float): String =
     "%.2fx".format(f).removeSuffix("0").removeSuffix(".")
@@ -498,6 +527,8 @@ private fun ValuePickerRow(
                 com.noneplayer.core.ui.NpFilterMenu(
                     options = options,
                     selected = value,
+                    // 落点右对齐（见 [SettingsMenuPositionProvider]），缩放原点跟着贴到右上角
+                    alignEnd = true,
                     onSelect = {
                         onSelect(it)
                         open = false

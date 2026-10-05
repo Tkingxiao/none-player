@@ -2,7 +2,7 @@
 
 插件化微内核视频播放器（Android / Kotlin / Compose）。架构设计见 `../设计文档.md`。
 
-当前完成 **P0 + P1 + P2 阶段 + 批次 1（会话层 / 队列 / 迷你条 / 形态判定层）+ 批次 2（手势层 / 播放页重构）+ 批次 3（画面比例镜像旋转 / 字幕音轨章节 / 仅听音频 / 画中画 / 状态栏）+ 批次 4（内容层：播放历史 / 继续观看 / 搜索 / 收藏 + 自然序与文件名元数据富化）**。批次 1 小米平板 6 真机验收，批次 2–4 虚拟平板（Pixel_Tablet）逐项验收；待办与未覆盖项如实记在《功能审核文档.md》§0，已完成记录见《功能修复档案.md》（批次 4 = §十四，批次 5 前置回合 = §十五）。**批次 5（视觉与动效）尚未开工**，其唯一规格已落盘并签字：`../界面设计路线.md` v1.1。
+当前完成 **P0 + P1 + P2 阶段 + 批次 1（会话层 / 队列 / 迷你条 / 形态判定层）+ 批次 2（手势层 / 播放页重构）+ 批次 3（画面比例镜像旋转 / 字幕音轨章节 / 仅听音频 / 画中画 / 状态栏）+ 批次 4（内容层：播放历史 / 继续观看 / 搜索 / 收藏 + 自然序与文件名元数据富化）**。批次 1 小米平板 6 真机验收，批次 2–4 虚拟平板（Pixel_Tablet）逐项验收；待办与未覆盖项如实记在《功能审核文档.md》§0，已完成记录见《功能修复档案.md》（批次 4 = §十四，批次 5 前置回合 = §十五）。**批次 5（视觉与动效）代码完成**（令牌/材质五件套/Haptics/封面取色/WaveformSeekBar/三档性能模式/E50 快捷键/共享元素规格），模拟器逐项验收与 §14 记账待收口；规格：`../界面设计路线.md` v1.1。**批次 6（plugin-danmaku）已开工**：三格式解析 / 同名匹配 / 设置区块三任务落地，渲染（PlaybackOverlay）待做。
 
 ## 功能
 
@@ -49,7 +49,7 @@
 :app                     # 宿主：装配 Kernel、收集 PluginIndex，无业务逻辑
 :kernel
   ├─ kernel-api          # 扩展点契约（纯 Kotlin）：Plugin / ExtensionPoint / Registry / EventBus / ServiceLocator / Navigator
-  ├─ kernel-ui-api       # Compose 扩展点：ScreenProvider / PlaybackOverlay / SettingsProvider / BottomChromeProvider / KernelNavHost / NpWindowInfo
+  ├─ kernel-ui-api       # Compose 扩展点：ScreenProvider / TabProvider / PlaybackOverlay / SettingsProvider / BottomChromeProvider / DetailPaneProvider（右栏详情，配 LocalNpPaneOccupied 保证同一时刻只有一路 Surface）/ InlinePlaybackProvider / KernelNavHost / NpWindowInfo
   ├─ kernel-ksp          # KSP 处理器：@PluginMarker → 生成 <Xxx>PluginIndex（零反射，R8 安全）
   └─ kernel              # 内核实现：Kernel / DefaultExtensionRegistry / FlowEventBus / PluginSorter / VideoPlayerFactory
 :core

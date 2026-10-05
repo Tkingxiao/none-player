@@ -68,10 +68,10 @@ fun NpToastHost(
     Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
         AnimatedVisibility(
             visible = state.message != null,
-            enter = fadeIn(tween(Motion.Toast)) +
-                slideInVertically(tween(Motion.Toast, easing = NpEasing.Silk)) { it / 2 },
-            exit = fadeOut(tween(Motion.Toast)) +
-                slideOutVertically(tween(Motion.Toast, easing = NpEasing.Silk)) { it / 2 },
+            enter = fadeIn(tween(npDuration(Motion.Toast), easing = NpEasing.Silk)) +
+                slideInVertically(tween(npDuration(Motion.Toast), easing = NpEasing.Silk)) { it / 2 },
+            exit = fadeOut(tween(npDuration(Motion.Toast), easing = NpEasing.SilkExit)) +
+                slideOutVertically(tween(npDuration(Motion.Toast), easing = NpEasing.SilkExit)) { it / 2 },
         ) {
             val message = state.message.orEmpty()
             val shape = RoundedCornerShape(NpRadius.chip)

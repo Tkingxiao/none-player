@@ -3,6 +3,7 @@ package com.noneplayer.core.ui
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 
 /**
@@ -108,19 +109,6 @@ val NpInkLight = InkTokens(
 val LocalNpInk = staticCompositionLocalOf { NpInkDark }
 
 /**
- * alpha 阶梯——"材质感"的来源。组件不许各挑一个 `.5f`，统一走这里对齐。
- */
-object NpAlpha {
-    const val panel = 0.78f          // 玻璃面板底（顶栏 / 迷你条 / Tab 栏 78%）
-    const val panelDense = 0.92f     // 高密度浮层
-    const val field = 0.78f          // 输入框
-    const val row = 0.60f            // 列表行
-    const val rowActive = 0.82f      // 选中行
-    const val chip = 0.68f
-    const val player = 0.91f         // 播放页控制层（近不透明）
-}
-
-/**
  * 圆角阶梯（设计稿 `--r-card / --r-hero / --r-sheet / --r-chip`）。
  *
  * 设计稿只有四档：卡片 16 / 主视觉 24 / 底部面板顶 20 / 丸 999。
@@ -164,12 +152,22 @@ object NpDimens {
     val listRowMin: Dp = 56.dp       // .row-item min-height
     val railWidth: Dp = 80.dp        // .rail
     val railButton: Dp = 64.dp
-    val tabbarHeight: Dp = 64.dp     // .tabbar（含安全区前）
+    val tabbarHeight: Dp = 64.dp     // .tabbar **视觉高**；安全区由 WindowInsets 叠加，组件不许各自加（R7）
     val topbarIcon: Dp = 44.dp       // .iconbtn
     val chipHeight: Dp = 34.dp       // .chip 视觉高
-    val trackLine: Dp = 3.dp         // .track .bar
-    val miniProgress: Dp = 2.dp      // .mini-prog
-    val railLeadLine: Dp = 2.dp      // .mini .lead-line
+    val trackLine: Dp = 3.dp         // .track .bar——可交互大轨（R8）
+    val trackLineDragging: Dp = 4.dp // 大轨拖动中加粗（§5.4）
+    val seekThumbIdle: Dp = 12.dp    // 进度拇指（设计稿 .thumb）
+    val seekThumbDrag: Dp = 18.dp    // 拇指拖动态
+    val seekTouchBand: Dp = 26.dp    // 大轨触控带（原设计稿 32；2026-10-05 竖屏小窗实报"底栏占小窗一半"后收窄）
+    val trackBarHit: Dp = 20.dp      // 卡片内 NpTrackBar 命中高（.track height 20，细线好看但点不中）
+    val trackCornerRadius: Dp = 2.dp // 轨端圆角（原散落在组件里的裸 2.dp）
+    val miniProgress: Dp = 2.dp      // .mini-prog——不可交互细线（R8）
+    val railLeadLine: Dp = 2.dp      // .mini .lead-line——不可交互细线（R8）
+    val sheetHandle: DpSize = DpSize(38.dp, 4.dp) // 底部 Sheet 把手
+    val waveBarWidth: Dp = 3.dp      // 装饰波形单根 bar（§5.6）
+    val waveBarGap: Dp = 2.dp        // 波形 bar 间隙
+    val waveBarCount: Int = 56       // High 档根数；分档取 NpMotionQuality.waveformBars
     val switchWidth: Dp = 46.dp      // .switch
     val switchHeight: Dp = 27.dp
     val heroCover: Dp = 54.dp        // .folder-head .ficon
