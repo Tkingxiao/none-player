@@ -4,6 +4,7 @@ import android.content.Context
 import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.kernel.api.CacheProvider
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
@@ -48,6 +49,8 @@ class LocalScannerPlugin : Plugin {
             settings = settings,
             registry = registry,
             history = services.get(),
+            // E25：观察者跟随进程前台/后台，后台不再无谓持有 ContentObserver
+            processLifecycle = services.get(),
         )
     }
 
@@ -55,6 +58,8 @@ class LocalScannerPlugin : Plugin {
         registry.register(MediaSourceProvider::class.java, source)
         registry.register(PermissionProvider::class.java, LocalMediaPermissions())
         registry.register(SettingsProvider::class.java, LocalScannerSettings(source))
+        // 批次 7「插件清缓存」：缩略图缓存的清理入口交给插件管理页
+        registry.register(CacheProvider::class.java, source)
     }
 
     override suspend fun onStart() {

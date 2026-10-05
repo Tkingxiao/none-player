@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    E9 strings 抽取·试点切片：内核「插件 / 关于」两屏。
+    口径：界面文案离开硬编码、进资源表；带参数的一律用位置参数（%1$d），
+    译文语序不同也不破。设置屏与各插件屏（播放页/媒体库）是余量，见 §0。
+-->
+<resources>
+    <!-- 关于 -->
+    <string name="about_title">关于</string>
+    <string name="about_subtitle">版本与运行环境</string>
+    <string name="about_tagline">插件化微内核播放器</string>
+    <string name="about_group_app">应用</string>
+    <string name="about_version">版本</string>
+    <string name="about_version_desc">语义版本</string>
+    <string name="about_build">构建号</string>
+    <string name="about_build_desc">versionCode，用于区分同一语义版本的不同构建</string>
+    <string name="about_framework">界面框架</string>
+    <string name="about_group_env">运行环境</string>
+    <string name="about_os">系统版本</string>
+    <string name="about_os_value">Android %1$s · API %2$d</string>
+    <string name="about_device">设备</string>
+    <string name="about_footer">纯本地播放器：不联网、不上传任何数据。</string>
+
+    <!-- 插件 -->
+    <string name="plugins_title">插件</string>
+    <string name="plugins_subtitle">%1$d 个已加载 · %2$d 类扩展点在用</string>
+    <string name="plugins_intro">本应用是微内核架构：核心不含任何业务能力，页面、媒体来源、播放引擎都由插件经扩展点接入。装一个插件就多一项能力，无需改动内核。插件之间互不依赖。</string>
+    <string name="plugins_stat_loaded">已加载</string>
+    <string name="plugins_stat_extensions">扩展点</string>
+    <string name="plugins_list_head">插件清单</string>
+    <string name="plugins_cache_head">缓存</string>
+    <string name="plugins_cache_subtitle">点按清理（可再生成）</string>
+    <string name="plugins_cache_cleared">已清理%1$s</string>
+    <string name="plugins_footer">插件清单只读：安装与停用由宿主装配决定，运行时不可在此开关。</string>
+</resources>

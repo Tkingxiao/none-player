@@ -11,6 +11,7 @@ import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.PluginIndex
+import com.noneplayer.kernel.api.ProcessLifecycle
 import com.noneplayer.kernel.api.ServiceLocator
 import com.noneplayer.kernel.api.VideoPlayerFactory
 import com.noneplayer.kernel.api.register
@@ -59,6 +60,11 @@ class Kernel private constructor(
     override val registry: ExtensionRegistry = DefaultExtensionRegistry()
     override val events: EventBus = FlowEventBus()
     override val services: ServiceLocator = DefaultServiceLocator()
+
+    // E25：进程前台/后台状态。在本对象构造（= Application.onCreate，任何 Activity
+    // 存在之前）时就装好 ActivityLifecycleCallbacks，计数不漏首个 Activity 的 onStart。
+    private val processLifecycle: ProcessLifecycle =
+        DefaultProcessLifecycle(context as? android.app.Application)
 
     private val _bootState = MutableStateFlow<BootState>(BootState.Idle)
     val bootState: StateFlow<BootState> = _bootState.asStateFlow()
@@ -132,6 +138,7 @@ class Kernel private constructor(
 
     private fun registerKernelServices() {
         services.register<Context>(context)
+        services.register<ProcessLifecycle>(processLifecycle)
         services.register<DispatcherProvider>(DefaultDispatcherProvider())
         services.register<EventBus>(events)
         services.register<AppSettings>(AppSettings(context.applicationContext))

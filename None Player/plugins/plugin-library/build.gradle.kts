@@ -40,4 +40,5 @@ dependencies {
 
     // 编译期插件发现：由 kernel-ksp 生成 LibraryPluginIndex
     ksp(project(":kernel:kernel-ksp"))
+    testImplementation(libs.junit)
 }

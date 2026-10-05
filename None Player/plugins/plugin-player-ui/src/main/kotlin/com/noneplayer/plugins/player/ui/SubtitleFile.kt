@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.core.net.toUri
 import com.noneplayer.core.media.SubtitleCharset
+import com.noneplayer.kernel.api.CacheProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -65,4 +66,26 @@ private fun readBounded(stream: java.io.InputStream, limit: Int): ByteArray? {
 private fun sourceDigest(value: String): String {
     val digest = java.security.MessageDigest.getInstance("SHA-256").digest(value.toByteArray())
     return digest.joinToString("") { "%02x".format(it) }.take(16)
+}
+
+/**
+ * 字幕转码缓存的清理入口（批次 7「插件清缓存」，[CacheProvider]）。
+ *
+ * `cache_dir/subs/` 下都是按内容摘要命名的临时 UTF-8 副本，删掉后同名挂载
+ * 会自动重新转码，删除无副作用。由 [PlayerUiPlugin] 注册进扩展注册表。
+ */
+internal class SubtitleCacheProvider(context: Context) : CacheProvider {
+
+    private val dir = File(context.cacheDir, "subs")
+
+    override val cacheLabel: String = "字幕转码缓存"
+
+    override fun cacheSizeBytes(): Long =
+        runCatching { dir.listFiles()?.sumOf { it.length() } ?: 0L }.getOrDefault(0L)
+
+    override fun clearCache(): Long {
+        val before = cacheSizeBytes()
+        runCatching { dir.listFiles()?.forEach { it.delete() } }
+        return before
+    }
 }

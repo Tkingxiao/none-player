@@ -14,10 +14,18 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import android.widget.Toast
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
 import com.noneplayer.core.ui.LocalNpInk
@@ -29,14 +37,21 @@ import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.formatFileSize
+import com.noneplayer.kernel.api.CacheProvider
 import com.noneplayer.kernel.api.ExtensionPoint
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.Plugin
+import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.PLUGINS_ROUTE
 import com.noneplayer.kernel.ui.api.ScreenProvider
+import androidx.compose.ui.res.stringResource
 import com.noneplayer.core.ui.LocalNpTopBarInset
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 「插件」页——已加载插件清单的**唯一归属**。
@@ -58,6 +73,7 @@ internal class KernelPluginsScreenProvider(private val kernel: Kernel) : ScreenP
                 extensionCount = kernel.registry.let { registry ->
                     PLUGIN_EXTENSION_TYPES.count { registry.query(it).isNotEmpty() }
                 },
+                cacheProviders = kernel.registry.query<CacheProvider>(),
                 onBack = navigator::popBackStack,
             )
         }
@@ -82,6 +98,7 @@ private val PLUGIN_EXTENSION_TYPES: List<Class<out ExtensionPoint>> = listOf(
 private fun KernelPluginsScreen(
     plugins: List<Plugin>,
     extensionCount: Int,
+    cacheProviders: List<CacheProvider>,
     onBack: () -> Unit,
 ) {
     val ink = LocalNpInk.current
@@ -93,8 +110,8 @@ private fun KernelPluginsScreen(
         maxContentWidth = if (compact) Dp.Unspecified else windowInfo.maxContentWidth,
         topBar = {
             NpAppTopBar(
-                title = "插件",
-                subtitle = "${plugins.size} 个已加载 · $extensionCount 类扩展点在用",
+                title = stringResource(com.noneplayer.kernel.R.string.plugins_title),
+                subtitle = stringResource(com.noneplayer.kernel.R.string.plugins_subtitle, plugins.size, extensionCount),
                 compact = compact,
                 onBack = onBack,
             )
@@ -107,9 +124,7 @@ private fun KernelPluginsScreen(
             ) {
                 item(key = "intro") {
                     Text(
-                        text = "本应用是微内核架构：核心不含任何业务能力，页面、媒体来源、" +
-                            "播放引擎都由插件经扩展点接入。装一个插件就多一项能力，无需改动内核。" +
-                            "插件之间互不依赖。",
+                        text = stringResource(com.noneplayer.kernel.R.string.plugins_intro),
                         style = NpTypography.bodySmall,
                         color = ink.muted,
                         modifier = Modifier
@@ -127,12 +142,12 @@ private fun KernelPluginsScreen(
                             .padding(top = 20.dp),
                         horizontalArrangement = Arrangement.spacedBy(NpSpace.xl),
                     ) {
-                        Stat(label = "已加载", value = "${plugins.size}")
-                        Stat(label = "扩展点", value = "$extensionCount")
+                        Stat(label = stringResource(com.noneplayer.kernel.R.string.plugins_stat_loaded), value = "${plugins.size}")
+                        Stat(label = stringResource(com.noneplayer.kernel.R.string.plugins_stat_extensions), value = "$extensionCount")
                     }
                 }
 
-                item(key = "plugins-head") { EyebrowBlock(text = "插件清单", gutter = gutter) }
+                item(key = "plugins-head") { EyebrowBlock(text = stringResource(com.noneplayer.kernel.R.string.plugins_list_head), gutter = gutter) }
                 item(key = "plugins") {
                     Column(modifier = Modifier.padding(horizontal = gutter)) {
                         plugins.forEachIndexed { index, plugin ->
@@ -147,9 +162,24 @@ private fun KernelPluginsScreen(
                     }
                 }
 
+                // ---- 缓存（批次 7「插件清缓存」）----
+                //
+                // 只列经 CacheProvider 自愿暴露的缓存，没有就整段不出现——
+                // 页面不扫私有目录、不编造占用数字。开关仍不提供（见页脚说明）。
+                if (cacheProviders.isNotEmpty()) {
+                    item(key = "cache-head") { EyebrowBlock(text = stringResource(com.noneplayer.kernel.R.string.plugins_cache_head), gutter = gutter) }
+                    item(key = "cache") {
+                        Column(modifier = Modifier.padding(horizontal = gutter)) {
+                            cacheProviders.forEachIndexed { index, provider ->
+                                CacheRow(provider = provider, showDivider = index != cacheProviders.lastIndex)
+                            }
+                        }
+                    }
+                }
+
                 item(key = "footer") {
                     Text(
-                        text = "插件清单只读：安装与停用由宿主装配决定，运行时不可在此开关。",
+                        text = stringResource(com.noneplayer.kernel.R.string.plugins_footer),
                         style = NpTypography.bodySmall,
                         color = ink.muted,
                         modifier = Modifier
@@ -198,4 +228,38 @@ private fun EyebrowBlock(text: String, gutter: Dp) {
         NpEyebrow(text = text)
         Spacer(modifier = Modifier.height(8.dp))
     }
+}
+
+/**
+ * 一行插件缓存：占用等宽值，点按清理（后台线程），清理后立即刷新占用。
+ * 数字只来自 [CacheProvider] 的真实统计；探测/删除都是磁盘 I/O，不占主线程。
+ */
+@Composable
+private fun CacheRow(provider: CacheProvider, showDivider: Boolean) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var sizeBytes by remember(provider) { mutableStateOf<Long?>(null) }
+    LaunchedEffect(provider) {
+        sizeBytes = withContext(Dispatchers.IO) { provider.cacheSizeBytes() }
+    }
+    val clearedText = stringResource(
+        com.noneplayer.kernel.R.string.plugins_cache_cleared,
+        provider.cacheLabel,
+    )
+    NpSettingRow(
+        title = provider.cacheLabel,
+        subtitle = stringResource(com.noneplayer.kernel.R.string.plugins_cache_subtitle),
+        icon = NpIcon.Trash,
+        onClick = {
+            scope.launch {
+                sizeBytes = withContext(Dispatchers.IO) {
+                    provider.clearCache()
+                    provider.cacheSizeBytes()
+                }
+                Toast.makeText(context, clearedText, Toast.LENGTH_SHORT).show()
+            }
+        },
+        showDivider = showDivider,
+        trailing = { MonoValue(sizeBytes?.let { formatFileSize(it) } ?: "…") },
+    )
 }

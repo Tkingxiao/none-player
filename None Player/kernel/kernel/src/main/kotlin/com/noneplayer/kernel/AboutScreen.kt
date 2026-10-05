@@ -41,6 +41,7 @@ import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.SETTINGS_ROUTE
 import com.noneplayer.kernel.ui.api.ScreenProvider
+import androidx.compose.ui.res.stringResource
 import com.noneplayer.core.ui.LocalNpTopBarInset
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
 
@@ -89,8 +90,8 @@ private fun KernelAboutScreen(onBack: () -> Unit) {
         maxContentWidth = if (compact) Dp.Unspecified else windowInfo.maxContentWidth,
         topBar = {
             NpAppTopBar(
-                title = "关于",
-                subtitle = "版本与运行环境",
+                title = stringResource(com.noneplayer.kernel.R.string.about_title),
+                subtitle = stringResource(com.noneplayer.kernel.R.string.about_subtitle),
                 compact = compact,
                 onBack = onBack,
             )
@@ -122,7 +123,7 @@ private fun KernelAboutScreen(onBack: () -> Unit) {
                                     color = ink.fg,
                                 )
                                 Text(
-                                    text = "插件化微内核播放器",
+                                    text = stringResource(com.noneplayer.kernel.R.string.about_tagline),
                                     style = NpTypography.bodySmall,
                                     color = ink.muted,
                                     modifier = Modifier.padding(top = 2.dp),
@@ -132,23 +133,23 @@ private fun KernelAboutScreen(onBack: () -> Unit) {
                     }
                 }
 
-                item(key = "app-head") { EyebrowBlock(text = "应用", gutter = gutter) }
+                item(key = "app-head") { EyebrowBlock(text = stringResource(com.noneplayer.kernel.R.string.about_group_app), gutter = gutter) }
                 item(key = "app") {
                     Column(modifier = Modifier.padding(horizontal = gutter)) {
                         NpSettingRow(
-                            title = "版本",
-                            subtitle = "语义版本",
+                            title = stringResource(com.noneplayer.kernel.R.string.about_version),
+                            subtitle = stringResource(com.noneplayer.kernel.R.string.about_version_desc),
                             icon = NpIcon.Info,
                             trailing = { MonoValue(versionName) },
                         )
                         NpSettingRow(
-                            title = "构建号",
-                            subtitle = "versionCode，用于区分同一语义版本的不同构建",
+                            title = stringResource(com.noneplayer.kernel.R.string.about_build),
+                            subtitle = stringResource(com.noneplayer.kernel.R.string.about_build_desc),
                             icon = NpIcon.Info,
                             trailing = { MonoValue(versionCode) },
                         )
                         NpSettingRow(
-                            title = "界面框架",
+                            title = stringResource(com.noneplayer.kernel.R.string.about_framework),
                             subtitle = "Jetpack Compose",
                             icon = NpIcon.Film,
                             showDivider = false,
@@ -157,18 +158,18 @@ private fun KernelAboutScreen(onBack: () -> Unit) {
                 }
 
                 // 运行环境：排查问题时最先要问的两件事
-                item(key = "env-head") { EyebrowBlock(text = "运行环境", gutter = gutter) }
+                item(key = "env-head") { EyebrowBlock(text = stringResource(com.noneplayer.kernel.R.string.about_group_env), gutter = gutter) }
                 item(key = "env") {
                     Column(modifier = Modifier.padding(horizontal = gutter)) {
                         NpSettingRow(
-                            title = "系统版本",
+                            title = stringResource(com.noneplayer.kernel.R.string.about_os),
                             icon = NpIcon.Info,
                             trailing = {
-                                MonoValue("Android ${Build.VERSION.RELEASE} · API ${Build.VERSION.SDK_INT}")
+                                MonoValue(stringResource(com.noneplayer.kernel.R.string.about_os_value, Build.VERSION.RELEASE, Build.VERSION.SDK_INT))
                             },
                         )
                         NpSettingRow(
-                            title = "设备",
+                            title = stringResource(com.noneplayer.kernel.R.string.about_device),
                             icon = NpIcon.Info,
                             showDivider = false,
                             trailing = { MonoValue(Build.MODEL) },
@@ -178,7 +179,7 @@ private fun KernelAboutScreen(onBack: () -> Unit) {
 
                 item(key = "footer") {
                     Text(
-                        text = "纯本地播放器：不联网、不上传任何数据。",
+                        text = stringResource(com.noneplayer.kernel.R.string.about_footer),
                         style = NpTypography.bodySmall,
                         color = ink.muted,
                         modifier = Modifier

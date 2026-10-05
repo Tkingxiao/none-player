@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.widthIn
@@ -474,19 +475,26 @@ private fun ToolChip(
 ) {
     val ink = LocalNpInk.current
     val content = if (on) ink.accent else ink.muted
-    Row(
-        modifier = modifier
-            .clip(RoundedCornerShape(NpRadius.chip))
-            .background(if (on) ink.accentSoft else Color.Transparent)
-            .border(1.dp, if (on) ink.accentLine else ink.border, RoundedCornerShape(NpRadius.chip))
-            .npPressScale(onClick = onClick, pressedScale = 0.96f)
-            .padding(horizontal = 15.dp, vertical = 9.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        // 设计稿 .audio-tools .tool-chip{justify-content:center;width:100%}
-        horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
+    // E8：命中区抬到 44dp（§3.1 红线，此前整枚约 34dp）——视觉层仍是 34dp 丸形，
+    // 底色/描边只画里层，同 NpChip 的分层手法
+    Box(
+        modifier = modifier.heightIn(min = NpDimens.touchTarget),
+        contentAlignment = Alignment.Center,
     ) {
-        Icon(imageVector = icon, contentDescription = null, tint = content, modifier = Modifier.size(16.dp))
-        Text(text = label, style = NpTypography.bodySmall, color = content)
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(NpRadius.chip))
+                .background(if (on) ink.accentSoft else Color.Transparent)
+                .border(1.dp, if (on) ink.accentLine else ink.border, RoundedCornerShape(NpRadius.chip))
+                .npPressScale(onClick = onClick, pressedScale = 0.96f)
+                .padding(horizontal = 15.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            // 设计稿 .audio-tools .tool-chip{justify-content:center;width:100%}
+            horizontalArrangement = Arrangement.spacedBy(7.dp, Alignment.CenterHorizontally),
+        ) {
+            Icon(imageVector = icon, contentDescription = null, tint = content, modifier = Modifier.size(16.dp))
+            Text(text = label, style = NpTypography.bodySmall, color = content)
+        }
     }
 }
 

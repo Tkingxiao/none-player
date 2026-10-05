@@ -570,34 +570,137 @@ private fun ValueReadonly(text: String) {
 }
 
 /**
- * 设计稿 1213「解码能力检测」：只读值 `H.264 / H.265 / AV1 ✓`。
+ * 设计稿 1213「解码能力检测」→ 批次 7 扩为「解码诊断」面板（§12.3 余项）。
  *
- * 用 `MediaCodecList` **真实枚举**本机带硬解加速的解码器（与 FormatProbe 同源），
- * 而不是写死设计稿演示壳里的字符串——设备换了、编码支持也变，写死就是假信息。
- * 缺失的编码由内置 FFmpeg 软解兜底，因此只标注"硬解命中"的那几个。
+ * 行值仍是不展开时的"硬解命中"摘要；**点按展开**能力矩阵：每个常见 mime 给出
+ * `MediaCodecList.findDecoderForFormat` 的默认选择（与 FormatProbe 起播判定
+ * 同一决策路径，即"复用同一份探测数据"）、是否硬解、支持的 profile/level 档数。
+ *
+ * 已知边界：**实时** renderer/codec 名与音频输出模式需要引擎侧诊断通道
+ * （AnalyticsListener → 契约增量），不在此面板编造；单文件的 profile/level
+ * 超限判定仍由起播探测（FormatProbe.profileMismatch）给出。
  */
 @Composable
 private fun DecoderCapabilityRow() {
     val ink = LocalNpInk.current
+    var expanded by remember { mutableStateOf(false) }
     // 枚举 `MediaCodecList` 要走一次系统媒体服务的查询（数毫秒到数十毫秒）。
     // 放在组合里同步做，会在"设置页滚到这一行"时卡一帧；移到 IO 线程，
     // 先给占位文案、探测完再填真值。
     val caps by produceState<DecoderCapability?>(initialValue = null) {
         value = withContext(Dispatchers.IO) { probeHardwareCodecs() }
     }
-    NpSettingRow(
-        title = "解码能力检测",
-        subtitle = "硬解优先，缺失编码由内置 FFmpeg 软解兜底",
-        icon = NpIcon.Film,
-        trailing = {
-            Text(
-                text = caps?.label ?: "检测中…",
-                style = com.noneplayer.core.ui.NpMonoSmall,
-                color = if (caps?.allHardware == true) ink.success else ink.muted,
-                maxLines = 1,
-            )
-        },
+    // 展开时才探测明细（同为 IO 线程；收起不重排）
+    val diagnostics by produceState<List<DecoderDiag>>(initialValue = emptyList(), expanded) {
+        if (expanded) value = withContext(Dispatchers.IO) { probeDecodeDiagnostics() }
+    }
+    Column {
+        NpSettingRow(
+            title = "解码能力检测",
+            subtitle = "硬解优先，缺失编码由内置 FFmpeg 软解兜底",
+            icon = NpIcon.Film,
+            onClick = { expanded = !expanded },
+            trailing = {
+                Text(
+                    text = caps?.label ?: "检测中…",
+                    style = com.noneplayer.core.ui.NpMonoSmall,
+                    color = if (caps?.allHardware == true) ink.success else ink.muted,
+                    maxLines = 1,
+                )
+            },
+        )
+        if (expanded) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Column(
+                modifier = Modifier.padding(start = 8.dp, end = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (diagnostics.isEmpty()) {
+                    Text(
+                        text = "检测中…",
+                        style = com.noneplayer.core.ui.NpMonoSmall,
+                        color = ink.muted,
+                    )
+                } else {
+                    diagnostics.forEach { d ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = d.label,
+                                    style = com.noneplayer.core.ui.NpTypography.bodySmall,
+                                    color = ink.fg,
+                                )
+                                Text(
+                                    text = "${d.defaultDecoder} · ${d.profileSummary}",
+                                    style = com.noneplayer.core.ui.NpMonoSmall,
+                                    color = ink.muted,
+                                    maxLines = 1,
+                                )
+                            }
+                            Text(
+                                text = if (d.hardware) "硬解" else "软解",
+                                style = com.noneplayer.core.ui.NpMonoSmall,
+                                color = if (d.hardware) ink.success else ink.muted,
+                            )
+                        }
+                    }
+                    Text(
+                        text = "单文件的 profile/level 超限判定在起播前探测中给出。" +
+                            "实时 renderer/codec 与音频输出模式需引擎诊断通道，随批次 8 评估。",
+                        style = com.noneplayer.core.ui.NpTypography.bodySmall,
+                        color = ink.muted,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** 解码诊断明细行（§12.3 面板数据）：一个 mime 的默认解码器 + 硬/软 + profile 档数。 */
+private class DecoderDiag(
+    val label: String,
+    val defaultDecoder: String,
+    val hardware: Boolean,
+    val profileSummary: String,
+)
+
+private fun probeDecodeDiagnostics(): List<DecoderDiag> {
+    val wanted = listOf(
+        "video/avc" to "H.264 / AVC",
+        "video/hevc" to "H.265 / HEVC",
+        "video/av01" to "AV1",
+        "video/x-vnd.on2.vp9" to "VP9",
+        "video/mp4v-es" to "MPEG-4 ASP",
     )
+    return runCatching {
+        val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
+        val decoders = list.codecInfos.filter { !it.isEncoder }
+        wanted.mapNotNull { (mime, label) ->
+            runCatching {
+                val format = android.media.MediaFormat.createVideoFormat(mime, 1920, 1080)
+                val defaultName = list.findDecoderForFormat(format)
+                val primary = decoders
+                    .filter { info ->
+                        runCatching { info.supportedTypes.contains(mime) }.getOrDefault(false)
+                    }
+                    .firstOrNull { it.name == defaultName }
+                    ?: decoders.firstOrNull { info ->
+                        runCatching { info.supportedTypes.contains(mime) }.getOrDefault(false)
+                    }
+                val hardware = primary?.let { info ->
+                    android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q ||
+                        runCatching { info.isHardwareAccelerated }.getOrDefault(false)
+                } ?: false
+                val profileSummary = primary?.let { info ->
+                    runCatching {
+                        val count = info.getCapabilitiesForType(mime).profileLevels.size
+                        if (count > 0) "$count 档 profile/level" else "—"
+                    }.getOrDefault("—")
+                } ?: "—"
+                DecoderDiag(label, defaultName ?: "无解码器", hardware, profileSummary)
+            }.getOrNull()
+        }
+    }.getOrDefault(emptyList())
 }
 
 /** 硬解能力探测结果：展示值与"三种常见编码是否全部硬解"。 */

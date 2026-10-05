@@ -1,7 +1,9 @@
 package com.noneplayer.plugins.player.ui
 
+import com.noneplayer.kernel.api.CacheProvider
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.Plugin
+import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.PluginMarker
 import com.noneplayer.kernel.api.ServiceLocator
 import com.noneplayer.kernel.api.register
@@ -30,7 +32,10 @@ class PlayerUiPlugin : Plugin {
      */
     override fun onBind(services: ServiceLocator) {
         SessionHolder.of(sessionFactoryOf(services))
+        subtitleCache = SubtitleCacheProvider(services.get())
     }
+
+    private var subtitleCache: SubtitleCacheProvider? = null
 
     override suspend fun onInstall(registry: ExtensionRegistry) {
         registry.register(ScreenProvider::class.java, PlayerScreenProvider())
@@ -39,6 +44,8 @@ class PlayerUiPlugin : Plugin {
         registry.register(InlinePlaybackProvider::class.java, InlinePlayerSurface())
         // §8.2 路径 A：类 PC 档的右栏播放栏（有会话时取代底部迷你条）
         registry.register(DetailPaneProvider::class.java, PlaybackPaneChrome())
+        // 批次 7「插件清缓存」：字幕转码副本（cache_dir/subs）的清理入口
+        subtitleCache?.let { registry.register(CacheProvider::class.java, it) }
     }
 
     override suspend fun onStart() = Unit

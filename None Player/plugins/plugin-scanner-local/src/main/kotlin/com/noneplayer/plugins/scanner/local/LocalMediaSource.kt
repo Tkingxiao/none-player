@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.DocumentsContract
@@ -19,11 +20,13 @@ import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.kernel.api.CacheProvider
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.MetadataEnricher
+import com.noneplayer.kernel.api.ProcessLifecycle
 import com.noneplayer.kernel.api.ScanResult
 import com.noneplayer.kernel.api.query
 import kotlinx.coroutines.CoroutineScope
@@ -71,10 +74,25 @@ class LocalMediaSource(
     private val registry: ExtensionRegistry,
     /** §8.3/E11：断点迁移的目标仓库 */
     private val history: HistoryRepository,
-) : MediaSourceProvider {
+    /** E25：进程前台/后台状态；null = 不跟随（测试/降级路径，保持旧行为） */
+    private val processLifecycle: ProcessLifecycle? = null,
+) : MediaSourceProvider, CacheProvider {
 
     override val sourceId: String = "local"
     override val displayName: String = "本地媒体"
+
+    /** 缩略图缓存目录（唯一落盘缓存，清掉可再生成——下次扫描时重建） */
+    private val thumbsDir get() = File(context.cacheDir, "video_thumbs")
+
+    override val cacheLabel: String = "缩略图缓存"
+
+    override fun cacheSizeBytes(): Long = thumbsDir.listFiles()?.sumOf { it.length() } ?: 0L
+
+    override fun clearCache(): Long {
+        val before = cacheSizeBytes()
+        thumbsDir.listFiles()?.forEach { it.delete() }
+        return before
+    }
 
     private val _media = MutableStateFlow<List<MediaItem>>(emptyList())
     override fun observeMedia(): Flow<List<MediaItem>> = _media.asStateFlow()
@@ -89,6 +107,7 @@ class LocalMediaSource(
     private val mediaChanges = MutableStateFlow(0L)
     private var contentObserver: ContentObserver? = null
     private var observerJob: kotlinx.coroutines.Job? = null
+    private var lifecycleJob: kotlinx.coroutines.Job? = null
 
     override suspend fun isAvailable(): Boolean = hasMediaPermission(context)
 
@@ -285,6 +304,7 @@ class LocalMediaSource(
     /**
      * E77：对外暴露观察者是否已注册，供插件禁用/`Kernel.shutdown()` 路径的
      * 集成测试断言"onStop 后 ContentObserver 确已注销"，不必依赖反射读私有字段。
+     * E25 起**当前已注册**而非"进程存活期内注册过"——退到后台时会被暂时注销。
      */
     val isObserving: Boolean get() = contentObserver != null
 
@@ -294,14 +314,42 @@ class LocalMediaSource(
      *
      * 音频集合必须单独注册：两个集合的 URI 不同，只监听视频会漏掉"新增一首歌"
      * 这类变更，音频要等下次手动重扫才出现。
+     *
+     * E25：注入了 [processLifecycle] 时，观察者跟随前台/后台——退后台即注销
+     * （不再在进程存活期内无谓持有），回前台重挂并补发一次变更，把后台期间
+     * 错过的文件增删扫进来（走同一 2s 去抖通道）。
      */
     fun startObserving() {
         if (contentObserver != null) return
+        registerObservers()
         observerJob = observerScope.launch {
             mediaChanges.debounce(2_000).collect {
                 if (it > 0) scan()
             }
         }
+        val lifecycle = processLifecycle ?: return
+        lifecycleJob = observerScope.launch {
+            lifecycle.isForeground.collect { foreground ->
+                if (foreground && contentObserver == null) {
+                    registerObservers()
+                    mediaChanges.value = System.currentTimeMillis()
+                } else if (!foreground && contentObserver != null) {
+                    unregisterObservers()
+                }
+            }
+        }
+    }
+
+    fun stopObserving() {
+        unregisterObservers()
+        observerJob?.cancel()
+        observerJob = null
+        lifecycleJob?.cancel()
+        lifecycleJob = null
+    }
+
+    private fun registerObservers() {
+        if (contentObserver != null) return
         contentObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
             override fun onChange(selfChange: Boolean) {
                 mediaChanges.value = System.currentTimeMillis()
@@ -311,11 +359,9 @@ class LocalMediaSource(
         context.contentResolver.registerContentObserver(audioCollection(), true, contentObserver!!)
     }
 
-    fun stopObserving() {
+    private fun unregisterObservers() {
         contentObserver?.let { context.contentResolver.unregisterContentObserver(it) }
         contentObserver = null
-        observerJob?.cancel()
-        observerJob = null
     }
 
     /** MediaStore 视频集合（API 26–28 用常量 URI，29+ 用带卷名的getContentUri） */
@@ -615,7 +661,9 @@ class LocalMediaSource(
             ?.let { return it }
         if (dataPath.isEmpty()) return null
         val dir = dataPath.substringBeforeLast('/')
-            .removePrefix("/storage/emulated/0/")
+            // E16：主存储前缀不硬编码——副存储/OTG 挂载点的根不是 /storage/emulated/0，
+            // 固定前缀剥不掉时目录会显示成完整绝对路径
+            .removePrefix(Environment.getExternalStorageDirectory().absolutePath)
             .ifEmpty { "存储根目录" }
         return dir
     }

@@ -222,22 +222,7 @@ class PlaybackSession(
         startPositionMs: Long = 0L,
     ) {
         val player = acquire(item.mimeType)
-        // 定位起点同样"先 id 再 uri"：来源重扫后 id 可能已换号（MediaStore._id 会变），
-        // 只认 id 会让队列退化成单项且**静默**——播放正常，却悄悄丢掉连播与选集。
-        val startIndex = queueOfFolder.indexOfFirst { it.id == item.id }
-            .takeIf { it >= 0 }
-            ?: queueOfFolder.indexOfFirst { it.uri == item.uri }
-        val list: List<MediaItem>
-        val index: Int
-        if (startIndex >= 0) {
-            list = queueOfFolder
-            index = startIndex
-        } else {
-            // 当前项不在给定队列里（例如来源刚重扫过）：退化为单项队列，
-            // 而不是把下标硬指到 0 ——那会让用户点到 A 却播 B。
-            list = listOf(item)
-            index = 0
-        }
+        val (list, index) = resolveQueueStart(queueOfFolder, item)
         _queue.value = list
         _index.value = index
         player.setQueue(list, index, startPositionMs.coerceAtLeast(0L))
@@ -327,5 +312,25 @@ class PlaybackSession(
     private companion object {
         /** §8.3：播放中每 5s 落一次断点 */
         const val PERIODIC_PERSIST_MS = 5_000L
+    }
+}
+
+/**
+ * 队列定位（E18 提纯为普通函数以便单测）：**先 id 再 uri**——来源重扫后
+ * MediaStore._id 可能换号，只认 id 会让队列退化成单项且**静默**。
+ * 两者都不命中（例如来源刚重扫过）时退化为单项队列、下标 0，而不是把
+ * 下标硬指到 0——那会让用户点到 A 却播 B。
+ */
+internal fun resolveQueueStart(
+    queueOfFolder: List<MediaItem>,
+    item: MediaItem,
+): Pair<List<MediaItem>, Int> {
+    val startIndex = queueOfFolder.indexOfFirst { it.id == item.id }
+        .takeIf { it >= 0 }
+        ?: queueOfFolder.indexOfFirst { it.uri == item.uri }
+    return if (startIndex >= 0) {
+        queueOfFolder to startIndex
+    } else {
+        listOf(item) to 0
     }
 }

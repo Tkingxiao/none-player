@@ -33,6 +33,10 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -123,6 +127,12 @@ internal fun NpSeekBar(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                // E8：读屏可达——自绘 Canvas 无默认语义，把进度区间与当前值显式给出，
+                // TalkBack 以滑杆（adjustable 之外还需 range info）朗读当前位置
+                .semantics {
+                    contentDescription = "播放进度"
+                    progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+                }
                 .pointerInput(maxPosition) {
                     detectTapGestures { offset ->
                         haptics.performHaptic(NpHaptic.Tick)

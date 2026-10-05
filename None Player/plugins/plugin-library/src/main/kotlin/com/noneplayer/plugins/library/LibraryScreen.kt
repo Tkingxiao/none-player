@@ -139,10 +139,12 @@ import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.NpTabChannel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 媒体库页面——设计稿 `none-player.html` 的 Home / Folders / 聚合列表三套版式。
@@ -233,16 +235,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val mediaLoaded = mediaState != null
     val items = mediaState ?: emptyList()
 
-    val sortedItems = remember(items, sortMode, sortAscending) {
-        val comparator: Comparator<MediaItem> = when (sortMode) {
-            // E42：自然序（E2 排在 E10 前）——共享比较器，与连播队列/详情页列表同一口径
-            SortMode.NAME -> MediaNaturalOrder
-            SortMode.ADDED -> compareBy { it.addedAtMs }
-            SortMode.DURATION -> compareBy { it.durationMs }
-            SortMode.SIZE -> compareBy { it.sizeBytes }
-        }
-        if (sortAscending) items.sortedWith(comparator) else items.sortedWith(comparator.reversed())
-    }
+    val sortedItems = rememberSortedMediaItems(items, sortMode, sortAscending)
 
     // 文件夹层级树（根 = 虚拟根；进入子级后展示子文件夹 + 本级视频）
     val folderRoot = remember(sortedItems) { buildFolderTree(sortedItems) }
@@ -2174,4 +2167,53 @@ internal fun openPlayer(
             (if (fromStart) "&from=start" else "") +
             (if (immersive) "&fs=1" else ""),
     )
+}
+
+/** E20：≤此规模在组合内同步排序（零延迟、无闪烁）；超过则先原序占位，后台排完再替换 */
+private const val SYNC_SORT_LIMIT = 512
+
+/** E20：排序口径收口为普通函数——组合内外共用，四档比较器不再散在 remember lambda 里 */
+internal fun mediaComparator(sortMode: SortMode, ascending: Boolean): Comparator<MediaItem> {
+    val comparator: Comparator<MediaItem> = when (sortMode) {
+        // E42：自然序（E2 排在 E10 前）——共享比较器，与连播队列/详情页列表同一口径
+        SortMode.NAME -> MediaNaturalOrder
+        SortMode.ADDED -> compareBy { it.addedAtMs }
+        SortMode.DURATION -> compareBy { it.durationMs }
+        SortMode.SIZE -> compareBy { it.sizeBytes }
+    }
+    return if (ascending) comparator else comparator.reversed()
+}
+
+private fun sortedMediaItems(
+    items: List<MediaItem>,
+    sortMode: SortMode,
+    ascending: Boolean,
+): List<MediaItem> = items.sortedWith(mediaComparator(sortMode, ascending))
+
+/**
+ * E20：排序离主线程。此前 `remember(items, …)` 在组合期全量排序，列表上千时
+ * 每次增删/换档都在主线程卡一帧。现在小列表维持同步（行为不变），大列表先给
+ * 原序占位、`Dispatchers.Default` 排完再替换——占位帧只在超限列表上出现一次。
+ */
+@Composable
+private fun rememberSortedMediaItems(
+    items: List<MediaItem>,
+    sortMode: SortMode,
+    ascending: Boolean,
+): List<MediaItem> {
+    val small = items.size <= SYNC_SORT_LIMIT
+    val syncSorted = if (small) {
+        remember(items, sortMode, ascending) { sortedMediaItems(items, sortMode, ascending) }
+    } else {
+        items
+    }
+    var asyncSorted by remember(items, sortMode, ascending) { mutableStateOf<List<MediaItem>?>(null) }
+    LaunchedEffect(items, sortMode, ascending) {
+        if (!small) {
+            asyncSorted = withContext(Dispatchers.Default) {
+                sortedMediaItems(items, sortMode, ascending)
+            }
+        }
+    }
+    return asyncSorted ?: syncSorted
 }
