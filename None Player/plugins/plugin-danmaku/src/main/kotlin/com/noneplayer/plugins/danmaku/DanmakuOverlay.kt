@@ -334,6 +334,17 @@ private fun ByteArray.decodeText(): String {
     return if ('\uFFFD' in utf8) String(this, charset("GBK")).removePrefix("\uFEFF") else utf8
 }
 
+/** content:// 文件取 DISPLAY_NAME（直接取 last segment 会拿到数字 id） */
+private fun displayName(context: android.content.Context, uri: String): String? = runCatching {
+    context.contentResolver.query(
+        uri.toUri(),
+        arrayOf(android.provider.MediaStore.MediaColumns.DISPLAY_NAME),
+        null,
+        null,
+        null,
+    )?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+}.getOrNull()
+
 private fun pillLabel(enabled: Boolean, source: DanmakuSource, manualUri: String?): String {
     val name = when (source) {
         is DanmakuSource.File -> source.name.substringBeforeLast('.').take(12)

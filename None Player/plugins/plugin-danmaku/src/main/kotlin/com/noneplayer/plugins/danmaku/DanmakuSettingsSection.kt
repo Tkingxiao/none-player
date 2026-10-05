@@ -15,8 +15,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.core.net.toUri
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpSettingRow
@@ -117,8 +119,8 @@ class DanmakuSettingsSection : SettingsProvider {
                 options = ALPHA_OPTIONS,
                 describe = { "${(it * 100).toInt()}%" },
                 onSelect = { scope.launch { settings.setDanmakuAlpha(it) } },
-                showDivider = false,
             )
+            AllFilesAccessRow()
             NpSettingRow(
                 title = "本地屏蔽词",
                 subtitle = if (blocklist.isEmpty()) {
@@ -145,6 +147,43 @@ class DanmakuSettingsSection : SettingsProvider {
                 },
             )
         }
+    }
+
+    /**
+     * 「所有文件访问」引导行（批次 6 实测补入）：同名弹幕/字幕文件是非媒体文件，
+     * scoped storage 下 MediaStore 查询对它们不可见——自动匹配需要
+     * MANAGE_EXTERNAL_STORAGE（见 [DanmakuLocator] 类注）。未授予时行尾提示
+     * 去开启，点按跳系统设置；已授予时只读展示。API 30 以下走旧版
+     * READ_EXTERNAL_STORAGE，无此行（minSdk 26 的 26–29 设备自动匹配天然可用）。
+     */
+    @Composable
+    private fun AllFilesAccessRow() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R) return
+        val context = LocalContext.current
+        val granted = remember {
+            android.os.Environment.isExternalStorageManager()
+        }
+        NpSettingRow(
+            title = "所有文件访问",
+            subtitle = if (granted) {
+                "已授予——同目录弹幕文件自动挂载可用"
+            } else {
+                "同名弹幕自动匹配需要读取视频所在目录的弹幕文件，点按去系统设置开启"
+            },
+            icon = NpIcon.Folder,
+            showDivider = true,
+            onClick = if (granted) {
+                null
+            } else {
+                {
+                    val intent = android.content.Intent(
+                        android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        "package:${context.packageName}".toUri(),
+                    ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    runCatching { context.startActivity(intent) }
+                }
+            },
+        )
     }
 
     /** 档位循环行：点击切到下一档，当前档在 [describe] 里读给人看 */

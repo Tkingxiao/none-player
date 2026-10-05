@@ -9,6 +9,7 @@ import com.noneplayer.core.data.ThemeMode
 import com.noneplayer.kernel.BootState
 import com.noneplayer.kernel.Kernel
 import com.noneplayer.kernel.api.get
+import com.noneplayer.kernel.generated.DanmakuPluginIndex
 import com.noneplayer.kernel.generated.ExoPlayerPluginIndex
 import com.noneplayer.kernel.generated.FilenameEnricherPluginIndex
 import com.noneplayer.kernel.generated.LibraryPluginIndex
@@ -67,6 +68,7 @@ class NonePlayerApplication : Application(), ImageLoaderFactory {
                 PlayerUiPluginIndex(),
                 ProfilePluginIndex(),
                 FilenameEnricherPluginIndex(),
+                DanmakuPluginIndex(),
             ),
         )
         kernel.boot()

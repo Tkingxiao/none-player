@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- 声明由 PermissionProvider 扩展点聚合申请的权限。
          音频权限与视频并列：媒体库现在同时收录音频（LocalMediaSource 的
@@ -12,6 +13,15 @@
     <uses-permission
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+
+    <!-- 批次 6（plugin-danmaku）：同名弹幕/字幕文件是**非媒体文件**——scoped storage
+         下只持 READ_MEDIA_* 的 app 在 MediaStore.Files 查询里根本看不到它们
+         （实测 .xml/.ass 行对查询不可见，scanFile 也被拒索引）。声明
+         MANAGE_EXTERNAL_STORAGE（"所有文件访问"，用户在系统设置里授予，
+         由弹幕设置区块引导跳转）；授予后 DanmakuLocator 的直读路径兜底生效。 -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
 
     <!-- E51：多窗口/分屏/自由窗口适配声明——应用可在任意窗口尺寸下运行，
          布局由 Compose 随窗口实时重算（NpWindowInfo 形态判定层） -->
