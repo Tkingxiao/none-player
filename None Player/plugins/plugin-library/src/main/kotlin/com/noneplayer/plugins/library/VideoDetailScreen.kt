@@ -63,6 +63,8 @@ import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
+import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -109,6 +111,14 @@ internal fun VideoDetailScreen(
     val inlineAvailable = inlinePlayer != null
     fun startPlayback() {
         if (inlineAvailable) inlinePlaying = true else onFullscreen(item)
+    }
+    // 右栏接管播放的那一刻，详情页的内嵌态必须复位：否则右栏顶栏的「关闭播放器」
+    // 停掉会话后 paneOccupied 翻回 false，这里残留的 inlinePlaying=true 会让封面框
+    // 立刻挂上内嵌播放器、把会话**再拉起来**——用户点的可是"关闭"（2026-10-07 实测）。
+    // 紧凑/中等档没有右栏（paneOccupied 恒 false），此复位不生效，内嵌行为不变。
+    val paneOccupied = LocalNpPaneOccupied.current
+    LaunchedEffect(paneOccupied) {
+        if (paneOccupied) inlinePlaying = false
     }
     val isAudio = item.kind == MediaKind.AUDIO
     val hue = NpMediaColor.itemHue(item.folder, isAudio)

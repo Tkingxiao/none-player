@@ -292,6 +292,9 @@ class PlaybackSession(
     fun stop() {
         val p = _player.value
         p?.pause()
+        // 清队列前先把当前项断点落盘：周期落点最多差 5s，显式关闭不该丢掉这一截
+        // （persistPosition 自行短路，队列已空/引擎未就绪时是空操作）。
+        persistPosition()
         p?.seekTo(0L)
         _queue.value = emptyList()
         _index.value = -1

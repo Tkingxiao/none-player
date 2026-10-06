@@ -1,9 +1,32 @@
 package com.noneplayer.plugins.player.ui
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.NpDimens
+import com.noneplayer.core.ui.NpIconButton
+import com.noneplayer.core.ui.NpIcon
+import com.noneplayer.core.ui.NpSpace
+import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.npGlassSurface
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.DetailPaneProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
@@ -22,6 +45,11 @@ import com.noneplayer.kernel.ui.api.LocalKernel
  *
  * 点「全屏」导航到独占播放页：会话已在播同一媒体，落页只续播不重启（B1 语义），
  * 与迷你条点回播放页走的是同一条深链参数形态（uri/title/mime/id 齐全）。
+ *
+ * **顶部栏（2026-10-07 用户实报新增）**：返回主页/切页不关闭右栏是路径 A 的定案，
+ * 但面板必须自带一个显式的退出点——顶部栏左键就是「关闭播放器」（停会话、
+ * 清队列，`nowPlaying` 变 null 后外壳收回该栏，迷你条一并消失）。
+ * 栏体走 `npGlassSurface` 完整配方（§4.1 横条一律不透明底 + 发丝线）。
  */
 class PlaybackPaneChrome : DetailPaneProvider {
 
@@ -41,22 +69,62 @@ class PlaybackPaneChrome : DetailPaneProvider {
 
     @Composable
     override fun Render(navigator: Navigator, modifier: Modifier) {
-        val snapshot = sessionOf().nowPlaying.collectAsStateWithLifecycle().value ?: return
-        surface.InlinePlayer(
-            media = snapshot.item,
-            navigator = navigator,
-            onFullscreen = {
-                // `fs=1` = 明确的全屏意图：类 PC 档落地即沉浸隐藏系统栏（§14 #16 的出口）
-                navigator.navigate(
-                    "player?uri=${encode(snapshot.item.uri)}" +
-                        "&title=${encode(snapshot.title)}" +
-                        "&mime=${encode(snapshot.item.mimeType)}" +
-                        "&id=${encode(snapshot.item.id)}" +
-                        "&fs=1",
+        val session = sessionOf()
+        val snapshot = session.nowPlaying.collectAsStateWithLifecycle().value ?: return
+        val ink = LocalNpInk.current
+        Column(
+            modifier = modifier
+                .background(ink.bg)
+                // 右栏通到屏幕顶（外壳三栏是 edge-to-edge 布局），顶栏必须自己
+                // 让开状态栏，否则标题/返回键与状态栏图标同高打架（实拍确认）
+                .windowInsetsPadding(WindowInsets.statusBars),
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(NpDimens.paneBarHeight)
+                    .npGlassSurface(ink, topHighlight = false, bottomHairline = true),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                NpIconButton(
+                    icon = NpIcon.ArrowLeft,
+                    contentDescription = "关闭播放器",
+                    onClick = {
+                        // 关闭 = 停止会话（断点先落盘、队列清空）：
+                        // nowPlaying → null 后 isOccupied 翻 false，外壳收回右栏，
+                        // 迷你条同步消失——与迷你条 ✕ 是同一个出口。
+                        session.stop()
+                    },
+                    modifier = Modifier.padding(start = NpSpace.sm),
                 )
-            },
-            modifier = modifier,
-        )
+                Text(
+                    text = snapshot.title,
+                    style = NpTypography.titleSmall,
+                    color = ink.fg,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                Spacer(modifier = Modifier.width(NpSpace.lg))
+            }
+            Box(modifier = Modifier.weight(1f)) {
+                surface.InlinePlayer(
+                    media = snapshot.item,
+                    navigator = navigator,
+                    onFullscreen = {
+                        // `fs=1` = 明确的全屏意图：类 PC 档落地即沉浸隐藏系统栏（§14 #16 的出口）
+                        navigator.navigate(
+                            "player?uri=${encode(snapshot.item.uri)}" +
+                                "&title=${encode(snapshot.title)}" +
+                                "&mime=${encode(snapshot.item.mimeType)}" +
+                                "&id=${encode(snapshot.item.id)}" +
+                                "&fs=1",
+                        )
+                    },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
     }
 
     @Composable

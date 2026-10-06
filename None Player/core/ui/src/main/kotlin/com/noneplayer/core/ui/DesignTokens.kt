@@ -154,6 +154,7 @@ object NpDimens {
     val railButton: Dp = 64.dp
     val tabbarHeight: Dp = 64.dp     // .tabbar **视觉高**；安全区由 WindowInsets 叠加，组件不许各自加（R7）
     val topbarIcon: Dp = 44.dp       // .iconbtn
+    val paneBarHeight: Dp = 48.dp    // 类 PC 右栏播放器的顶部栏（标题 + 关闭键；2026-10-07 用户实报新增）
     val chipHeight: Dp = 34.dp       // .chip 视觉高
     val trackLine: Dp = 3.dp         // .track .bar——可交互大轨（R8）
     val trackLineDragging: Dp = 4.dp // 大轨拖动中加粗（§5.4）
