@@ -132,7 +132,13 @@ class PlaybackSession(
         scope.launch {
             _player.flatMapLatest { p -> p?.currentIndex ?: flowOf(-1) }
                 .collect { idx ->
-                    if (idx != _index.value && idx in _queue.value.indices) _index.value = idx
+                    if (idx != _index.value && idx in _queue.value.indices) {
+                        _index.value = idx
+                        // 引擎推进（自动连播 / 通知栏 ⏭）也广播给全仓库：
+                        // 详情页等 UI 侧订阅方靠它把"正在看的条目"跟上队列，
+                        // 否则右栏已在放下一集、详情页还停在播完的那一集。
+                        events.publish(KernelEvent.PlaybackStarted(_queue.value[idx].id))
+                    }
                 }
         }
     }

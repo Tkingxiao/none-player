@@ -500,6 +500,15 @@ internal val MediaItemSaver: Saver<MediaItem?, List<String>> = Saver(
                 it.folder ?: "",
                 it.width.toString(),
                 it.height.toString(),
+                // 富化字段（displayTitle/集号/编码）必须随状态保存：
+                // 漏掉任何一个，rememberSaveable 一恢复 cardTitle 就退回整条文件名
+                // （「剧集」→「剧集 E2.mkv」、meta 丢「第 N 集」），E42 白做
+                it.displayTitle ?: "",
+                it.seasonNumber.toString(),
+                it.episodeNumber.toString(),
+                it.videoCodec ?: "",
+                it.clipStartUs.toString(),
+                it.clipEndUs.toString(),
             )
         } ?: emptyList()
     },
@@ -520,6 +529,12 @@ internal val MediaItemSaver: Saver<MediaItem?, List<String>> = Saver(
                 folder = saved[9].ifEmpty { null },
                 width = saved[10].toIntOrNull() ?: 0,
                 height = saved[11].toIntOrNull() ?: 0,
+                displayTitle = saved[12].ifBlank { null },
+                seasonNumber = saved[13].toIntOrNull() ?: 0,
+                episodeNumber = saved[14].toIntOrNull() ?: 0,
+                videoCodec = saved[15].ifBlank { null },
+                clipStartUs = saved[16].toLongOrNull() ?: 0L,
+                clipEndUs = saved[17].toLongOrNull() ?: 0L,
             )
         }
     },

@@ -168,7 +168,10 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
                     is DanmakuSource.Embedded -> spawned
                     DanmakuSource.None -> return@Canvas
                 }
-                val basePx = size.height * 0.052f * fontScale
+                // 0.040：相对**视频画面高**的字号密度（原 0.052 是按整个窗格/整屏
+                // 的高度取的，叠加"覆盖层未裁剪到画面"时文字大到盖满半屏；
+                // 裁剪修复后以画面高为基准，平板实拍 ≈ B 站同屏手感）
+                val basePx = size.height * 0.040f * fontScale
                 val laneHeight = basePx * 1.4f
                 val placed = DanmakuPlanner.plan(
                     danmaku = danmaku,

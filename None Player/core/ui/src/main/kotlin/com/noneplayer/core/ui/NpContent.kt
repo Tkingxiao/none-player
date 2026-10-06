@@ -528,7 +528,15 @@ fun NpMediaCard(
                 if (folderTag != null) {
                     NpFolderTag(folder = folderTag, isAudio = folderTagIsAudio)
                 }
-                meta.forEach { Text(text = it, style = NpMonoSmall, color = ink.muted, maxLines = 1) }
+                // 合并成一段再截断：逐段排布时超宽的最后一段会被卡片边缘**硬裁**
+                // （实测「360P HEVC」裁成「360P HE」），分隔符与详情页 meta 同款
+                Text(
+                    text = meta.joinToString(" · "),
+                    style = NpMonoSmall,
+                    color = ink.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
         }
     }
@@ -604,15 +612,15 @@ fun NpListRow(
                     if (folderTag != null) {
                         NpFolderTag(folder = folderTag, isAudio = folderTagIsAudio)
                     }
-                    meta.forEach {
+                    // 同 NpMediaCard：合并成一段，超宽时省略号收尾而不是被行边缘硬裁
+                    Text(
                         // 设计稿 `.lr-meta` 12px mono
-                        Text(
-                            text = it,
-                            style = NpMono.copy(fontSize = 12.sp),
-                            color = ink.muted,
-                            maxLines = 1,
-                        )
-                    }
+                        text = meta.joinToString(" · "),
+                        style = NpMono.copy(fontSize = 12.sp),
+                        color = ink.muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }

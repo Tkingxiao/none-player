@@ -352,6 +352,17 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val eventBus = remember { kernel.services.get<EventBus>() }
     val haptics = rememberNpHaptics()
 
+    // 详情页跟随队列：引擎推进播放项（自动连播 / 通知栏 ⏭）时，右栏画面已经换集，
+    // 详情页若还停在播完的那一集，标题/继续观看/同文件夹列表全都对不上画面。
+    // 只在**同一文件夹**内跟随——用户看着 A 的详情、后台在放 B 的队列时不应被拽走。
+    LaunchedEffect(detailItem?.id, detailItem?.folder) {
+        val folder = detailItem?.folder ?: return@LaunchedEffect
+        eventBus.subscribe<KernelEvent.PlaybackStarted>().collect { event ->
+            val next = sortedItems.firstOrNull { it.id == event.mediaId && it.folder == folder }
+            if (next != null && next.id != detailItem?.id) detailItem = next
+        }
+    }
+
     fun refresh() {
         if (refreshing || sources.isEmpty()) return
         refreshing = true

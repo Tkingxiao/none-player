@@ -3871,16 +3871,19 @@ internal fun VideoStage(
             )
             // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
             SubtitleLayer(cues = cues, modifier = Modifier.fillMaxSize())
-        }
-        // 覆盖层扩展点：字幕/弹幕等插件动态挂载（E23）
-        overlays.forEach { overlay ->
-            overlay.Render(
-                PlaybackContext(
-                    media = overlayMedia,
-                    player = player,
-                    navigator = navigator,
-                ),
-            )
+            // 覆盖层扩展点：弹幕等插件动态挂载（E23）。
+            // 必须挂在**视频画面内框**（与字幕层同界）：挂到外层容器时弹幕会铺满
+            // 整个窗格/整屏——类 PC 右栏里盖到顶栏与状态栏、宽片黑边上也飘字
+            // （平板实拍：弹幕文字越过视频上缘压到应用标题区）。
+            overlays.forEach { overlay ->
+                overlay.Render(
+                    PlaybackContext(
+                        media = overlayMedia,
+                        player = player,
+                        navigator = navigator,
+                    ),
+                )
+            }
         }
         // 缓冲指示（M22）：原先 `if` 挂载=硬切，网络一顿一停时圆环是"啪"地闪现，
         // 读起来像播放器 itself 出了问题。进 150 / 出 120 淡入淡出。
