@@ -983,7 +983,7 @@ private fun FolderRailOrGrid(
     if (compact) {
         val ink = LocalNpInk.current
         LazyRow(
-            modifier = Modifier.npMaskFadeEdges(ink.bg),
+            modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
             contentPadding = PaddingValues(horizontal = gutter),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -1065,8 +1065,9 @@ private fun MediaRail(
     val gutter = if (compact) 14.dp else 20.dp
     // 首屏窗口取在容器外层：rail 右端滚进来的卡片不再补播入场动画
     val staggerWindow = npStaggerWindow()
+    // 右栏占位时右端贴着栏边界，渐隐带会被读成"半透明过渡"——只保留左端（§4.5）
     LazyRow(
-        modifier = Modifier.npMaskFadeEdges(ink.bg),
+        modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
         contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {

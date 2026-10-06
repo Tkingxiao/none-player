@@ -298,40 +298,50 @@ fun NpMaskFade(
  * 两端**常驻**而不按滚动位置显隐是有意的：rail 有 `contentPadding`（14–20dp gutter），
  * 渐隐最强的那一段正好落在留白上，摸不到第一格的封面；
  * 换来的是不需要读 `LazyListState`、滚到底也不会看到"色带跳一下"。
+ *
+ * [fadeStart] / [fadeEnd]：类 PC 右栏占位时，横滑列表的**右端**正好贴着栏边界，
+ * 渐隐带会被读成"列表与播放栏之间的半透明过渡"（2026-10-07 用户实报）——
+ * 此时调用方传 `fadeEnd = false`，让边界回到硬分割。
  */
 fun Modifier.npMaskFadeEdges(
     color: Color,
     fadeSize: Dp = 24.dp,
     startAlpha: Float = 0.9f,
+    fadeStart: Boolean = true,
+    fadeEnd: Boolean = true,
 ): Modifier = drawWithContent {
     drawContent()
     val band = min(fadeSize.toPx(), size.width / 2f)
     if (band <= 0f) return@drawWithContent
     val h = size.height
     fun at(alpha: Float) = color.copy(alpha = alpha)
-    drawRect(
-        brush = Brush.horizontalGradient(
-            colorStops = arrayOf(
-                0f to at(startAlpha),
-                0.55f to at(startAlpha * 0.30f),
-                1f to at(0f),
+    if (fadeStart) {
+        drawRect(
+            brush = Brush.horizontalGradient(
+                colorStops = arrayOf(
+                    0f to at(startAlpha),
+                    0.55f to at(startAlpha * 0.30f),
+                    1f to at(0f),
+                ),
+                startX = 0f,
+                endX = band,
             ),
-            startX = 0f,
-            endX = band,
-        ),
-        size = Size(band, h),
-    )
-    drawRect(
-        brush = Brush.horizontalGradient(
-            colorStops = arrayOf(
-                0f to at(0f),
-                0.45f to at(startAlpha * 0.30f),
-                1f to at(startAlpha),
+            size = Size(band, h),
+        )
+    }
+    if (fadeEnd) {
+        drawRect(
+            brush = Brush.horizontalGradient(
+                colorStops = arrayOf(
+                    0f to at(0f),
+                    0.45f to at(startAlpha * 0.30f),
+                    1f to at(startAlpha),
+                ),
+                startX = size.width - band,
+                endX = size.width,
             ),
-            startX = size.width - band,
-            endX = size.width,
-        ),
-        topLeft = Offset(size.width - band, 0f),
-        size = Size(band, h),
-    )
+            topLeft = Offset(size.width - band, 0f),
+            size = Size(band, h),
+        )
+    }
 }

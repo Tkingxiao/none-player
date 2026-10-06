@@ -56,6 +56,7 @@ import com.noneplayer.core.ui.NpSectionHead
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.npMaskFadeEdges
+import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.core.ui.npStaggeredEntry
 import com.noneplayer.core.ui.npStaggerWindow
 import com.noneplayer.core.ui.formatTimestamp
@@ -244,7 +245,7 @@ private fun ProfileScreen(navigator: Navigator) {
                             // 首屏窗口在容器外层取一次：rail 滚到后面的卡片不再补播入场
                             val staggerWindow = npStaggerWindow()
                             LazyRow(
-                                modifier = Modifier.npMaskFadeEdges(ink.bg),
+                                modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
                                 contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                             ) {
@@ -297,7 +298,7 @@ private fun ProfileScreen(navigator: Navigator) {
                         } else {
                             val staggerWindow = npStaggerWindow()
                             LazyRow(
-                                modifier = Modifier.npMaskFadeEdges(ink.bg),
+                                modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
                                 contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
                                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                             ) {

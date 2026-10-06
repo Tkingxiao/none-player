@@ -377,12 +377,28 @@ fun KernelTabScaffold(
                                     .width(listWidth),
                             )
                             if (pane != null && paneInUse) {
-                                pane.Render(
-                                    navigator = navigator,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .fillMaxHeight(),
-                                )
+                                // 硬分割（2026-10-07 用户口径）：内容与右栏之间不做任何
+                                // 渐变过渡——1dp 发丝线 + 两侧同宽留白（pageGutter），
+                                // 右栏右缘同样让出留白、不贴屏幕边缘。
+                                val paneInk = LocalNpInk.current
+                                Row(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxHeight()
+                                            .width(1.dp)
+                                            .background(paneInk.border),
+                                    )
+                                    pane.Render(
+                                        navigator = navigator,
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .fillMaxHeight()
+                                            .padding(
+                                                start = windowInfo.pageGutter,
+                                                end = windowInfo.pageGutter,
+                                            ),
+                                    )
+                                }
                             }
                         }
                     }

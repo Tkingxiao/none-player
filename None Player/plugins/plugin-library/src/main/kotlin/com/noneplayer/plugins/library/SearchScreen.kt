@@ -73,6 +73,7 @@ import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.npClickable
 import com.noneplayer.core.ui.npItemFadeSpec
 import com.noneplayer.core.ui.npMaskFadeEdges
+import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.core.ui.npStaggeredEntry
 import com.noneplayer.core.ui.npStaggerWindow
 import com.noneplayer.kernel.api.MediaSourceProvider
@@ -322,7 +323,7 @@ private fun RecentSearches(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             modifier = Modifier
                 .padding(top = 10.dp)
-                .npMaskFadeEdges(ink.bg),
+                .npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
         ) {
             items(history, key = { it }) { term ->
                 NpChip(
