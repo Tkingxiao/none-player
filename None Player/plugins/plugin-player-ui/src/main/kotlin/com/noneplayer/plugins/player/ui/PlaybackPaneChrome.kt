@@ -112,7 +112,7 @@ class PlaybackPaneChrome : DetailPaneProvider {
                     media = snapshot.item,
                     navigator = navigator,
                     onFullscreen = {
-                        // `fs=1` = 明确的全屏意图：类 PC 档落地即沉浸隐藏系统栏（§14 #16 的出口）
+                        // `fs=1` = 明确的全屏意图：全屏只有沉浸一种（假全屏已删除）
                         navigator.navigate(
                             "player?uri=${encode(snapshot.item.uri)}" +
                                 "&title=${encode(snapshot.title)}" +

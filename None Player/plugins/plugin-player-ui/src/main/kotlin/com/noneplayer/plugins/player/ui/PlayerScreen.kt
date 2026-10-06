@@ -394,10 +394,9 @@ fun PlayerScreen(
     /** 「从头播放」（长按菜单）：不恢复断点，从 0 起播 */
     fromStart: Boolean = false,
     /**
-     * §14 #16：类 PC 档**默认不隐藏系统栏**（窗口化观看）。只有带着明确
-     * "我要全屏"意图进来的那一次（详情页/右栏内嵌播放点「全屏」= 路由 `fs=1`）
-     * 才直接落地成沉浸全屏——用户实报过"点全屏进入的还是假全屏（能看见小白条）"，
-     * 这一条就是那次报动的出口。手机式横屏不受此参数影响（本就沉浸）。
+     * "我要全屏"意图（详情页「全屏观看」/ 右栏 ⛶ = 路由 `fs=1`）：
+     * 落地即进全屏——竖窗先请求横向，横窗（平板自然方向）本就是全屏。
+     * 假全屏（横窗版式 + 系统栏可见的中间态）已删除：全屏只有沉浸一种（2026-10-07）。
      */
     immersiveEntry: Boolean = false,
 ) {
@@ -567,14 +566,10 @@ fun PlayerScreen(
     val windowInfo = LocalNpWindowInfo.current
     val isDesktopLike = windowInfo.isDesktopLike
     val isFullscreen = !windowIsPortrait
-    // 类 PC 的独占播放页**默认窗口化**（§14 #16：这一档不隐藏系统栏）：
-    // 它由右栏内嵌播放栏（§8.2 路径 A）继续陪着列表，而不是把系统栏抹掉。
-    // ⛶ 仍可切入沉浸；从详情页/右栏点「全屏」进来（路由 `fs=1`）则一落地就沉浸——
-    // 用户实报过"点全屏进入的还是假全屏（能看见小白条）"，`immersiveEntry` 就是那次的出口。
-    // 手机横屏语义不变（`isImmersive` 里 !isDesktopLike 直接沉浸）。
-    var immersiveFullscreen by rememberSaveable { mutableStateOf(immersiveEntry) }
-    /** 隐藏系统栏的沉浸：手机式横屏恒沉浸；类 PC 默认窗口化，⛶ / `F` 才切入沉浸 */
-    val isImmersive = isFullscreen && (!isDesktopLike || immersiveFullscreen)
+    // **全屏 ≡ 沉浸**（2026-10-07 用户裁定：假全屏整组删除）：横向窗口一律隐藏系统栏，
+    // 不再有"横窗版式 + 系统栏可见"的中间态。竖窗（手机竖持 / 平板竖持 / 窗口化）
+    // 是普通的竖屏播放页，不叫全屏，也就没有"看得见小白条的全屏"。
+    val isImmersive = isFullscreen
     var orientationLock by rememberSaveable { mutableStateOf(OrientationLock.FollowSensor) }
     // 弹层提示的状态位提前到这里：方向请求被系统驳回时要靠它说清楚原因
     val toast = rememberNpToastState()
@@ -636,19 +631,17 @@ fun PlayerScreen(
     LaunchedEffect(isFullscreen) {
         if (!isFullscreen) orientationLock = OrientationLock.FollowSensor
     }
+    // fs=1（详情「全屏观看」/ 右栏 ⛶）：落地即全屏——竖窗先请求横向，
+    // 横窗（平板自然方向）本来就是全屏，无需请求。
+    LaunchedEffect(immersiveEntry) {
+        if (immersiveEntry && windowIsPortrait) setFullscreen(true)
+    }
 
     /**
      * 「返回类」出口（系统返回键 / Esc / 左上角返回箭头）：**保证能出去**。
      * 有全屏可退 → 退全屏留在播放页；否则 → 离开播放页。
      */
     fun exitFullscreenOrLeave() {
-        // 类 PC 的"全屏"是**沉浸**而不是换版式（§8.3）：这一次返回先把系统栏放回来。
-        // 不吞下一次——收回沉浸后 isImmersive 即为 false，再按返回落到下面离页分支，
-        // 仍是"最多两下必定出得去"。
-        if (isDesktopLike && immersiveFullscreen) {
-            immersiveFullscreen = false
-            return
-        }
         if (orientationLock != OrientationLock.Landscape) {
             navigator.popBackStack()
             return
@@ -707,15 +700,15 @@ fun PlayerScreen(
 
     var controlsVisible by remember { mutableStateOf(true) }
     /**
-     * 「全屏」这一动作的唯一实现（控制层右下角的钮与 §8.4 的 `F` 共用）：
-     * 类 PC 上它是**沉浸切换**（版式不动，只收起/放出系统栏），其余形态才是换版式。
+     * 「全屏切换」钮（控制层右下角，与 §8.4 的 `F` 共用）——按当前语境给唯一解：
+     * 竖窗 = 进全屏（请求横向）；手机横窗全屏 = 锁竖屏退全屏、留在播放页；
+     * 类 PC 横窗全屏 = 回到浏览（右栏续播同一会话）。没有第三种"窗口化横屏"可去。
      */
     fun toggleFullscreen() {
-        if (isDesktopLike) {
-            immersiveFullscreen = !immersiveFullscreen
-        } else {
-            // 切换类出口：只换版式，不把用户弹出播放页
-            requestExitFullscreen()
+        when {
+            !isFullscreen -> setFullscreen(true)
+            isDesktopLike -> navigator.popBackStack()
+            else -> requestExitFullscreen()
         }
         controlsVisible = true
     }
@@ -865,11 +858,11 @@ fun PlayerScreen(
         state,
         userDragging,
         pointerAttached,
-        immersiveFullscreen,
+        isImmersive,
         fsMenuPage,
         stageLocked,
     ) {
-        if (pointerAttached && !immersiveFullscreen && !stageLocked) return@LaunchedEffect
+        if (pointerAttached && !isImmersive && !stageLocked) return@LaunchedEffect
         if (fsMenuPage != null) return@LaunchedEffect
         if (controlsVisible && state == PlaybackState.Playing && !userDragging) {
             delay(CONTROLS_AUTO_HIDE_MS)
@@ -1560,12 +1553,8 @@ fun PlayerScreen(
                             )
                             .padding(16.dp),
                     )
-                    // §8.3：类 PC 的窗口化观看（未沉浸）里控制层**底部集中**——
-                    // 动作全去底栏左端，顶栏只留标题（时钟电量归系统栏，见 [showStatus]）。
-                    // 鼠标/触控都停在同一条边，
-                    // 不必为了"收起菜单"在画面上下之间奔波。
-                    // 显式进入沉浸全屏（⛶）时维持影院式的上+下两条：那是"专心看片"的版式。
-                    val controlsAtBottom = isDesktopLike && !immersiveFullscreen
+                    // 假全屏删除后横向全屏只剩影院一种，控制层恒为"上+下"两条，
+                    // 旧"底部集中"版式（类 PC 窗口化横屏专用）连同其边栏动作一并移除。
                     // ⋯（播放选项下拉）/ 选集。顶栏与底栏共用这一份实现：同材质、
                     // 同一条 scrim、同一套锚点回报，两处不会各写一份而漂移。
                     @Composable fun BarOptionButtons() {
@@ -1593,26 +1582,6 @@ fun PlayerScreen(
                             )
                         }
                     }
-                    // 底部集中档里顶栏的返回/锁定也下来了
-                    @Composable fun BarEdgeActions() {
-                        BarCtlButton(
-                            icon = NpIcon.ArrowLeft,
-                            contentDescription = "返回",
-                            onClick = {
-                                exitFullscreenOrLeave()
-                                controlsVisible = true
-                            },
-                        )
-                        BarCtlButton(
-                            icon = if (stageLocked) NpIcon.Lock else NpIcon.LockOpen,
-                            contentDescription = if (stageLocked) "已锁定" else "锁屏",
-                            onClick = { stageLocked = true },
-                        )
-                        BarOptionButtons()
-                    }
-                    val edgeActions: @Composable () -> Unit = { BarEdgeActions() }
-                    val bottomLeading: (@Composable () -> Unit)? =
-                        if (controlsAtBottom) edgeActions else null
                     PlayerTopBar(
                         // 锁定态里顶/底控制层整体不出——锁定后舞台上只剩解锁钮
                         visible = controlsVisible && !inPipMode && !stageLocked,
@@ -1630,7 +1599,7 @@ fun PlayerScreen(
                         // 右上：⋯（播放选项下拉）/ 选集。**图标直接摆在顶栏里**，和底栏同一
                         // 材质、同一条 scrim、随控制层一起显隐。倍速不在这里出现：
                         // 底栏已有倍速钮，右上角再放一份是重复。
-                        showActions = !controlsAtBottom,
+                        showActions = true,
                         trailing = { BarOptionButtons() },
                         modifier = Modifier.align(Alignment.TopCenter),
                     )
@@ -1638,7 +1607,7 @@ fun PlayerScreen(
                         visible = controlsVisible && !inPipMode && !stageLocked,
                         applyInsets = true,
                         showTransport = true,
-                        leadingActions = bottomLeading,
+                        leadingActions = null,
                         positionMs = positionState,
                         durationMs = durationMs,
                         bufferedPositionMs = bufferedPositionMs,
@@ -1681,7 +1650,8 @@ fun PlayerScreen(
                             }
                         },
                         onToggleFullscreen = ::toggleFullscreen,
-                        fullscreenActive = isDesktopLike && immersiveFullscreen,
+                        // 全屏形态恒处于全屏：按钮恒为「退出全屏」态（类 PC 点它 = 回浏览）
+                        fullscreenActive = true,
                         onSpeedAnchor = { speedAnchor = it },
                         onSubtitleAnchor = { subtitleAnchor = it },
                         onSeekBarAnchor = { seekBarAnchor = it },

@@ -204,8 +204,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<InlinePlaybackProvider>())
     // §8.2 路径 A：外壳已经把右栏让给播放器时，详情页不再自带内联画面——
     // 一台播放器只有一个输出 Surface，两处同时挂会把先挂的那个顶成黑屏。
-    // 此时详情页的「播放」= 要整页播放器（窗口化），不是要沉浸全屏；
-    // 显式的全屏意图留给播放页里那个 ⛶。
+    // 此时详情页只剩封面海报；整页观看走「全屏观看」（全屏只有沉浸一种）。
     val paneOccupied = LocalNpPaneOccupied.current
     val inlinePlayer = if (paneOccupied) null else inlinePlayers.firstOrNull()
     /** 点视频的落点分派：类 PC 先看详情；其余形态保持"直接进播放页" */
@@ -521,9 +520,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                 resumeMs = positions[detail.id] ?: 0L,
                                 navigator = navigator,
                                 inlinePlayer = inlinePlayer,
-                                // 详情页内嵌画面的 ⛶ = 明确的全屏意图（落地成沉浸）；
-                                // 右栏已接管播放时这里是"要整页播放器"，保持窗口化（§14 #16）
-                                onFullscreen = { openPlayer(navigator, it, immersive = !paneOccupied) },
+                                // ⛶ = 明确的全屏意图：独占播放页只有沉浸一种（假全屏已删除）
+                                onFullscreen = { openPlayer(navigator, it, immersive = true) },
                                 onSelect = { detailItem = it },
                             )
                         }
@@ -2160,8 +2158,8 @@ internal val LocalMediaLongPress =
  * 单参重载会放行 `& = ? +` 一类分隔符，一个含 `&` 的标题
  * （"Rock & Roll.mkv"）就能把后面的 mime/id 参数整段截掉。
  *
- * [immersive]：详情页内嵌播放点「全屏」那一条路径带 `fs=1`——类 PC 档的播放页
- * 默认窗口化（§14 #16「不隐藏系统栏」），只有明确的全屏意图才落地成沉浸。
+ * [immersive]：明确的全屏意图（详情页「全屏观看」/ 右栏 ⛶）带 `fs=1`——
+ * 假全屏已删除（2026-10-07）：全屏只有沉浸一种，`fs=1` 落地即全屏（竖窗先转横向）。
  */
 internal fun openPlayer(
     navigator: Navigator,
