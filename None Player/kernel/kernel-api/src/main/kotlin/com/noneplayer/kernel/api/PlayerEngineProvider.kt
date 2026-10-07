@@ -165,6 +165,16 @@ interface VideoPlayer {
     /** 设置循环模式（顺序/单集循环/列表循环/随机）；不支持时为空操作 */
     fun setLoopMode(mode: NpLoopMode) {}
 
+    /**
+     * 自动连播下一集（设置页「播放」组）。
+     *
+     * 关闭时，当前条目播完应**停在末帧**而不是自动推进到队列下一项——引擎侧对应
+     * media3 的 `ExoPlayer.setPauseAtEndOfMediaItems(true)`（会在末帧暂停并把
+     * `playWhenReady` 置 false，理由为 `PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM`）。
+     * 不支持队列语义的引擎可退化为空操作。
+     */
+    fun setAutoplayNext(enabled: Boolean) {}
+
     /** 挂载外挂字幕文件（file 的 content uri）；传入 null 清除；不支持时为空操作 */
     fun setSubtitle(uri: String?) {}
 

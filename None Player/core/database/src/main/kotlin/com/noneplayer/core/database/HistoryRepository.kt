@@ -163,8 +163,15 @@ class HistoryRepository(context: Context) {
     }
 
     companion object {
-        /** 已看比例达到该值视为"看完"：不再出现在继续观看里（§8.3） */
-        const val WATCHED_DONE_RATIO = 0.95f
+        /**
+         * "看完"线：达到该比例即视为已看完。
+         *
+         * **全项目唯一的一份**：库页「继续观看 / 未看完 / 已看完」筛选、我的页进度标签、
+         * 以及装载链的"不留断点"护栏（[isWatchedToEnd]）都引用这里。此前数据层写 0.95
+         * 而 UI 侧硬编码 0.99，同一条线两个数——调一处必然让另一处失真（L5 的成因之一：
+         * 播到 99% 的片子卡片还挂在"继续观看"里，点进去却因为断点已在片尾而直接结束）。
+         */
+        const val WATCHED_DONE_RATIO = 0.99f
 
         /** E12：进度门槛——低于它且未完看时不落盘（切集瞬间的 0 附近位置不污染历史） */
         const val MIN_PERSIST_POSITION_MS = 10_000L
@@ -174,6 +181,17 @@ class HistoryRepository(context: Context) {
             if (durationMs <= 0L) return 0f
             return (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
         }
+
+        /**
+         * 纯函数（可单测）：这条断点是否已经"看到底了"。
+         *
+         * 装载链据此**不恢复**断点（L5）：否则播完后落盘的片尾位置会在下次打开时被原样
+         * 套用，用户看到的是"刚点进去就结束"。这里只在读取侧拦，**不把库里的进度清零**——
+         * 行里的 `position_ms` 同时是"已看 x%"和「播放历史 / 最近播放」的展示依据，
+         * 清零会让看完的片子从历史里消失。
+         */
+        fun isWatchedToEnd(positionMs: Long, durationMs: Long): Boolean =
+            durationMs > 0L && watchedRatio(positionMs, durationMs) >= WATCHED_DONE_RATIO
 
         /** 纯函数（可单测）：这次进度值不值得写（E12：<10s 且未完看不写） */
         fun shouldPersist(positionMs: Long, durationMs: Long): Boolean {

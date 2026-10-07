@@ -127,6 +127,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     // E39/E41：探测期间的挂起操作与轨道信息
     private var prepareJob: Job? = null
     private var pendingSeekMs: Long? = null
+
+    /**
+     * 自动连播下一集（设置页开关，L1）。连接建立前先记在这里，连上后补发——
+     * 会话侧默认是"自动推进"，漏发会静默变成"关不掉自动连播"。
+     */
+    private var autoplayNext = true
+
     private var appliedUri: String? = null
     private var probedContainer: String? = null
     private var probedVideoCodec: String? = null
@@ -273,6 +280,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     // 同理：重进时轨道/章节也不会再回调，主动同步一次
                     publishTracks(c.currentTracks)
                     publishChapters(c.currentTracks, null)
+                    // 会话侧默认"播完自动推进"：连接建立后补发一次当前偏好，
+                    // 否则"关闭自动连播"在重建控制器后（换 mime / 重进）会失效
+                    sendAutoplayFlag()
                     connected.complete(c)
                     scope.launch { pollPosition(c) }
                 } catch (t: Throwable) {
@@ -765,6 +775,26 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         controller?.sendCustomCommand(
             SessionCommand(CROP_COMMAND, Bundle.EMPTY),
             Bundle().apply { putBoolean(CROP_ARG_ACTIVE, crop) },
+        )
+    }
+
+    /**
+     * 自动连播下一集（设置页「播放」组，L1）。
+     *
+     * 关闭时让会话侧每条播完停在末帧（`setPauseAtEndOfMediaItems(true)`）——
+     * 那是 ExoPlayer 而非 `Player` 接口上的方法，MediaController 调不到，
+     * 与 np.scrub / np.crop 同路经自定义命令转发（见 PlaybackService）。
+     */
+    override fun setAutoplayNext(enabled: Boolean) {
+        autoplayNext = enabled
+        sendAutoplayFlag()
+    }
+
+    /** 补发当前自动连播偏好；控制器未就绪时是空操作（连上后会补发一次） */
+    private fun sendAutoplayFlag() {
+        controller?.sendCustomCommand(
+            SessionCommand(AUTOPLAY_COMMAND, Bundle.EMPTY),
+            Bundle().apply { putBoolean(AUTOPLAY_ARG_ENABLED, autoplayNext) },
         )
     }
 

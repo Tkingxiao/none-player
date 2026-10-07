@@ -13,20 +13,39 @@ import java.io.File
 private const val MAX_SUBTITLE_BYTES = 8 * 1024 * 1024
 
 /**
+ * 挂载前处理的结果。
+ *
+ * [uri] 可直接交给播放引擎；[sourceMissing] = 源地址**打不开**（文件被移走 / SAF 授权
+ * 失效），此时 [uri] 只是原样回退，播放器大概率也拿不到内容——调用方据此给一条
+ * 「字幕文件已失效」提示（L7：此前静默降级，用户以为是自己没挂上）。
+ */
+internal data class PreparedSubtitle(
+    val uri: String,
+    val sourceMissing: Boolean = false,
+)
+
+/**
  * 挂载前的字幕字符集处理（E40）：
  * 读入 → 探测（[SubtitleCharset]）→ 非 UTF-8 时落 `cache_dir/subs/` 下的 UTF-8 副本。
  * 返回可直接交给播放引擎的地址；任何失败都回退原地址（不阻断挂载）。
  */
-internal suspend fun prepareSubtitleUri(context: Context, source: Uri): String =
+internal suspend fun prepareSubtitleUri(context: Context, source: Uri): PreparedSubtitle =
     withContext(Dispatchers.IO) {
+        // 打开失败与"读得太多判定超限"是两码事：前者是源没了（要提示），
+        // 后者文件还在、只是不像字幕（不该说"失效"）
+        var missing = false
         runCatching {
             // E63 修复：字幕选择器 arrayOf("*/*") 不限制文件类型，用户可能误选一个
             // 几 GB 的视频文件"当字幕"。此前 readBytes() 先把整个文件读入内存、
             // 再检查 MAX_SUBTITLE_BYTES，保护形同虚设。改为有界读取：
             // 读满上限 +1 字节立即中止，不等整份数据落地。
             // 流打开失败或 readBounded 判定超限（返回 null）都统一回退原地址
-            val bytes = context.contentResolver.openInputStream(source)
-                ?.use { stream -> readBounded(stream, MAX_SUBTITLE_BYTES) }
+            val stream = runCatching { context.contentResolver.openInputStream(source) }.getOrNull()
+            if (stream == null) {
+                missing = true
+                return@runCatching source.toString()
+            }
+            val bytes = stream.use { readBounded(it, MAX_SUBTITLE_BYTES) }
                 ?: return@runCatching source.toString()
 
             val decoded = SubtitleCharset.decode(bytes)
@@ -44,7 +63,7 @@ internal suspend fun prepareSubtitleUri(context: Context, source: Uri): String =
             val target = File(dir, "${stem}-${sourceDigest(source.toString())}.srt")
             target.writeText(decoded.text, Charsets.UTF_8)
             target.toUri().toString()
-        }.getOrDefault(source.toString())
+        }.let { PreparedSubtitle(it.getOrDefault(source.toString()), missing) }
     }
 
 /** 有界读取：读满 limit+1 字节即返回 null（超限），不把超限数据整份读入内存 */

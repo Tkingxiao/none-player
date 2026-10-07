@@ -19,9 +19,13 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionResult
+import com.noneplayer.core.data.AppSettings
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
 import com.homesoft.exo.extractor.AviExtractorsFactory
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** 擦洗命令：UI 拖动进度条时切换 seek 精度（会话侧 API 不在 MediaController 暴露） */
 internal const val SCRUB_COMMAND = "np.scrub"
@@ -30,6 +34,15 @@ internal const val SCRUB_ARG_ACTIVE = "active"
 /** 画面裁剪命令：UI「画面」面板切换 cover/fit（同样只在会话侧暴露） */
 internal const val CROP_COMMAND = "np.crop"
 internal const val CROP_ARG_ACTIVE = "active"
+
+/**
+ * 自动连播命令（设置页「播放 · 自动连播下一集」的引擎侧落点）。
+ *
+ * `setPauseAtEndOfMediaItems` 是 ExoPlayer 而非 `Player` 接口上的方法，MediaController
+ * 调不到，与 np.scrub / np.crop 同路转发。关闭自动连播时置 true：每条播完停在末帧。
+ */
+internal const val AUTOPLAY_COMMAND = "np.autoplay"
+internal const val AUTOPLAY_ARG_ENABLED = "enabled"
 
 /** 会话通知点击落点的 PendingIntent 请求码 */
 private const val REQUEST_LAUNCH = 100
@@ -42,6 +55,9 @@ private const val PRELOAD_NEXT_NEXT_MS = 5
 /** 喂给预载管理器的窗口：当前项前后各若干项（见 syncPreloadQueue 注释） */
 private const val PRELOAD_WINDOW_BACK = 1
 private const val PRELOAD_WINDOW_FORWARD = 3
+
+/** 读「硬件解码优先」偏好的超时上限：读不到就用默认档，不让服务卡在启动上 */
+private const val HARDWARE_DECODE_READ_TIMEOUT_MS = 1_500L
 
 /**
  * 后台播放服务——media3 MediaSessionService。
@@ -85,10 +101,28 @@ class PlaybackService : MediaSessionService() {
         // E21 兜底链路：解码器失败自动换下一个（软解/低档位）；倍速经 AudioTrack 原生处理。
         // NpRenderersFactory = 平台硬解 + NextLib 的 FFmpeg 软解 + AVI MJPEG 位图软解
         // （三段来源与顺序见该类注释）。
-        // EXTENSION_RENDERER_MODE_ON：硬解优先，平台解码器不支持该编码时才落到 FFmpeg 软解——
-        // 这就是"软硬解自适应"的全部含义（不做运行期解码器切换，原因见 NpRenderersFactory 注释）。
+        // L2：「硬件解码优先」设置的真实接线（此前是假开关——工厂恒定 ON，不看设置）。
+        // 渲染器集合在 ExoPlayer **构建期**定型（setExtensionRendererMode 是工厂属性，
+        // MediaController 运行期改不了），所以建播放器之前读一次偏好；服务随播放会话建立，
+        // 所以切换开关在下一个播放器实例（下一次播放会话）上生效——设置行的副题如实标注。
+        // 读取超时/失败退回默认（硬解优先），不让设置层的问题拖垮服务启动。
+        //
+        // 映射：ON = 平台硬解优先、平台解不了才落 FFmpeg；PREFER = FFmpeg 软解优先（兼容档）。
+        // **不能映射成 OFF**——那会把扩展渲染器整条摘掉，AVI/MJPEG 之外的一票旧编码直接变
+        // "无法播放"，与设置行承诺的"兼容性更好"正好相反。
+        val hardwareFirst = runBlocking {
+            withTimeoutOrNull(HARDWARE_DECODE_READ_TIMEOUT_MS) {
+                AppSettings(this@PlaybackService).hardwareDecodePreferred.first()
+            }
+        } ?: true
         val renderersFactory = NpRenderersFactory(this)
-            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+            .setExtensionRendererMode(
+                if (hardwareFirst) {
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+                } else {
+                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+                },
+            )
             .setEnableDecoderFallback(true)
             .setEnableAudioTrackPlaybackParams(true)
         // AVI 交给 Media3Avi 的增强解封装器（OpenDML/AVIX + indx/ix 索引、MP42/MP43、MJPEG、
@@ -263,12 +297,13 @@ class PlaybackService : MediaSessionService() {
     }
 
     /**
-     * 会话回调：放行 np.scrub / np.crop 自定义命令，并在收到时切换 ExoPlayer
-     * 的擦洗模式与画面缩放模式。
+     * 会话回调：放行 np.scrub / np.crop / np.autoplay 自定义命令，并在收到时切换
+     * ExoPlayer 的擦洗模式、画面缩放模式与"播完是否自动推进"。
      *
      * 1.8+ 官方擦洗模式（CLOSEST_SYNC 就近定位 + 关闭开销大的后处理），
-     * 松手恢复常规精确 seek。setScrubbingModeEnabled / setVideoScalingMode 都是
-     * ExoPlayer（会话侧）API，MediaController 无法直接调用，必须经会话侧转发。
+     * 松手恢复常规精确 seek。setScrubbingModeEnabled / setVideoScalingMode /
+     * setPauseAtEndOfMediaItems 都是 ExoPlayer（会话侧）API，MediaController 无法
+     * 直接调用，必须经会话侧转发。
      */
     @OptIn(UnstableApi::class)
     private class ScrubAwareCallback(
@@ -283,6 +318,7 @@ class PlaybackService : MediaSessionService() {
                 .buildUpon()
                 .add(SessionCommand(SCRUB_COMMAND, Bundle.EMPTY))
                 .add(SessionCommand(CROP_COMMAND, Bundle.EMPTY))
+                .add(SessionCommand(AUTOPLAY_COMMAND, Bundle.EMPTY))
                 .build()
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
                 .setAvailableSessionCommands(commands)
@@ -309,6 +345,13 @@ class PlaybackService : MediaSessionService() {
                         C.VIDEO_SCALING_MODE_SCALE_TO_FIT
                     },
                 )
+                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            }
+            if (customCommand.customAction == AUTOPLAY_COMMAND) {
+                // L1：「自动连播下一集」关闭 = 每条播完停在末帧。media3 的开关语义与
+                // 设置项相反，这里做唯一一次取反；缺省 true（与设置默认值一致），
+                // 免得漏发一次参数就把"不自动连播"当成"自动连播"。
+                player.setPauseAtEndOfMediaItems(!args.getBoolean(AUTOPLAY_ARG_ENABLED, true))
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }
             return super.onCustomCommand(session, controller, customCommand, args)

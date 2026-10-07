@@ -27,6 +27,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -83,12 +84,16 @@ import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 /** 搜索页路由（顶栏搜索钮 → navigator.navigate） */
 const val SEARCH_ROUTE = "search"
+
+/** L13：搜索防抖窗口——停顿这么久才按新词重算结果（设计文档既定参数 120ms） */
+private const val SEARCH_DEBOUNCE_MS = 120L
 
 /**
  * 搜索页——设计稿 `searchView()`。
@@ -111,6 +116,16 @@ fun SearchScreen(navigator: Navigator) {
     val gutter = if (compact) 14.dp else 20.dp
 
     var query by rememberSaveable { mutableStateOf("") }
+    // L13：搜索防抖——输入框仍逐键实时回显 query，但结果只按 debouncedQuery 重算。
+    // 此前 `remember(items, query, …)` 每敲一个键就全量 filter+sort 一遍，数千条的库
+    // 会明显卡输入；拖动/快速输入尤其能感到掉帧。
+    var debouncedQuery by remember { mutableStateOf(query) }
+    LaunchedEffect(query) {
+        if (query == debouncedQuery) return@LaunchedEffect
+        delay(SEARCH_DEBOUNCE_MS)
+        debouncedQuery = query
+    }
+    val effectiveQuery = debouncedQuery.trim()
     val history by settings.searchHistory.collectAsStateWithLifecycle(initialValue = emptyList())
     val sortMode by settings.sortMode.collectAsStateWithLifecycle(SortMode.ADDED)
     val sortAscending by settings.sortAscending.collectAsStateWithLifecycle(false)
@@ -128,8 +143,8 @@ fun SearchScreen(navigator: Navigator) {
     }.collectAsStateWithLifecycle(initialValue = null)
     val items = mediaState ?: emptyList()
 
-    val results = remember(items, query, sortMode, sortAscending) {
-        val q = query.trim()
+    val results = remember(items, debouncedQuery, sortMode, sortAscending) {
+        val q = debouncedQuery.trim()
         if (q.isEmpty()) {
             emptyList()
         } else {
@@ -187,7 +202,7 @@ fun SearchScreen(navigator: Navigator) {
                     onCommit = { commitSearch() },
                     gutter = gutter,
                 )
-                if (query.trim().isEmpty()) {
+                if (effectiveQuery.isEmpty()) {
                     RecentSearches(
                         history = history,
                         gutter = gutter,
@@ -199,7 +214,7 @@ fun SearchScreen(navigator: Navigator) {
                 } else {
                     SearchResults(
                         results = results,
-                        query = query.trim(),
+                        query = effectiveQuery,
                         gutter = gutter,
                         compact = compact,
                         gridColumns = gridColumns,

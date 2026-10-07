@@ -360,7 +360,9 @@ private fun PlaybackSettingsGroup(gutter: Dp) {
     Column(modifier = Modifier.padding(horizontal = gutter)) {
         NpSettingRow(
             title = "硬件解码优先",
-            subtitle = "关闭后使用 CPU 软解，兼容性更好但更耗电",
+            // L2：解码器集合在播放器构建期定型，切换无法在本次播放中途改写——
+            // 如实标注生效时机，而不是让用户以为马上就换（真实接线见 PlaybackService.onCreate）
+            subtitle = "关闭后优先用 CPU 软解，兼容性更好但更耗电；下次播放生效",
             icon = NpIcon.Gear,
             trailing = {
                 NpSwitch(

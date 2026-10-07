@@ -856,7 +856,7 @@ private fun HomeView(
     // 进度落盘）都要全量重扫一遍 videos；而它是"继续观看"轨道唯一的数据来源，
     // 与 videos/progressMap 之外的重组无关。
     val unfinished = remember(videos, progressMap) {
-        videos.filter { fractionOf(it, progressMap) in 0.01f..0.99f }
+        videos.filter { fractionOf(it, progressMap) in 0.01f..<HistoryRepository.WATCHED_DONE_RATIO }
     }
 
     // 区块存在性先算出来：`.block:first-child` 无上边框（设计稿 106），
@@ -1706,8 +1706,12 @@ internal fun filterList(
     return when (filter) {
         FilterKey.VIDEO.key -> list.filter { it.kind == MediaKind.VIDEO }
         FilterKey.AUDIO.key -> list.filter { it.kind == MediaKind.AUDIO }
-        FilterKey.UNFINISHED.key -> list.filter { fractionOf(it, positions) in 0.01f..0.99f }
-        FilterKey.DONE.key -> list.filter { fractionOf(it, positions) >= 0.99f }
+        // 「未看完 / 已看完」共用 HistoryRepository 的「看完」线——此前 UI 硬编码 0.99
+        // 而数据层写 0.95，"同一部片子两个结论"（L5 家族）
+        FilterKey.UNFINISHED.key ->
+            list.filter { fractionOf(it, positions) in 0.01f..<HistoryRepository.WATCHED_DONE_RATIO }
+        FilterKey.DONE.key ->
+            list.filter { fractionOf(it, positions) >= HistoryRepository.WATCHED_DONE_RATIO }
         FilterKey.NEW.key -> list.filter { now - it.addedAtMs < 48 * 60 * 60 * 1000L }
         else -> list
     }
@@ -1883,7 +1887,8 @@ private fun AggregateList(
 
     val base = remember(all, mode, positions, lastAt, favoriteKeys) {
         when (mode) {
-            "continue" -> all.filter { fractionOf(it, positions) in 0.01f..0.99f }
+            "continue" ->
+                all.filter { fractionOf(it, positions) in 0.01f..<HistoryRepository.WATCHED_DONE_RATIO }
             // 设计稿 `videos.filter(v => v.prog > 0)`，顺序 = 最近播放时间倒序
             "history" -> all.filter { (positions[it.id] ?: 0L) > 0L }
                 .sortedByDescending { lastAt[it.id] ?: 0L }

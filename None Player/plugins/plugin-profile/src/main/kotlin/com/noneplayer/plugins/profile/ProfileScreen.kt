@@ -424,7 +424,11 @@ private fun RecentCard(item: MediaItem, onOpen: () -> Unit, progress: Float = 0f
         // 设计稿 medCard 的 meta：`已看 x% · 时长 · 分辨率`
         meta = buildList {
             item.episodeLabel?.let { add(it) }
-            if (progress > 0.01f && progress < 0.99f) add("已看 ${(progress * 100).toInt()}%")
+            // 「看完」线与库页/数据层同源（HistoryRepository.WATCHED_DONE_RATIO）——
+            // 到线就不再加"已看 x%"，卡片只留时长与分辨率
+            if (progress > 0.01f && progress < HistoryRepository.WATCHED_DONE_RATIO) {
+                add("已看 ${(progress * 100).toInt()}%")
+            }
             formatTimestamp(item.durationMs).takeIf { item.durationMs > 0 }?.let { add(it) }
             item.resolutionLabel.takeIf { it.isNotEmpty() }?.let { add(it) }
             item.videoCodec?.let { add(it) }

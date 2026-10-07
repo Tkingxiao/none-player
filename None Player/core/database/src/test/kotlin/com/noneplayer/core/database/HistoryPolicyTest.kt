@@ -41,8 +41,18 @@ class HistoryPolicyTest {
 
     @Test
     fun `短片的看完位置要写（不足十秒但比例过阈值）`() {
-        // 15 秒短片看到 14.5 秒 → ratio 0.966 ≥ 0.95 → 看完，落盘
-        assertTrue(HistoryRepository.shouldPersist(14_500, 15_000))
+        // 15 秒短片看到 14.9 秒 → ratio 0.993 ≥ 0.99 → 看完，落盘
+        assertTrue(HistoryRepository.shouldPersist(14_900, 15_000))
+    }
+
+    @Test
+    fun `看到底了不留断点`() {
+        // 播完（位置 = 时长）与 99% 以上都算到底——装载链据此从头播（L5）
+        assertTrue(HistoryRepository.isWatchedToEnd(180_000, 180_000))
+        assertTrue(HistoryRepository.isWatchedToEnd(178_500, 180_000))
+        assertFalse(HistoryRepository.isWatchedToEnd(170_000, 180_000))
+        // 时长未知时不能判"看完"——否则任何一条脏断点都会被静默丢弃
+        assertFalse(HistoryRepository.isWatchedToEnd(9_999, 0))
     }
 
     @Test

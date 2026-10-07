@@ -138,6 +138,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaNaturalOrder
@@ -474,6 +475,9 @@ fun PlayerScreen(
     // E57 修复：scheme 不在白名单内时在此落地一个本地（非播放器）错误态——
     // 连 prepare() 都不调用，避免未知 scheme 的字符串以任何形式送进引擎。
     var rejectedUriError by remember(uri) { mutableStateOf<String?>(null) }
+    // 弹层提示的状态位提前到这里：装载链的"字幕已失效"与方向请求被系统驳回
+    // 都要靠它说清原因（都在下面更靠前的 LaunchedEffect 里触发）。
+    val toast = rememberNpToastState()
 
     // 本页是否已完成首个媒体的装载。
     //
@@ -534,6 +538,9 @@ fun PlayerScreen(
         )
         // 只有真的从断点起播才提示（从头播放/会话本来就在播同一媒体都不会走到这里）
         if (started.resumedFromMs > 0L) resumeNoticeMs = started.resumedFromMs
+        // L7：记忆里的外挂字幕打不开（文件被移走 / 授权失效）时说一声——
+        // 此前是静默降级，用户只看到"没字幕"，以为是自己没挂上
+        if (started.subtitleMissing) toast.show("字幕文件已失效，请重新挂载")
         mediaOpened = true
     }
 
@@ -603,8 +610,6 @@ fun PlayerScreen(
     // 是普通的竖屏播放页，不叫全屏，也就没有"看得见小白条的全屏"。
     val isImmersive = isFullscreen
     var orientationLock by rememberSaveable { mutableStateOf(OrientationLock.FollowSensor) }
-    // 弹层提示的状态位提前到这里：方向请求被系统驳回时要靠它说清楚原因
-    val toast = rememberNpToastState()
 
     fun setFullscreen(fullscreen: Boolean) {
         orientationLock = if (fullscreen) OrientationLock.Landscape else OrientationLock.Portrait
@@ -813,7 +818,9 @@ fun PlayerScreen(
             )
             scope.launch {
                 // E40：GBK/Big5 字幕先转 UTF-8 副本再挂载，否则整片乱码
-                player.setSubtitle(prepareSubtitleUri(context, uriResult))
+                // 手动选择的是刚拿到的文件，源必然存在——只取转码后的地址（L7 的
+                // sourceMissing 只对"记忆里的地址"有意义）
+                player.setSubtitle(prepareSubtitleUri(context, uriResult).uri)
                 // 记忆原始地址：缓存目录可能被清理，恢复时重新转码
                 settings.setSubtitleUri(mediaId, uriResult.toString())
             }
@@ -978,8 +985,19 @@ fun PlayerScreen(
         }
         onDispose { activityWindow?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
     }
-    // 收藏：库侧收藏数据层未落地（§9 记录在案），先做状态 + toast 的诚实占位
-    var favorited by rememberSaveable(mediaId) { mutableStateOf(false) }
+    // 收藏：与库页长按菜单、我的页横排**同一个仓库**（Room favorites）——此前这里是
+    // rememberSaveable 占位 + 「已加入收藏」toast，而「我的」页早已是真实列表：
+    // 同一件事两处各说各话（L3）。现在开关只写仓库，是否已收藏由 favoriteKeys 派生。
+    val favoriteKeys by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
+    val favoriteItem = queue.getOrNull(queueIndex)
+    val favorited = favoriteItem != null && HistoryEntry.keyOf(favoriteItem) in favoriteKeys
+    fun toggleFavorite() {
+        val target = favoriteItem ?: return
+        scope.launch {
+            val now = history.toggleFavorite(target)
+            toast.show(if (now) "已加入收藏" else "已取消收藏")
+        }
+    }
     // 长按 2.0x 快进（设计稿 .gest-hint）：进入时记住原速，松手恢复
     var boostHintVisible by remember { mutableStateOf(false) }
     var boostPreviousSpeed by remember { mutableStateOf(1f) }
@@ -1500,10 +1518,7 @@ fun PlayerScreen(
                 session = session,
                 onBack = { toggleAudioOnlyWithMemory() },
                 favorited = favorited,
-                onToggleFavorite = {
-                    favorited = !favorited
-                    toast.show(if (favorited) "已加入收藏" else "已取消收藏")
-                },
+                onToggleFavorite = { toggleFavorite() },
                 onOpenSpeed = { speedPickerVisible = !speedPickerVisible },
                 speed = speed,
                 speedPickerVisible = speedPickerVisible,
@@ -1738,8 +1753,7 @@ fun PlayerScreen(
                                             enterPip()
                                         },
                                         onFavorite = {
-                                            favorited = !favorited
-                                            toast.show(if (favorited) "已加入收藏" else "已取消收藏")
+                                            toggleFavorite()
                                         },
                                         onScreenshot = {
                                             dismiss()
@@ -2055,10 +2069,7 @@ fun PlayerScreen(
                                 glyph = ActionGlyph.Fav,
                                 label = if (favorited) "已收藏" else "收藏",
                                 active = favorited,
-                                onClick = {
-                                    favorited = !favorited
-                                    toast.show(if (favorited) "已加入收藏" else "已取消收藏")
-                                },
+                                onClick = { toggleFavorite() },
                                 modifier = Modifier.weight(1f),
                             )
                             PlayerActionButton(
@@ -2519,8 +2530,7 @@ fun PlayerScreen(
                             label = if (favorited) "已收藏" else "收藏",
                             selected = favorited,
                         ) {
-                            favorited = !favorited
-                            toast.show(if (favorited) "已加入收藏" else "已取消收藏")
+                            toggleFavorite()
                         },
                     )
                     add(

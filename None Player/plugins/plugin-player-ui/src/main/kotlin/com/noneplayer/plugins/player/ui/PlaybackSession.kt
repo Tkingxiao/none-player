@@ -88,6 +88,13 @@ class PlaybackSession(
                 if (_player.value?.state?.value == PlaybackState.Playing) persistPosition()
             }
         }
+        // L1：「自动连播下一集」设置的真实接线（此前只有存储与展示、无消费端——关掉后照样
+        // 连播）。用 combine 而不是只 collect 设置：**引擎换代**（切到不同 mimeType 时重建）
+        // 后新实例回到默认值，只订阅设置变化会漏掉这一次补发。
+        scope.launch {
+            combine(settings.autoplayNext, _player) { autoplay, player -> autoplay to player }
+                .collect { (autoplay, player) -> player?.setAutoplayNext(autoplay) }
+        }
     }
 
     /**

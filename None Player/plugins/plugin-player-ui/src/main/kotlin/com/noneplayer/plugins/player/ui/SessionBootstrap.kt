@@ -21,6 +21,13 @@ import kotlinx.coroutines.flow.first
 internal data class SessionStart(
     val accepted: Boolean,
     val resumedFromMs: Long = 0L,
+    /**
+     * 记忆里的外挂字幕**打不开**（文件被移走 / SAF 授权失效）。
+     *
+     * 播放页据此提示一次「字幕文件已失效，请重新挂载」——此前是静默回退原地址，
+     * 用户只看到"没有字幕"，以为是自己没挂上（L7）。
+     */
+    val subtitleMissing: Boolean = false,
 )
 
 /**
@@ -64,7 +71,12 @@ internal suspend fun ensureSessionPlaying(
         val keyedItem = (authoritative ?: item).takeIf { it.id.isNotEmpty() } ?: item
         val saved =
             if (keyedItem.id.isNotEmpty()) history.positionOf(HistoryEntry.keyOf(keyedItem)) ?: 0L else 0L
-        val startMs = if (restorePosition && saved > RESUME_MIN_MS) saved else 0L
+        // L5：断点已经看到底（≥「看完」线）时不恢复——否则播完落盘的片尾位置会在下次
+        // 打开时被原样套用，用户看到"刚点进去就结束"。库里那行**不清空**：它同时是
+        // 「已看 x% / 播放历史」的展示依据（见 HistoryRepository.isWatchedToEnd）。
+        val resumable =
+            saved > RESUME_MIN_MS && !HistoryRepository.isWatchedToEnd(saved, keyedItem.durationMs)
+        val startMs = if (restorePosition && resumable) saved else 0L
         // 断点经 setQueue 的 startPositionMs 下发（prepare 时套用）——事后 seekTo 在
         // 控制器未就绪时会被丢弃，续播会静默回到 0（模拟器实测）
         session.open(
@@ -73,6 +85,7 @@ internal suspend fun ensureSessionPlaying(
             startPositionMs = startMs,
         )
         player.setSpeed(settings.playbackSpeed.first())
+        var subtitleMissing = false
         if (item.id.isNotEmpty()) {
             val savedSubtitle = settings.subtitleUri(item.id).first()
             // 同名字幕自动挂载（批次 3 §12.6）：无记忆时按 ASS > SSA > SRT > VTT
@@ -80,10 +93,16 @@ internal suspend fun ensureSessionPlaying(
             val subtitle = savedSubtitle ?: resolveSiblingSubtitle(context, item.uri)?.also {
                 onSubtitleMatched?.invoke(it)
             }
-            subtitle?.let { player.setSubtitle(prepareSubtitleUri(context, it.toUri())) }
+            subtitle?.let {
+                val prepared = prepareSubtitleUri(context, it.toUri())
+                // 只有"记住过的字幕挂不上"才提示：同名自动匹配落空等于"这文件夹里没有
+                // 字幕"，不是失效——对没主动挂过字幕的用户报错是噪音（L7）
+                subtitleMissing = savedSubtitle != null && prepared.sourceMissing
+                player.setSubtitle(prepared.uri)
+            }
         }
         player.play()
-        return SessionStart(accepted = true, resumedFromMs = startMs)
+        return SessionStart(accepted = true, resumedFromMs = startMs, subtitleMissing = subtitleMissing)
     } else {
         // 会话里已经是同一个媒体（从迷你条/内嵌播放器点回来）。
         // **已播完的必须从头起**：media3 在 STATE_ENDED 上 `play()` 是空操作，
