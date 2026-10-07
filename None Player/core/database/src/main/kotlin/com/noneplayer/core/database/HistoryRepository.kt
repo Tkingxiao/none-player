@@ -24,10 +24,14 @@ class HistoryRepository(context: Context) {
     /** 时间倒序的全部历史 */
     val recent: Flow<List<HistoryEntry>> = dao.recent().map { rows -> rows.map { it.toEntry() } }
 
-    /** 继续观看（未看完且过了起步线），时间倒序 */
-    val continueWatching: Flow<List<HistoryEntry>> = dao
-        .continueWatching(WATCHED_DONE_RATIO, MIN_PERSIST_POSITION_MS)
-        .map { rows -> rows.map { it.toEntry() } }
+    /**
+     * 历史条数——设置页「清除播放缓存」的计数与按钮文案。
+     *
+     * 「继续观看」的口径**不在这里**：它是库页基于 `recent` + 时长算出的 `fractionOf`，
+     * 曾经这里另有一条 `continueWatching` 查询用 0.95 阈值，与 UI 的 0.99 各说各话
+     * （且从未被消费）。同一份语义保留一处实现，避免调阈值时只改一边。
+     */
+    val count: Flow<Int> = dao.count()
 
     /** 收藏键集合（卡片红心 / 菜单文案 / 我的页联动都读它） */
     val favoriteKeys: Flow<Set<String>> = dao.favoriteKeys().map { it.toSet() }
@@ -82,29 +86,25 @@ class HistoryRepository(context: Context) {
         if (item.id.isEmpty() || item.uri.isEmpty()) return
         val key = HistoryEntry.keyOf(item)
         val now = System.currentTimeMillis()
-        val existing = dao.byKey(key)
-        if (existing == null) {
-            dao.insert(
-                PlaybackHistoryEntity(
-                    mediaKey = key,
-                    sourceId = item.sourceId,
-                    title = item.title,
-                    uri = item.uri,
-                    mime = item.mimeType,
-                    coverUri = item.coverUri,
-                    folder = item.folder,
-                    durationMs = item.durationMs,
-                    positionMs = 0L,
-                    watchedRatio = 0f,
-                    playCount = 1,
-                    lastPlayedAt = now,
-                    width = item.width,
-                    height = item.height,
-                ),
-            )
-        } else {
-            dao.update(existing.copy(playCount = existing.playCount + 1, lastPlayedAt = now))
-        }
+        dao.markPlayed(
+            PlaybackHistoryEntity(
+                mediaKey = key,
+                sourceId = item.sourceId,
+                title = item.title,
+                uri = item.uri,
+                mime = item.mimeType,
+                coverUri = item.coverUri,
+                folder = item.folder,
+                durationMs = item.durationMs,
+                positionMs = 0L,
+                watchedRatio = 0f,
+                playCount = 1,
+                lastPlayedAt = now,
+                width = item.width,
+                height = item.height,
+            ),
+            now = now,
+        )
     }
 
     /** 收藏开关；返回切换后的状态 */

@@ -53,12 +53,14 @@ internal interface HistoryDao {
     @Query("SELECT * FROM playback_history ORDER BY last_played_at DESC")
     fun recent(): Flow<List<PlaybackHistoryEntity>>
 
-    /** 继续观看：未看完（< 阈值）且进度过了起步线，按最近播放倒序 */
-    @Query(
-        "SELECT * FROM playback_history WHERE watched_ratio < :doneRatio " +
-            "AND position_ms >= :minPositionMs ORDER BY last_played_at DESC",
-    )
-    fun continueWatching(doneRatio: Float, minPositionMs: Long): Flow<List<PlaybackHistoryEntity>>
+    /**
+     * 历史条数（设置页「清除播放缓存」的计数）。
+     *
+     * 走 `COUNT(*)` 而不是把 `recent()` 整表收下来 `.size`：计数行只有一个 Int，
+     * 不必让设置页持有一份与库页同尺寸的列表快照。
+     */
+    @Query("SELECT COUNT(*) FROM playback_history")
+    fun count(): Flow<Int>
 
     @Query("SELECT * FROM playback_history WHERE media_key = :key LIMIT 1")
     suspend fun byKey(key: String): PlaybackHistoryEntity?
@@ -96,6 +98,31 @@ internal interface HistoryDao {
         }
     }
 
+    /**
+     * `play_count + 1` 与 `last_played_at` 的原地自增。
+     *
+     * 必须是**单条 UPDATE**而不是「读出来 → copy → 整行写回」：周期落点（`upsert`）
+     * 与「进入播放」（`markPlayed`）会并发到达，读改写会把对方刚写下的 `position_ms`
+     * 用旧值盖回去（断点回退几秒），`play_count` 也会丢自增。返回受影响行数，
+     * 供 [markPlayed] 判断是「新条」还是「已有条」。
+     */
+    @Query(
+        "UPDATE playback_history SET play_count = play_count + 1, last_played_at = :now " +
+            "WHERE media_key = :key",
+    )
+    suspend fun bumpPlay(key: String, now: Long): Int
+
+    /**
+     * 「进入播放」写入（§8.3/E12）：已有行只自增不覆盖其它列；没有行才落一条快照。
+     * 整个判断 + 写入包在事务里，与 [upsert] 的读改写互斥。
+     */
+    @Transaction
+    suspend fun markPlayed(row: PlaybackHistoryEntity, now: Long) {
+        if (bumpPlay(row.mediaKey, now) == 0) {
+            insert(row.copy(playCount = 1, lastPlayedAt = now))
+        }
+    }
+
     /** 收藏键（按收藏时间倒序——聚合与我的页横排都按它排） */
     @Query("SELECT media_key FROM favorites ORDER BY added_at DESC")
     fun favoriteKeys(): Flow<List<String>>
@@ -119,7 +146,9 @@ internal interface HistoryDao {
 @Database(
     entities = [PlaybackHistoryEntity::class, FavoriteEntity::class],
     version = 1,
-    exportSchema = false,
+    // §8.3：导出 schema JSON（`schemas/` 目录，由 room.schemaLocation 指定）。
+    // 关掉导出后，任何一次实体变更都只能靠肉眼比对写迁移；导出后升级路径可被 diff 校验。
+    exportSchema = true,
 )
 internal abstract class NonePlayerDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao

@@ -25,6 +25,9 @@ kotlin {
 ksp {
     // KSP2 下 Room 处理器默认只吐 Java，需显式要求生成 Kotlin
     arg("room.generateKotlin", "true")
+    // §8.3：schema 导出目录。与 NonePlayerDatabase 的 exportSchema = true 配套——
+    // 导出的 <version>.json 是后续写 Migration 时的唯一比对依据（缺失会让 Room 直接报错）。
+    arg("room.schemaLocation", "$projectDir/schemas")
 }
 
 dependencies {

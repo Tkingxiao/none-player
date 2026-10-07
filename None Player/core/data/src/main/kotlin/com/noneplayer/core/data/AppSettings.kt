@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.map
 
 /**
  * E65 修复：此前未配置 corruptionHandler——偏好文件一旦因异常关机/存储故障等损坏，
- * 所有暴露的 Flow（themeMode/sortMode/scanFolderUris/playbackPosition 等）都会抛
+ * 所有暴露的 Flow（themeMode/sortMode/scanFolderUris/subtitleUri 等）都会抛
  * IOException 终止，且消费端（MainActivity/LibraryScreen 等）均未加 .catch{}，
  * 表现为相关界面彻底无法渲染。改为"损坏即重置为空偏好"，让应用能继续启动
  * （代价是损坏当次会丢失用户偏好，但远好于直接崩溃不可用）。
@@ -66,8 +66,6 @@ class AppSettings(private val context: Context) {
         // 字幕记忆在升级后直接读不到旧 key（静默丢数据），代价比潜在风险本身更大。
         // 按《功能审核文档.md》§14.6 的建议，命名空间方案与 §8.3 的 :core:database
         // 迁移一起定稿（彼时本就要做一次性数据搬迁，可以把前缀加好）。
-        fun playbackPosKey(mediaId: String) = longPreferencesKey("playback_pos_$mediaId")
-        fun playbackAtKey(mediaId: String) = longPreferencesKey("playback_at_$mediaId")
         fun subtitleKey(mediaId: String) = stringPreferencesKey("subtitle_$mediaId")
 
         /** 画面显示记忆（批次 3）："<比例模式>|<镜像0/1>|<旋转0/180>"，整体读写 */
@@ -252,16 +250,16 @@ class AppSettings(private val context: Context) {
         }
     }
 
-    // ---- 播放记忆（断点续播） ----
-
-    /** 读取某媒体的上次播放位置（毫秒），无记录为 0 */
-    fun playbackPosition(mediaId: String): Flow<Long> = context.dataStore.data
-        .map { it[playbackPosKey(mediaId)] ?: 0L }
+    // ---- 播放记忆（断点续播；E11 后仅剩一次性迁移来源） ----
 
     /**
-     * 全部播放进度（mediaId → 毫秒）。媒体库的「继续观看 / 已看 x% / 进度线 /
-     * 未看完筛选」都从这一份 map 取数——逐条目各开一个 DataStore 订阅
-     * 会在大库上退化成 N 条流，这里一次读全量再在内存里分发。
+     * 全部播放进度（mediaId → 毫秒）。
+     *
+     * E11 起正片进度已迁入 Room 历史（`HistoryRepository`），媒体库的
+     * 「继续观看 / 已看 x% / 进度线」统一改读历史；这里只保留**一次性迁移来源**：
+     * `LocalMediaSource` 首次扫描完成后把它交给
+     * `HistoryRepository.migrateFromDataStore` 搬进 Room，随即
+     * `clearPlaybackMemory()` 清掉旧键——DataStore 不再随媒体数无限增长。
      */
     val playbackPositions: Flow<Map<String, Long>> = context.dataStore.data
         .map { prefs ->
@@ -273,9 +271,9 @@ class AppSettings(private val context: Context) {
         }
 
     /**
-     * 全部"最近播放时间"（mediaId → epoch 毫秒）。
-     * 「播放历史」聚合与「我的 · 最近播放」按它排序——设计稿按 `prog > 0` 过滤，
-     * 顺序即"最近播放过"；只靠进度值排不出时间序。
+     * 全部"最近播放时间"（mediaId → epoch 毫秒）。同为 E11 一次性迁移来源
+     * （写入历史行的 `last_played_at`）——迁完之后不再有 UI 直接消费：
+     * 「播放历史 / 最近播放」的排序改读 `HistoryEntry.lastPlayedAt`。
      */
     val playbackLastAt: Flow<Map<String, Long>> = context.dataStore.data
         .map { prefs ->
@@ -284,26 +282,6 @@ class AppSettings(private val context: Context) {
                     key.name.startsWith("playback_at_") && key.name != "playback_at_"
                 }
                 .associate { (key, value) -> key.name.removePrefix("playback_at_") to (value as? Long ?: 0L) }
-        }
-
-    suspend fun savePlaybackPosition(mediaId: String, positionMs: Long) {
-        context.dataStore.edit {
-            it[playbackPosKey(mediaId)] = positionMs.coerceAtLeast(0)
-            it[playbackAtKey(mediaId)] = System.currentTimeMillis()
-        }
-    }
-
-    /**
-     * 可清除的播放记忆条数（按 mediaId 去重）。
-     *
-     * 设置页「清除播放缓存」的实值——本应用唯一的可清"播放缓存"就是这份
-     * 断点续播进度 + 最近播放时间，不虚报一个磁盘占用数字。
-     */
-    val playbackMemoryCount: Flow<Int> = context.dataStore.data
-        .map { prefs ->
-            prefs.asMap().keys.count {
-                it.name.startsWith("playback_pos_") && it.name != "playback_pos_"
-            }
         }
 
     // ---- 历史迁移（§8.3 / E11）----

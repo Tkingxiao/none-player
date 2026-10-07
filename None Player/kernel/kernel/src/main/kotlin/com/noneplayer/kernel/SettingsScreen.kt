@@ -45,6 +45,7 @@ import androidx.lifecycle.viewModelScope
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.compose.composable
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.ProbeMemo
 import com.noneplayer.core.data.ThemeMode
 import com.noneplayer.core.ui.LocalNpInk
@@ -768,14 +769,20 @@ private fun probeHardwareCodecs(): DecoderCapability {
  *
  * 值是**真实条数**而非设计稿演示壳的"共 128 MB"——本应用没有媒体文件缓存，
  * 唯一的可清数据就是这份播放记忆，报一个磁盘占用数字就是编造。
+ *
+ * E11 之后断点/历史住在 Room（[HistoryRepository]），DataStore 只剩设置项——
+ * 此前这里读的 `playbackMemoryCount` / 清的 `clearPlaybackMemory()` 都指向 DataStore，
+ * 迁移完成的用户会看到"0 条"且点了没反应。现在以 Room 为准；DataStore 旧键一并清掉，
+ * 覆盖"首次扫描尚未完成、还没迁移"的那批安装。
  */
 @Composable
 private fun ClearPlaybackCacheRow() {
     val kernel = LocalKernel.current
     val settings = remember { kernel.services.get<AppSettings>() }
+    val history = remember { kernel.services.get<HistoryRepository>() }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
-    val count by settings.playbackMemoryCount.collectAsStateWithLifecycle(initialValue = 0)
+    val count by history.count.collectAsStateWithLifecycle(initialValue = 0)
     val ink = LocalNpInk.current
     NpSettingRow(
         title = "清除播放缓存",
@@ -784,6 +791,8 @@ private fun ClearPlaybackCacheRow() {
         onClick = {
             val cleared = count
             scope.launch {
+                history.clearHistory()
+                // 迁移前的旧键（以及只播过、没到落点门槛的那些）也清掉，避免两处口径残留
                 settings.clearPlaybackMemory()
                 Toast.makeText(
                     context,
