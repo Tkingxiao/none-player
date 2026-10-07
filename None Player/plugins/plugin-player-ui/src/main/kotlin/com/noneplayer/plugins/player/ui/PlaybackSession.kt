@@ -217,8 +217,18 @@ class PlaybackSession(
         if (existing != null && engineMimeType == mimeType) return existing
         existing?.release()
         val created = runCatching { factory.create(context, mimeType) }
-            .onFailure { _engineError.value = it.message }
-            .getOrNull() ?: return null
+            .onFailure { _engineError.value = it.message ?: it.javaClass.simpleName }
+            .getOrNull()
+        if (created == null) {
+            // 失败收口：旧引擎在上面已经 release，实例字段不能继续指向它——否则
+            // nowPlaying 会继续订阅一个已释放的控制器（位置/状态冻在最后一帧、
+            // 迷你条像卡住），player getter 也会把死对象交给 UI。会话回到"无引擎"干净态。
+            _player.value = null
+            engineMimeType = null
+            _queue.value = emptyList()
+            _index.value = -1
+            return null
+        }
         engineMimeType = mimeType
         _engineError.value = null
         _player.value = created
@@ -300,6 +310,9 @@ class PlaybackSession(
      *
      * 只停播 + 清空队列，**不 release 引擎**——会话是进程级复用对象，
      * 引擎释放交给进程结束或引擎换代，避免"关掉迷你条下次进页要重建整条会话"。
+     *
+     * L8：底层 media3 的 media items 也必须清（[VideoPlayer.clearQueue]），
+     * 否则通知栏会残留一条"已暂停"的媒体通知——迷你条与通知应当同生命周期。
      */
     fun stop() {
         val p = _player.value
@@ -308,6 +321,8 @@ class PlaybackSession(
         // （persistPosition 自行短路，队列已空/引擎未就绪时是空操作）。
         persistPosition()
         p?.seekTo(0L)
+        // 清底层队列：引擎不支持时为空操作，这里仍继续清会话侧状态。
+        p?.clearQueue()
         _queue.value = emptyList()
         _index.value = -1
     }

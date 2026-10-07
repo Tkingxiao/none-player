@@ -25,4 +25,12 @@ data class PlaybackContext(
     val media: MediaItem,
     val player: VideoPlayer,
     val navigator: Navigator,
+    /**
+     * 控制层（顶/底控制栏）当前是否可见。
+     *
+     * 覆盖层里的**开关类**控件（弹幕 pill 等）要跟着控制层一起显隐——
+     * 否则控制栏隐去后它还常驻在画面上，用户找不到也关不掉（实报）。
+     * 默认 true：不关心显隐的覆盖层（字幕、纯画布弹幕）不受影响。
+     */
+    val controlsVisible: Boolean = true,
 )

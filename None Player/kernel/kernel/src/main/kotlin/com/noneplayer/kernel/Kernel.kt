@@ -72,19 +72,26 @@ class Kernel private constructor(
     private val installMutex = Mutex()
     private var installed: List<Plugin> = emptyList()
 
+    /** boot() 的一次性闸门（见 [boot] 注释）；[shutdown] 复位，允许重新引导。 */
+    private val bootGate = java.util.concurrent.atomic.AtomicBoolean(false)
+
     /** 已安装插件（供设置页"插件管理"展示） */
     override val plugins: List<Plugin> get() = installed
 
     /**
      * 引导内核。立即返回，过程见 [bootState]；
      * UI 层在 Running 之前不应渲染依赖内核的界面。
+     *
+     * 幂等：重复调用（宿主误用、或未来接 Activity 重入）直接忽略。此前判重是
+     * bootInternal 里的一句 `check(_bootState.value == Idle)`，属于 check-then-act，
+     * 且抛在 try/catch **之外**——第二次 boot 会以未捕获异常收场，而不是"已引导"。
      */
     fun boot() {
+        if (!bootGate.compareAndSet(false, true)) return
         scope.launch { bootInternal() }
     }
 
     private suspend fun bootInternal() {
-        check(_bootState.value == BootState.Idle) { "Kernel 已引导，不能重复 boot" }
         _bootState.value = BootState.Booting
         try {
             registerKernelServices()
@@ -134,6 +141,7 @@ class Kernel private constructor(
             installed = emptyList()
         }
         _bootState.value = BootState.Idle
+        bootGate.set(false)
     }
 
     private fun registerKernelServices() {

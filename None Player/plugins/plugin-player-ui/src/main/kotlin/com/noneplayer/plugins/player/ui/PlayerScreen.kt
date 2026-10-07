@@ -226,6 +226,9 @@ private const val SCRUB_PREVIEW_INTERVAL_MS = 200L
 /** 播放页自动隐藏控制层延时 */
 private const val CONTROLS_AUTO_HIDE_MS = 3500L
 
+/** 「已为您定位到 xx:xx」续播提示的停留时长（B 站同款：亮一下即收，不挡住看片） */
+private const val RESUME_NOTICE_MS = 3_200L
+
 /** 舞台双击的 seek 步长（§4.3：左右 1/3 = ∓/±10 秒） */
 private const val GESTURE_SEEK_STEP_MS = 10_000L
 
@@ -451,7 +454,10 @@ fun PlayerScreen(
             session.persistPosition()
             // 设置页「后台播放」关闭 → 退页即停（并清掉迷你条）；
             // 打开则播放继续在后台服务里跑，迷你条据此持续可见、点回来无缝续播（L0）。
-            if (!backgroundPlay) session.pause()
+            // 关闭档必须走 stop() 而不是 pause()：pause 只停画面，队列/通知/迷你条都还在，
+            // 退页后会残留一条"暂停条"，与「后台播放」关掉的语义不符（L9）。
+            // stop() 内部同时清 media3 队列，系统媒体通知随迷你条一起收（L8）。
+            if (!backgroundPlay) session.stop()
         }
     }
 
@@ -477,6 +483,14 @@ fun PlayerScreen(
     // 或旧错误面板，再开始播放。
     var mediaOpened by remember(uri) { mutableStateOf(false) }
 
+    /**
+     * 左上角「已为您定位到 xx:xx」续播提示的落点（毫秒）；null = 不显示。
+     *
+     * 只在装载链**真的套用了断点**时由 `ensureSessionPlaying` 的返回值写入，
+     * [RESUME_NOTICE_MS] 之后自动清空——不做常驻胶囊（B 站同款：提示一次就收）。
+     */
+    var resumeNoticeMs by remember(uri) { mutableStateOf<Long?>(null) }
+
     // 准备播放：等会话就绪。
     // B1 修复：会话已在播同一视频（后台播放中重进）时仅续播——
     // 禁止用过期断点 prepare/seek 覆盖会话里更新的进度。
@@ -500,7 +514,7 @@ fun PlayerScreen(
         artworkUri = cover
         // 2) 装载并起播——与「内嵌播放器」共用同一条链（SessionBootstrap）：
         //    队列 / 断点 / 字幕记忆 / 倍速的语义只有一处，避免两处漂移。
-        ensureSessionPlaying(
+        val started = ensureSessionPlaying(
             context = context,
             registry = kernel.registry,
             settings = settings,
@@ -518,7 +532,17 @@ fun PlayerScreen(
             restorePosition = !fromStart,
             onSubtitleMatched = { hit -> scope.launch { settings.setSubtitleUri(mediaId, hit) } },
         )
+        // 只有真的从断点起播才提示（从头播放/会话本来就在播同一媒体都不会走到这里）
+        if (started.resumedFromMs > 0L) resumeNoticeMs = started.resumedFromMs
         mediaOpened = true
+    }
+
+    // 续播提示的倒计时：到点自行收起，不需要用户操作
+    LaunchedEffect(resumeNoticeMs) {
+        if (resumeNoticeMs != null) {
+            delay(RESUME_NOTICE_MS)
+            resumeNoticeMs = null
+        }
     }
 
     val state by player.state.collectAsStateWithLifecycle()
@@ -1510,6 +1534,7 @@ fun PlayerScreen(
                         navigator = navigator,
                         state = state,
                         userDragging = userDragging,
+                        controlsVisible = controlsVisible,
                         scaleMode = scaleMode,
                         mirrored = mirrored,
                         rotation = rotation,
@@ -1537,6 +1562,11 @@ fun PlayerScreen(
                         )
                     }
                     SpeedPill(speed = speed, modifier = Modifier.align(Alignment.TopStart))
+                    ResumePositionNotice(
+                        resumeMs = resumeNoticeMs,
+                        speed = speed,
+                        modifier = Modifier.align(Alignment.TopStart),
+                    )
                     GestureHintPill(
                         text = gestureHint,
                         modifier = Modifier.align(Alignment.Center),
@@ -1854,6 +1884,7 @@ fun PlayerScreen(
                                 navigator = navigator,
                                 state = state,
                                 userDragging = userDragging,
+                                controlsVisible = controlsVisible,
                                 scaleMode = scaleMode,
                                 mirrored = mirrored,
                                 rotation = rotation,
@@ -1877,6 +1908,11 @@ fun PlayerScreen(
                                 )
                             }
                             SpeedPill(speed = speed, modifier = Modifier.align(Alignment.TopStart))
+                            ResumePositionNotice(
+                                resumeMs = resumeNoticeMs,
+                                speed = speed,
+                                modifier = Modifier.align(Alignment.TopStart),
+                            )
                             GestureHintPill(
                                 text = gestureHint,
                                 modifier = Modifier.align(Alignment.Center),
@@ -2037,12 +2073,6 @@ fun PlayerScreen(
                                 onClick = { toggleAudioOnlyWithMemory() },
                                 modifier = Modifier.weight(1f),
                             )
-                        }
-                        // 续播提示（设计稿 .notice.resume）：明确的"上次看到哪儿"+ 一键从头
-                        ResumeNotice(positionState, durationState, userDraggingState) {
-                            player.seekTo(0)
-                            pendingSeekMs = 0L
-                            controlsVisible = true
                         }
                         // C21 软解前置提示（设计稿 .notice.warn）：探测发现只有软件解码器可用时
                         // 在信息区顶部给一条 warn 胶囊——"能播，但可能发热/掉帧"必须提前说，
@@ -3119,48 +3149,42 @@ private fun BoxScope.SeekGestureBubbleHost(
 }
 
 /**
- * 竖屏信息区的续播胶囊（设计稿 `.notice.resume`）：明确"上次看到哪儿"+ 一键从头。
+ * 左上角续播提示（B 站同款「已为您定位到 xx:xx」）：进页时亮一次，几秒后自行淡出。
  *
- * 从 `PortraitForm` 里抽出来只为一件事——进度每约 250ms 上报一次，
- * 读在信息层会把整条可滚动信息区一起重组（§9.2）。
+ * 与旧的竖屏续播胶囊相比，这里**不跟着 positionMs 走**——提示的是"进页那一刻
+ * 的定位结果"，播起来之后进度条自己会说话；常驻胶囊每 250ms 重排信息区、
+ * 还会在每次播放时都挂着一条，既噪音又浪费（§9.2）。
+ *
+ * 倍速常驻胶囊（[SpeedPill]）同占左上角：它可见时本提示下移一行避让。
  */
 @Composable
-private fun ResumeNotice(
-    positionMs: State<Long>,
-    durationMs: State<Long>,
-    userDragging: State<Boolean>,
-    onRestart: () -> Unit,
+private fun ResumePositionNotice(
+    resumeMs: Long?,
+    speed: Float,
+    modifier: Modifier = Modifier,
 ) {
-    val total = durationMs.value
-    val fraction = if (total > 0) positionMs.value.toFloat() / total else 0f
-    if (fraction !in 0.01f..0.99f || userDragging.value) return
-    val ink = LocalNpInk.current
-    Row(
-        modifier = Modifier
-            .padding(horizontal = NpSpace.lg, vertical = NpSpace.xs)
-            .clip(RoundedCornerShape(NpRadius.chip))
-            .background(ink.accentSoft)
-            .border(1.dp, ink.accentLine, RoundedCornerShape(NpRadius.chip))
-            .padding(horizontal = 12.dp, vertical = 5.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    // 退场动画期间 resumeMs 已置空——留住最后一次的值，避免淡出时文字跳成 0:00
+    var lastMs by remember { mutableStateOf(0L) }
+    LaunchedEffect(resumeMs) { if (resumeMs != null) lastMs = resumeMs }
+    AnimatedVisibility(
+        visible = resumeMs != null,
+        enter = fadeIn(animationSpec = npMotion(Motion.Field)),
+        exit = fadeOut(animationSpec = npMotion(Motion.Panel)),
+        modifier = modifier,
     ) {
-        Text(
-            text = "上次看到 ${(fraction * 100).toInt()}%",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Text(
-            text = "从头播放",
-            style = MaterialTheme.typography.labelMedium.copy(
-                fontWeight = androidx.compose.ui.text.font.FontWeight(650),
-            ),
-            color = MaterialTheme.colorScheme.primary,
+        Box(
             modifier = Modifier
-                .padding(start = NpSpace.md)
+                .padding(start = NpSpace.lg, top = if (speed == 1f) 56.dp else 88.dp)
                 .clip(RoundedCornerShape(NpRadius.chip))
-                .clickable(onClick = onRestart)
-                .padding(horizontal = NpSpace.sm, vertical = NpSpace.xs),
-        )
+                .background(Color.Black.copy(alpha = 0.62f))
+                .padding(horizontal = 12.dp, vertical = 7.dp),
+        ) {
+            Text(
+                text = "已为您定位到 ${formatTimestamp(lastMs)}",
+                style = NpMono,
+                color = Color.White,
+            )
+        }
     }
 }
 
@@ -3813,6 +3837,8 @@ internal fun VideoStage(
     navigator: Navigator,
     state: PlaybackState,
     userDragging: Boolean,
+    /** 控制层是否可见——下发给覆盖层，让弹幕 pill 这类开关与控制栏同显隐 */
+    controlsVisible: Boolean = true,
     scaleMode: VideoScaleMode = VideoScaleMode.FIT,
     mirrored: Boolean = false,
     rotation: Int = 0,
@@ -3866,6 +3892,7 @@ internal fun VideoStage(
                         media = overlayMedia,
                         player = player,
                         navigator = navigator,
+                        controlsVisible = controlsVisible,
                     ),
                 )
             }

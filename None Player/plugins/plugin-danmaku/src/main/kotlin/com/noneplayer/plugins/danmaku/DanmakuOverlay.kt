@@ -4,6 +4,9 @@ import android.content.Intent
 import android.graphics.Paint
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
@@ -37,7 +40,9 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpRadius
+import com.noneplayer.core.ui.npMotion
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.ui.api.LocalKernel
@@ -218,63 +223,72 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
                     scope.launch { settings.setDanmakuManualUri(context.media.uri, uri.toString()) }
                 }
             }
-            Box(
-                modifier = Modifier
-                    .align(Alignment.TopEnd)
-                    .padding(top = 64.dp, end = 16.dp)
-                    .clip(RoundedCornerShape(NpRadius.chip))
-                    .background(Color.Black.copy(alpha = 0.45f))
-                    .combinedClickable(
-                        onClick = { scope.launch { settings.setDanmakuEnabled(!enabled) } },
-                        onLongClick = { menuOpen = true },
-                    )
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            // 与控制层同显隐：控制栏（顶/底）隐去时这枚 pill 也必须收走——
+            // 此前它常驻右上角，用户找不到入口也关不掉（实报）。
+            // 长按菜单开着时保持可见：菜单锚在这枚 pill 上，pill 一走锚点就没了。
+            AnimatedVisibility(
+                visible = context.controlsVisible || menuOpen,
+                enter = fadeIn(animationSpec = npMotion(Motion.Field)),
+                exit = fadeOut(animationSpec = npMotion(Motion.Field)),
+                modifier = Modifier.align(Alignment.TopEnd),
             ) {
-                Text(
-                    text = pillLabel(enabled, source, manualUri),
-                    color = Color.White.copy(alpha = if (enabled) 0.95f else 0.5f),
-                    fontSize = 12.sp,
-                )
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(
-                        text = { Text(if (enabled) "关闭弹幕" else "开启弹幕") },
-                        onClick = {
-                            menuOpen = false
-                            scope.launch { settings.setDanmakuEnabled(!enabled) }
-                        },
+                Box(
+                    modifier = Modifier
+                        .padding(top = 64.dp, end = 16.dp)
+                        .clip(RoundedCornerShape(NpRadius.chip))
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .combinedClickable(
+                            onClick = { scope.launch { settings.setDanmakuEnabled(!enabled) } },
+                            onLongClick = { menuOpen = true },
+                        )
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                ) {
+                    Text(
+                        text = pillLabel(enabled, source, manualUri),
+                        color = Color.White.copy(alpha = if (enabled) 0.95f else 0.5f),
+                        fontSize = 12.sp,
                     )
-                    DropdownMenuItem(
-                        text = { Text("选择弹幕文件…") },
-                        onClick = {
-                            menuOpen = false
-                            filePicker.launch(arrayOf("*/*"))
-                        },
-                    )
-                    if (manualUri != null) {
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(
-                            text = { Text("清除手动选择") },
+                            text = { Text(if (enabled) "关闭弹幕" else "开启弹幕") },
                             onClick = {
                                 menuOpen = false
-                                scope.launch { settings.setDanmakuManualUri(context.media.uri, null) }
+                                scope.launch { settings.setDanmakuEnabled(!enabled) }
                             },
                         )
-                    }
-                    textTracks.forEach { track ->
                         DropdownMenuItem(
-                            text = {
-                                Column {
-                                    Text("内嵌弹幕轨：${track.label}")
-                                    Text(
-                                        "cue 通路；字幕层会同步显示同一条轨",
-                                        style = MaterialTheme.typography.bodySmall,
-                                    )
-                                }
-                            },
+                            text = { Text("选择弹幕文件…") },
                             onClick = {
                                 menuOpen = false
-                                embeddedPicked = track.id
+                                filePicker.launch(arrayOf("*/*"))
                             },
                         )
+                        if (manualUri != null) {
+                            DropdownMenuItem(
+                                text = { Text("清除手动选择") },
+                                onClick = {
+                                    menuOpen = false
+                                    scope.launch { settings.setDanmakuManualUri(context.media.uri, null) }
+                                },
+                            )
+                        }
+                        textTracks.forEach { track ->
+                            DropdownMenuItem(
+                                text = {
+                                    Column {
+                                        Text("内嵌弹幕轨：${track.label}")
+                                        Text(
+                                            "cue 通路；字幕层会同步显示同一条轨",
+                                            style = MaterialTheme.typography.bodySmall,
+                                        )
+                                    }
+                                },
+                                onClick = {
+                                    menuOpen = false
+                                    embeddedPicked = track.id
+                                },
+                            )
+                        }
                     }
                 }
             }

@@ -12,6 +12,18 @@ import com.noneplayer.kernel.api.VideoPlayer
 import kotlinx.coroutines.flow.first
 
 /**
+ * 装载结果。
+ *
+ * [accepted] = false 表示 uri 被 scheme 白名单拒绝（E57/E76 的信任边界）；
+ * [resumedFromMs] > 0 表示这次是**按断点续播**，值即实际生效的起点——
+ * 播放页据此弹"已从上次位置继续"的左上角提示，无需自己再查一次历史。
+ */
+internal data class SessionStart(
+    val accepted: Boolean,
+    val resumedFromMs: Long = 0L,
+)
+
+/**
  * 会话装载/起播的**唯一**入口——播放页与「内嵌播放器」共用。
  *
  * 两处各写一份装载链，必然在某次修复里漂移（批次 3 的 `applyQueue` 字幕缺口就是这么
@@ -22,7 +34,7 @@ import kotlinx.coroutines.flow.first
  *
  * @param onSubtitleMatched 同名自动挂载命中时的记忆落盘钩子（调用方用自己的 scope 执行，
  *   不阻塞装载；播放页与内嵌播放器都只是转发给 AppSettings）
- * @return false = uri 被 scheme 白名单拒绝（E57/E76 的信任边界），调用方自行兜底
+ * @return [SessionStart]；`accepted = false` = uri 被 scheme 白名单拒绝，调用方自行兜底
  */
 internal suspend fun ensureSessionPlaying(
     context: Context,
@@ -35,8 +47,8 @@ internal suspend fun ensureSessionPlaying(
     /** false = 从头播（长按菜单「从头播放」）：不恢复断点，已播完的也退位 */
     restorePosition: Boolean = true,
     onSubtitleMatched: ((String) -> Unit)? = null,
-): Boolean {
-    if (!isPlayableUriScheme(item.uri)) return false
+): SessionStart {
+    if (!isPlayableUriScheme(item.uri)) return SessionStart(accepted = false)
     player.awaitReady()
     val sameMedia = player.currentUri.value == item.uri
     if (!sameMedia) {
@@ -52,12 +64,13 @@ internal suspend fun ensureSessionPlaying(
         val keyedItem = (authoritative ?: item).takeIf { it.id.isNotEmpty() } ?: item
         val saved =
             if (keyedItem.id.isNotEmpty()) history.positionOf(HistoryEntry.keyOf(keyedItem)) ?: 0L else 0L
+        val startMs = if (restorePosition && saved > RESUME_MIN_MS) saved else 0L
         // 断点经 setQueue 的 startPositionMs 下发（prepare 时套用）——事后 seekTo 在
         // 控制器未就绪时会被丢弃，续播会静默回到 0（模拟器实测）
         session.open(
             item = authoritative ?: item,
             queueOfFolder = queue,
-            startPositionMs = if (restorePosition && saved > 5_000) saved else 0L,
+            startPositionMs = startMs,
         )
         player.setSpeed(settings.playbackSpeed.first())
         if (item.id.isNotEmpty()) {
@@ -70,12 +83,17 @@ internal suspend fun ensureSessionPlaying(
             subtitle?.let { player.setSubtitle(prepareSubtitleUri(context, it.toUri())) }
         }
         player.play()
+        return SessionStart(accepted = true, resumedFromMs = startMs)
     } else {
         // 会话里已经是同一个媒体（从迷你条/内嵌播放器点回来）。
         // **已播完的必须从头起**：media3 在 STATE_ENDED 上 `play()` 是空操作，
         // 不退位就永远停在结束画面——用户看到"点进来没反应"。
         if (!restorePosition || player.state.value == PlaybackState.Ended) player.seekTo(0L)
         player.play()
+        // 会话本来就在播同一媒体：进度是连续的，不算"从断点续播"，不弹提示。
+        return SessionStart(accepted = true)
     }
-    return true
 }
+
+/** 断点起播门槛：低于它视为"没看过"，从头播（与历史落盘门槛同为 10s 之一半的宽松档） */
+private const val RESUME_MIN_MS = 5_000L

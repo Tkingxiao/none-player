@@ -44,6 +44,7 @@ import com.noneplayer.kernel.api.VideoPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
@@ -188,8 +189,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 try {
                     val c = future.get()
                     if (released) {
-                        // release() 已先执行：这个连接不再被任何人持有，直接释放
+                        // release() 已先执行：这个连接不再被任何人持有，直接释放。
+                        // connected 必须一并了结——否则仍挂在 awaitReady() 上的装载链
+                        // 会一直挂起到它的作用域被取消（表现为"进页一直转圈"）。
                         c.release()
+                        connected.completeExceptionally(
+                            CancellationException("播放器已释放，会话连接不再补发"),
+                        )
                         return@addListener
                     }
                     controller = c
@@ -505,6 +511,28 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         probeThenLoad(items[index].uri, items[index].mimeType) {
             applyQueue(mediaItemsOf(items), index, 0L)
         }
+    }
+
+    /**
+     * 清空队列与已装载媒体（迷你条 ✕ / "后台播放"关闭退页，L8）。
+     *
+     * `clearMediaItems()` 是这里的关键：系统媒体通知与 PlaybackService 的生命周期
+     * 由 media3 会话的 media items 决定，只 `pause()` 会让通知以"暂停态"残留。
+     * 同时把位置/时长/缓冲位清回 0——media3 的 `stop()` 不重置这些，留给上一条媒体
+     * 的话，迷你条会把"什么都没装载"画成"快播完了"。
+     */
+    override fun clearQueue() {
+        val c = controller
+        runCatching { c?.stop() }
+        runCatching { c?.clearMediaItems() }
+        _queue.value = emptyList()
+        _currentIndex.value = -1
+        _currentUri.value = null
+        _positionMs.value = 0L
+        _durationMs.value = 0L
+        _bufferedPositionMs.value = 0L
+        pendingSeekMs = null
+        appliedUri = null
     }
 
     override fun playNext() {
