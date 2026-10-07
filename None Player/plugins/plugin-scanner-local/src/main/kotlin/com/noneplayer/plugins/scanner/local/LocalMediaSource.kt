@@ -37,6 +37,9 @@ import com.noneplayer.kernel.api.query
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -45,6 +48,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -225,7 +230,9 @@ class LocalMediaSource(
             }
             // 富化与 MediaStore 项同链路（短标题/集号对隐藏目录里的剧集一样有用）
             .map { enrichAll(it) }
-        val items = storeItems + hiddenItems
+        // 封面并发补齐放在**发布之前**：UI 侧拿到的列表永远是"封面已就绪"的那一份，
+        // 不需要两段式刷新，也不会因为某一项封面慢而整页停在占位图。
+        val items = attachCovers(storeItems + hiddenItems)
         // §8.3/E11：首次扫描把 DataStore 的断点迁入 Room，随后清旧键
         migrateHistoryOnce(items)
         // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存）。
@@ -292,6 +299,50 @@ class LocalMediaSource(
             current = runCatching { enricher.enrich(current) }.getOrDefault(current)
         }
         return current
+    }
+
+    /**
+     * 缩略图并发生成（性能批次）。
+     *
+     * 此前 `thumbnailFor(...)` 直接写在游标遍历里，于是整库视频**串行**等
+     * `ContentResolver.loadThumbnail` / `MediaMetadataRetriever`：单片 1080p 就要几十毫秒，
+     * 几百部叠起来是分钟级的首扫时间。而这一步排在 `_media.value = items` **之前**，
+     * 挡住的正是"主页什么时候能出封面"。
+     *
+     * 现在把它挪到发布前并发跑：缓存命中的项只是几次 `File.exists()`（几乎零成本），
+     * 未命中的项最多 [THUMB_PARALLELISM] 个同时抽帧。语义不变——仍然在发布前把封面
+     * 全部备好，UI 不需要任何两段式刷新。
+     */
+    private suspend fun attachCovers(items: List<MediaItem>): List<MediaItem> {
+        // 音频（`msa-`，含 .cue 分轨）走相册封面 URI，没有可生成的帧缩略图；
+        // 其余项（MediaStore 视频 `ms-` / 隐藏目录文档 `saf-`）缺封面时才补。
+        val pending = items.filter { it.coverUri == null && !it.id.startsWith(AUDIO_ID_PREFIX) }
+        if (pending.isEmpty()) return items
+        val covers = java.util.concurrent.ConcurrentHashMap<String, String>()
+        val gate = Semaphore(THUMB_PARALLELISM)
+        coroutineScope {
+            pending.map { item ->
+                async(dispatchers.io) {
+                    gate.withPermit { coverFor(item)?.let { covers[item.id] = it } }
+                }
+            }.awaitAll()
+        }
+        if (covers.isEmpty()) return items
+        return items.map { item -> covers[item.id]?.let { item.copy(coverUri = it) } ?: item }
+    }
+
+    /**
+     * 封面生产口径（与 id 前缀一一对应，保证 `video_thumbs/<key>.jpg` 的键与
+     * `thumbKeyOf` 的清理白名单一致）：
+     * `ms-<id>` → 系统缩略图（低版本兜底抽帧）；`saf-…` → 文档 URI 缩略图 + 抽帧兜底。
+     */
+    private fun coverFor(item: MediaItem): String? = when {
+        item.id.startsWith(VIDEO_ID_PREFIX) ->
+            item.id.removePrefix(VIDEO_ID_PREFIX).toLongOrNull()
+                ?.let { thumbnailFor(it, item.uri.toUri()) }
+
+        item.id.startsWith(HIDDEN_ID_PREFIX) -> thumbnailFor(item.id, item.uri.toUri())
+        else -> null
     }
 
     /**
@@ -581,7 +632,9 @@ class LocalMediaSource(
                     durationMs = if (durationCol >= 0) cursor.getLong(durationCol) else 0L,
                     sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
                     addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
-                    coverUri = thumbnailFor(id, ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id)),
+                    // 封面不在这里生成：游标里逐项抽帧是**串行**的，几百部片子会把首扫
+                    // 拖到分钟级。统一交给扫描末尾的 attachCovers 并发补齐（见该方法）。
+                    coverUri = null,
                     folder = folderOf(
                         dataPath = dataPath,
                         relativePath = if (relativeCol >= 0) {
@@ -799,7 +852,8 @@ class LocalMediaSource(
                                 mimeType = effectiveMime,
                                 sizeBytes = size,
                                 addedAtMs = if (lmCol >= 0) cursor.getLong(lmCol) else 0L,
-                                coverUri = thumbnailFor(id, docUri),
+                                // 同 queryScope：封面统一由 attachCovers 并发补齐
+                                coverUri = null,
                                 folder = folderOfDocument(childDocId),
                             )
                         }
@@ -1063,10 +1117,18 @@ private fun isJunkSuffix(name: String): Boolean {
     return JUNK_SUFFIXES.any { lower.endsWith(it) }
 }
 
+/** 条目 id 的三种前缀：MediaStore 视频 / MediaStore 音频（含 .cue 分轨）/ SAF 隐藏目录文档 */
+private const val VIDEO_ID_PREFIX = "ms-"
+private const val AUDIO_ID_PREFIX = "msa-"
+private const val HIDDEN_ID_PREFIX = "saf-"
+
+/** 首次扫描时同时抽帧的缩略图数量上限：再高只会在低端机上抢 I/O 与解码器，不会更快 */
+private const val THUMB_PARALLELISM = 4
+
 /** 缩略图文件名键：MediaStore 项剥 `ms-`（沿用既有缓存名），SAF 项直接用整 id */
 private fun thumbKeyOf(id: String): String? = when {
-    id.startsWith("ms-") -> id.removePrefix("ms-")
-    id.startsWith("saf-") -> id
+    id.startsWith(VIDEO_ID_PREFIX) -> id.removePrefix(VIDEO_ID_PREFIX)
+    id.startsWith(HIDDEN_ID_PREFIX) -> id
     else -> null
 }
 
@@ -1091,7 +1153,7 @@ internal fun folderOfDocument(docId: String): String? =
  */
 internal fun hiddenDocumentId(docId: String): String {
     val digest = java.security.MessageDigest.getInstance("SHA-1").digest(docId.toByteArray())
-    return "saf-" + digest.joinToString("") { "%02x".format(it) }.take(16)
+    return HIDDEN_ID_PREFIX + digest.joinToString("") { "%02x".format(it) }.take(16)
 }
 
 private const val TAG = "LocalMediaSource"
