@@ -424,7 +424,8 @@ private fun SearchResults(
                 item = item,
                 onOpen = onOpen,
                 showFolderTag = true,
-                modifier = Modifier.animateItem().npStaggeredEntry(index, staggerWindow),
+                modifier = Modifier.animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                    .npStaggeredEntry(index, staggerWindow),
             )
         }
     }

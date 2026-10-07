@@ -108,7 +108,6 @@ object Motion {
     const val Switch = 220      // 开关滑块（设计稿 .22s 过冲）
     const val Drawer = 260      // 播放器侧栏 / 右抽屉滑入（设计稿 .26s）
     const val Tab = 220         // Tab 选中 + 内容淡移（批次 5 由 320 收下来：选中态是反馈，不是转场）
-    const val Expand = 360      // 迷你条 ↔ 播放页
     const val Overlay = 280     // 控制层进场（批次 5 由 480 改小：480ms 会让用户以为"卡了一下"）
     const val OverlayExit = 220 // 控制层退场（原 340；退场要"加速离开"，比进场更短）
     const val MiniProgress = 250 // 迷你条进度线（设计稿 .mini-prog width .25s linear）
@@ -134,8 +133,7 @@ object Motion {
     const val NavFade = 240     // 交叉淡入
     const val NavExit = 180     // pop / 退场
 
-    // 装饰与共享元素（批次 5 新增）
-    const val Shared = 300      // 卡片 → 播放页共享元素（曲线只用 Emphasized）
+    // 装饰（批次 5 新增；共享元素 M2 已按 §12 顺延批次 5.1，落地时再开令牌）
     const val Bubble = 500      // 中央播放键水波（High 档装饰，见 §9.6）
     const val AccentShift = 400 // 封面主色切集过渡
 }

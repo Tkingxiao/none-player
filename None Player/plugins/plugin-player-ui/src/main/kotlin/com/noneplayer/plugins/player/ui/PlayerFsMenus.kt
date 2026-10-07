@@ -56,6 +56,7 @@ import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpIcon
+import com.noneplayer.core.ui.NpMediaPalette
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpTypography
@@ -297,7 +298,7 @@ fun FsMenuBackRow(title: String, onBack: () -> Unit) {
  * 不能用 `ink.danger`：整层下拉菜单永远压在视频上（深色 scrim + 白字），和应用主题无关，
  * 亮色主题下 `ink.danger`（.55 明度）在白字旁边几乎读不出来。
  */
-private val OnMediaDanger = Color(0xFFFF6B6B)
+private val OnMediaDanger = NpMediaPalette.onMediaDanger
 
 /**
  * 菜单行：图标（可选）+ 文字 + 右侧值/勾选/箭头。

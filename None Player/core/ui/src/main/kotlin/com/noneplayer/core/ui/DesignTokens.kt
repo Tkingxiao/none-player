@@ -178,3 +178,22 @@ object NpDimens {
     /** 阅读型内容最大宽度（设计稿 .content max-width:1100px）。 */
     val contentMaxWidth: Dp = 1100.dp
 }
+
+/**
+ * **不随主题走的固定色**——两类：压在视频画面之上的覆盖层色，和黑胶这类实物器材的材质色。
+ *
+ * 它们看着像"该用 ink.* 却硬编了"，实际不能用主题色：画面永远是暗的（亮色主题下视频
+ * 也不会变白），唱片永远是黑的。主题语义色一律走 [InkTokens]，往这里加的只有
+ * "与主题无关的实物/画面色"，且每个都要写清为什么与主题无关。
+ */
+object NpMediaPalette {
+    /** 画面之上的危险项：`ink.danger`（明度 .55）压在白字旁几乎读不出 */
+    val onMediaDanger: Color = Color(0xFFFF6B6B)
+    /** 黑胶盘面：外圈 / 内圈（径向渐变两端） */
+    val vinylRim: Color = Color(0xFF2A2A2A)
+    val vinylCore: Color = Color(0xFF161616)
+    /** 唱臂：杆 / 支点 / 唱头 */
+    val tonearmRod: Color = Color(0xFFC9C2B8)
+    val tonearmPivot: Color = Color(0xFFDDD6CB)
+    val tonearmHead: Color = Color(0xFF4A443C)
+}

@@ -55,6 +55,7 @@ import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpIcon
+import com.noneplayer.core.ui.NpMediaPalette
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMaskFade
 import com.noneplayer.core.ui.NpRadius
@@ -555,8 +556,8 @@ private fun VinylDisc(
                 .background(
                     Brush.radialGradient(
                         colors = listOf(
-                            Color(0xFF2A2A2A),
-                            Color(0xFF161616),
+                            NpMediaPalette.vinylRim,
+                            NpMediaPalette.vinylCore,
                         ),
                     ),
                 ),
@@ -615,19 +616,19 @@ private fun VinylDisc(
             val pivot = androidx.compose.ui.geometry.Offset(size.width * 0.9f, size.height * 0.05f)
             val end = androidx.compose.ui.geometry.Offset(size.width * 0.52f, size.height * 0.78f)
             drawLine(
-                color = Color(0xFFC9C2B8),
+                color = NpMediaPalette.tonearmRod,
                 start = pivot,
                 end = end,
                 strokeWidth = 5.dp.toPx(),
                 cap = androidx.compose.ui.graphics.StrokeCap.Round,
             )
             drawCircle(
-                color = Color(0xFFDDD6CB),
+                color = NpMediaPalette.tonearmPivot,
                 radius = 11.dp.toPx(),
                 center = pivot,
             )
             drawCircle(
-                color = Color(0xFF4A443C),
+                color = NpMediaPalette.tonearmHead,
                 radius = 6.dp.toPx(),
                 center = end,
             )
