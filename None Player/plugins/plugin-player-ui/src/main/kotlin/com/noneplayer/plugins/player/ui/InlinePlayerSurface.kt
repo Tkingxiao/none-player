@@ -89,6 +89,22 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         val history = remember { kernel.services.get<HistoryRepository>() }
         val session = remember { SessionHolder.of(sessionFactoryOf(kernel.services)) }
         val player = remember(session, media.mimeType) { session.acquire(media.mimeType) }
+        // E88 留尾：无引擎（插件未启用 / 未知 mime）不再主线程硬抛——内嵌栏渲染
+        // 一块黑底错误文案；装载链不启动（player 为 null 时没有引擎可装载）。
+        val engineError by session.engineError.collectAsStateWithLifecycle()
+        if (player == null) {
+            Box(
+                modifier = modifier.background(Color.Black),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = engineError ?: "无法创建播放引擎",
+                    color = Color.White.copy(alpha = 0.7f),
+                    fontSize = 13.sp,
+                )
+            }
+            return
+        }
 
         // 装载/续播：同一媒体只续播（含 ENDED 退位），不同媒体走完整装载链
         LaunchedEffect(media.uri) {

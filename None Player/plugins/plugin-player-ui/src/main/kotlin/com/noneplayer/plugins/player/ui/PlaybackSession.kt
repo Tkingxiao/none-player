@@ -118,6 +118,10 @@ class PlaybackSession(
     private val _index = MutableStateFlow(-1)
     val index: StateFlow<Int> = _index.asStateFlow()
 
+    /** 上一次 [acquire] 失败的原因（null = 无）；UI 据此渲染体面失败面板（E88 留尾） */
+    private val _engineError = MutableStateFlow<String?>(null)
+    val engineError: StateFlow<String?> = _engineError.asStateFlow()
+
     init {
         observeEngineIndex()
     }
@@ -203,13 +207,20 @@ class PlaybackSession(
      *
      * 引擎按 mimeType 选择（不同格式可能落到不同 `PlayerEngineProvider`）；
      * mimeType 变化且已有实例时才重建。
+     *
+     * 无引擎（插件未启用 / 未知 mime）时返回 null 并把原因写进 [engineError]，
+     * **不再主线程硬抛**（E88 留尾：此前 `factory.create` 的 `error(...)` 会以
+     * IllegalStateException 闪退）——UI 侧渲染体面失败面板。
      */
-    fun acquire(mimeType: String): VideoPlayer {
+    fun acquire(mimeType: String): VideoPlayer? {
         val existing = _player.value
         if (existing != null && engineMimeType == mimeType) return existing
         existing?.release()
-        val created = factory.create(context, mimeType)
+        val created = runCatching { factory.create(context, mimeType) }
+            .onFailure { _engineError.value = it.message }
+            .getOrNull() ?: return null
         engineMimeType = mimeType
+        _engineError.value = null
         _player.value = created
         return created
     }
@@ -227,7 +238,8 @@ class PlaybackSession(
          *  （单独的 seekTo 在控制器未就绪时会被静默丢弃，模拟器实测续播丢失）。 */
         startPositionMs: Long = 0L,
     ) {
-        val player = acquire(item.mimeType)
+        // 无引擎：会话保持干净（不动队列/下标），原因已写入 engineError 由 UI 呈现
+        val player = acquire(item.mimeType) ?: return
         val (list, index) = resolveQueueStart(queueOfFolder, item)
         _queue.value = list
         _index.value = index

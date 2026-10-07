@@ -431,6 +431,19 @@ fun PlayerScreen(
     // 现在引擎归会话，退页只"停用视图"，不 release（释放交给进程结束/引擎换代）。
     val session = remember { SessionHolder.of(sessionFactoryOf(kernel.services)) }
     val player = remember(session) { session.acquire(mimeType) }
+    // E88 留尾：无引擎（插件未启用 / 未知 mime）不再主线程硬抛闪退——
+    // 渲染体面失败面板后早退；session.engineError 携带工厂给出的原因。
+    // 早退是稳定的（同一 mime 恒 null）：其余组合分支不会因它来回挂卸。
+    val engineError by session.engineError.collectAsStateWithLifecycle()
+    if (player == null) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            ErrorPanel(
+                message = engineError ?: "无法创建播放引擎",
+                onBack = navigator::popBackStack,
+            )
+        }
+        return
+    }
 
     // 退页收口（E28 语义保留，但**不再 release 播放器**）：
     // 位置在会话失效前同步读取，落盘用 NonCancellable 协程——它会活过本组合的取消，
