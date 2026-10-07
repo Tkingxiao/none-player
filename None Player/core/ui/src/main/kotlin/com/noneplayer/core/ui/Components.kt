@@ -55,6 +55,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.PathEffect
@@ -62,6 +63,8 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
@@ -195,6 +198,38 @@ fun Modifier.npHoverLift(
     )
     return graphicsLayer { translationY = -lift.value.toPx() }
 }
+
+/**
+ * 菜单锚点持有者：**非可观察**的矩形盒子（见 [rememberNpAnchorHolder]）。
+ *
+ * 存在的理由是"读取时机"：长按菜单只在**长按发生的那一瞬**需要卡片矩形，
+ * 但矩形只有布局阶段才知道。若用 `mutableStateOf` 接住布局回调，
+ * 滚动时每一帧的位置变化都会写一次状态 → 卡片重组一次——
+ * 列表里 8 张可见卡片就是 60fps × 8 次全卡片重组，这是滚动掉帧最典型的一种写法。
+ *
+ * 这里换成普通字段：布局阶段照常写入（不触发重组），点击阶段现取。
+ * 代价是"矩形不是状态"——它本来也不该是，菜单锚点不需要驱动任何 UI。
+ */
+class NpAnchorHolder internal constructor() {
+    private var rect: Rect = Rect.Zero
+
+    internal fun update(value: Rect) {
+        rect = value
+    }
+
+    fun current(): Rect = rect
+}
+
+/** 见 [NpAnchorHolder]：布局期写入、交互期读取，全程不产生重组。 */
+@Composable
+fun rememberNpAnchorHolder(): NpAnchorHolder = remember { NpAnchorHolder() }
+
+/**
+ * 把当前节点的窗口坐标持续写进 [holder]（[onGloballyPositioned] + [boundsInWindow]）。
+ * 与 [NpAnchorHolder] 配套：写入不经过快照系统，因此滚动期零重组开销。
+ */
+fun Modifier.npAnchor(holder: NpAnchorHolder): Modifier =
+    onGloballyPositioned { holder.update(it.boundsInWindow()) }
 
 /** 无涟漪点击（列表行、图标按钮）——Material 涟漪与设计稿的干净按压不是一套语言。 */
 @Composable

@@ -40,6 +40,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -342,12 +343,17 @@ fun NpCoverBox(
     content: @Composable () -> Unit = {},
 ) {
     val ink = LocalNpInk.current
+    // 底色画刷按 (色相, 主题底色) 记忆化：rail 里每张卡片每次重组都新建一条渐变
+    // 属于纯分配开销，而它只是真实封面加载前后的一层兜底。
+    val coverBrush = remember(placeholderHue, ink.surface2) {
+        placeholderHue?.let { NpMediaColor.coverBrush(it) } ?: SolidColor(ink.surface2)
+    }
     Box(
         modifier = modifier
             .fillMaxWidth()
             .aspectRatio(aspectRatio)
             .clip(shape)
-            .background(placeholderHue?.let { NpMediaColor.coverBrush(it) } ?: Brush.linearGradient(listOf(ink.surface2, ink.surface2)))
+            .background(coverBrush)
             .border(1.dp, ink.border, shape)
             .then(
                 if (tintRing != null) {
@@ -771,10 +777,12 @@ fun NpCoverPlaceholder(
     hue: Int,
     modifier: Modifier = Modifier,
 ) {
+    // 同 NpCoverBox：色相画刷记忆化，避免逐次重组重建渐变
+    val brush = remember(hue) { NpMediaColor.coverBrush(hue) }
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(NpMediaColor.coverBrush(hue)),
+            .background(brush),
         contentAlignment = Alignment.Center,
     ) {
         Icon(

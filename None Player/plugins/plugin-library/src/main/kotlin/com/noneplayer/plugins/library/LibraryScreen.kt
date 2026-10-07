@@ -56,8 +56,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -113,12 +111,14 @@ import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatFileSize
 import com.noneplayer.core.ui.formatRelativeDate
 import com.noneplayer.core.ui.formatTimestamp
+import com.noneplayer.core.ui.npAnchor
 import com.noneplayer.core.ui.npClickable
 import com.noneplayer.core.ui.npItemFadeSpec
 import com.noneplayer.core.ui.npPressScale
 import com.noneplayer.core.ui.npMaskFadeEdges
 import com.noneplayer.core.ui.npStaggeredEntry
 import com.noneplayer.core.ui.npStaggerWindow
+import com.noneplayer.core.ui.rememberNpAnchorHolder
 import com.noneplayer.core.ui.rememberNpHaptics
 import com.noneplayer.kernel.api.ContextMenuItem
 import kotlinx.coroutines.withTimeoutOrNull
@@ -1099,34 +1099,42 @@ internal fun MediaCardBody(
     val progress = item.progressFraction()
     // 长按菜单的通道（§3.6）：页面提供、卡片消费，避免三层回调透传
     val longPress = LocalMediaLongPress.current
-    var bounds by remember { mutableStateOf(Rect.Zero) }
-    val meta: List<String> = if (showFolderTag) {
-        buildList {
-            // E42：文件名解析出的「第 N 集」排在元信息行首（验收：标题 · 第 1 集）
-            item.episodeLabel?.let { add(it) }
-            if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
-            formatRelativeDate(item.addedAtMs).takeIf { it.isNotEmpty() }?.let { add(it) }
-            add(if (isAudio) "音频" else "视频")
-        }
-    } else {
-        buildList {
-            item.episodeLabel?.let { add(it) }
-            if (progress > 0.01f && progress < 0.99f) add("已看 ${(progress * 100).toInt()}%")
-            if (item.durationMs > 0) add(formatTimestamp(item.durationMs))
-            // 设计稿 `v.res`：1080P / 4K / 无损；拿不到就省略（不留「视频」占位，
-            // 类型信息 kindtag 已经表达过一次了）
-            item.resolutionLabel.takeIf { it.isNotEmpty() }?.let { add(it) }
-            // E42：文件名解析出的编码（HEVC/AVC…），没有就不占位
-            item.videoCodec?.let { add(it) }
+    // 菜单锚点：布局期写入、长按现取，**不进快照系统**——用 mutableStateOf 接住的话，
+    // 滚动时每张可见卡片的矩形每帧都变，写一次状态就是一次全卡片重组（§9 滚动预算）。
+    val anchor = rememberNpAnchorHolder()
+    // 元信息行是纯展示派生：内容只取决于 item / 形态 / 进度，三者不变时不重建字符串与日期。
+    // `formatRelativeDate` 每次都要取时区并构造 LocalDate，逐帧重建在 rail 上是纯浪费。
+    val meta: List<String> = remember(item, showFolderTag, progress) {
+        if (showFolderTag) {
+            buildList {
+                // E42：文件名解析出的「第 N 集」排在元信息行首（验收：标题 · 第 1 集）
+                item.episodeLabel?.let { add(it) }
+                if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
+                formatRelativeDate(item.addedAtMs).takeIf { it.isNotEmpty() }?.let { add(it) }
+                add(if (isAudio) "音频" else "视频")
+            }
+        } else {
+            buildList {
+                item.episodeLabel?.let { add(it) }
+                if (progress > 0.01f && progress < 0.99f) add("已看 ${(progress * 100).toInt()}%")
+                if (item.durationMs > 0) add(formatTimestamp(item.durationMs))
+                // 设计稿 `v.res`：1080P / 4K / 无损；拿不到就省略（不留「视频」占位，
+                // 类型信息 kindtag 已经表达过一次了）
+                item.resolutionLabel.takeIf { it.isNotEmpty() }?.let { add(it) }
+                // E42：文件名解析出的编码（HEVC/AVC…），没有就不占位
+                item.videoCodec?.let { add(it) }
+            }
         }
     }
+    // 设计稿 `v.neu`：48 小时内加入 → 右上「新增」角标。取一次时间即可，无需逐帧读钟。
+    val isNew = remember(item) { System.currentTimeMillis() - item.addedAtMs < NEW_BADGE_WINDOW_MS }
     NpMediaCard(
         // E42：富化出短标题就用它（「标题」而不是「[字幕组] 标题 - 01 [1080p]」）
         title = item.cardTitle,
         meta = meta,
         onClick = { onOpen(item) },
-        onLongClick = longPress?.let { cb -> { cb(item, bounds) } },
-        modifier = modifier.onGloballyPositioned { bounds = it.boundsInWindow() },
+        onLongClick = longPress?.let { cb -> { cb(item, anchor.current()) } },
+        modifier = modifier.npAnchor(anchor),
         folderTag = if (showFolderTag) item.folder else null,
         folderTagIsAudio = isAudio,
         cover = {
@@ -1135,8 +1143,7 @@ internal fun MediaCardBody(
                 progress = progress.takeIf { it > 0.01f },
                 isAudio = isAudio,
                 showPlayGlyph = true,
-                // 设计稿 `v.neu`：48 小时内加入 → 右上「新增」角标
-                isNew = System.currentTimeMillis() - item.addedAtMs < 48 * 60 * 60 * 1000L,
+                isNew = isNew,
                 durationText = formatTimestamp(item.durationMs)
                     .takeIf { item.durationMs > 0 },
                 // 设计稿 `.thumb::after`：按文件夹色相的 1px 内环
@@ -1165,19 +1172,23 @@ internal fun MediaListRow(
     val hue = NpMediaColor.itemHue(item.folder, isAudio)
     val progress = item.progressFraction()
     val longPress = LocalMediaLongPress.current
-    var bounds by remember { mutableStateOf(Rect.Zero) }
-    val meta = buildList {
-        item.episodeLabel?.let { add(it) }
-        if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
-        formatRelativeDate(item.addedAtMs).takeIf { it.isNotEmpty() }?.let { add(it) }
-        item.videoCodec?.let { add(it) }
+    // 同 [MediaCardBody]：锚点走非可观察持有者，元信息行做记忆化——
+    // 列表视图一屏十几行，逐帧重建字符串与日期的代价比 rail 上更高。
+    val anchor = rememberNpAnchorHolder()
+    val meta = remember(item) {
+        buildList {
+            item.episodeLabel?.let { add(it) }
+            if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
+            formatRelativeDate(item.addedAtMs).takeIf { it.isNotEmpty() }?.let { add(it) }
+            item.videoCodec?.let { add(it) }
+        }
     }
     NpListRow(
         title = item.cardTitle,
         meta = meta,
         onClick = { onOpen(item) },
-        onLongClick = longPress?.let { cb -> { cb(item, bounds) } },
-        modifier = modifier.onGloballyPositioned { bounds = it.boundsInWindow() },
+        onLongClick = longPress?.let { cb -> { cb(item, anchor.current()) } },
+        modifier = modifier.npAnchor(anchor),
         compact = compact,
         folderTag = item.folder,
         folderTagIsAudio = isAudio,
@@ -2186,6 +2197,9 @@ internal fun openPlayer(
 
 /** E20：≤此规模在组合内同步排序（零延迟、无闪烁）；超过则先原序占位，后台排完再替换 */
 private const val SYNC_SORT_LIMIT = 512
+
+/** 设计稿 `v.neu`：「新增」角标的时间窗——48 小时内加入的条目才带角标 */
+private const val NEW_BADGE_WINDOW_MS = 48 * 60 * 60 * 1000L
 
 /** E20：排序口径收口为普通函数——组合内外共用，四档比较器不再散在 remember lambda 里 */
 internal fun mediaComparator(sortMode: SortMode, ascending: Boolean): Comparator<MediaItem> {
