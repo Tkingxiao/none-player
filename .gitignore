@@ -23,3 +23,11 @@ captures/
 /None Player/docs
 /None Player/docs
 设计审查报告.md
+
+# ---- 审查/冒烟测试产物（截图 / 日志 / 测试音视频 / UI dump）----
+# 这些是本地实机/模拟器验证时落在仓库根目录的中间产物，不属于源码。
+/*.png
+/*.log
+/*.wav
+/*.cue
+/ui.xml
