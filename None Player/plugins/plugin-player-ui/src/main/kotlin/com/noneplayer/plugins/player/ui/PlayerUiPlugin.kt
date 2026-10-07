@@ -6,6 +6,7 @@ import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.PluginMarker
 import com.noneplayer.kernel.api.ServiceLocator
+import com.noneplayer.kernel.api.SessionKeyProvider
 import com.noneplayer.kernel.api.register
 import com.noneplayer.kernel.ui.api.BottomChromeProvider
 import com.noneplayer.kernel.ui.api.DetailPaneProvider
@@ -31,11 +32,16 @@ class PlayerUiPlugin : Plugin {
      * （后台服务的播放器还在放，UI 却无数据源）。
      */
     override fun onBind(services: ServiceLocator) {
-        SessionHolder.of(sessionFactoryOf(services))
+        val kernelServices = sessionFactoryOf(services)
+        SessionHolder.of(kernelServices)
         subtitleCache = SubtitleCacheProvider(services.get())
+        // E99：非播放页形态（三栏浏览态等）的会话快捷键，窗口层兜底派发
+        browseKeys = BrowseSessionKeys(services.get()) { SessionHolder.of(kernelServices) }
     }
 
     private var subtitleCache: SubtitleCacheProvider? = null
+
+    private var browseKeys: BrowseSessionKeys? = null
 
     override suspend fun onInstall(registry: ExtensionRegistry) {
         registry.register(ScreenProvider::class.java, PlayerScreenProvider())
@@ -46,6 +52,7 @@ class PlayerUiPlugin : Plugin {
         registry.register(DetailPaneProvider::class.java, PlaybackPaneChrome())
         // 批次 7「插件清缓存」：字幕转码副本（cache_dir/subs）的清理入口
         subtitleCache?.let { registry.register(CacheProvider::class.java, it) }
+        browseKeys?.let { registry.register(SessionKeyProvider::class.java, it) }
     }
 
     override suspend fun onStart() = Unit

@@ -3,6 +3,7 @@ package com.noneplayer.app
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -42,6 +43,7 @@ import com.noneplayer.core.ui.npDuration
 import com.noneplayer.kernel.BootState
 import com.noneplayer.kernel.Kernel
 import com.noneplayer.kernel.api.PermissionProvider
+import com.noneplayer.kernel.api.SessionKeyProvider
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
@@ -72,6 +74,27 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         deepLinkIntents.tryEmit(intent)
+    }
+
+    /**
+     * E99：会话级快捷键的**窗口层兜底派发**。
+     *
+     * Compose 的键事件只沿焦点路径下发，而类 PC 三栏浏览态里播放页根本不在组合树里
+     * （右栏是另一份实现），快捷键随之消失；把处理函数放进右栏子树也救不了——用户
+     * 点一下列表卡片，焦点就离开了那一栏。
+     *
+     * 因此放在 `super` 之后：**任何 Compose 组件处理过的键都不经过这里**（播放页自己的
+     * 快捷键、搜索框里的空格），只接没人要的键，天然不与页面级快捷键争抢。
+     */
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (super.dispatchKeyEvent(event)) return true
+        if (event.action == KeyEvent.ACTION_UP) {
+            val kernel = (application as? NonePlayerApplication)?.kernel ?: return false
+            if (kernel.registry.query<SessionKeyProvider>()
+                    .any { it.onSessionKey(event.keyCode, event.isShiftPressed, event.isCtrlPressed) }
+            ) return true
+        }
+        return false
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

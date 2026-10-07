@@ -229,13 +229,8 @@ private const val CONTROLS_AUTO_HIDE_MS = 3500L
 /** 舞台双击的 seek 步长（§4.3：左右 1/3 = ∓/±10 秒） */
 private const val GESTURE_SEEK_STEP_MS = 10_000L
 
-/** 键盘 seek 两档（§8.4：`←/→` ±5 秒、`Shift+←/→` ±30 秒） */
-private const val KEY_SEEK_STEP_MS = 5_000L
-private const val KEY_SEEK_LARGE_STEP_MS = 30_000L
-
-/** 键盘音量档（§8.4：`↑/↓` ±5）与静音后无可还原记录时的兜底档位 */
-private const val KEY_VOLUME_STEP = 5
-private const val KEY_VOLUME_RESTORE_PERCENT = 30
+// 键盘两档 seek / 音量步进与静音兜底档位在 SessionKeySteps（E99：三栏浏览态
+// 的会话快捷键要与本页共用同一张表和同一份数字，两处各写迟早会漂）
 
 /** 等系统把方向落地的最长时限 / 轮询间隔（转屏动画 + 配置下发） */
 private const val ORIENTATION_CONFIRM_TIMEOUT_MS = 1200L
@@ -1005,7 +1000,7 @@ fun PlayerScreen(
             setVolumePercent(0)
             gestureHint = "已静音"
         } else {
-            setVolumePercent(if (lastAudiblePercent > 0) lastAudiblePercent else KEY_VOLUME_RESTORE_PERCENT)
+            setVolumePercent(if (lastAudiblePercent > 0) lastAudiblePercent else SessionKeySteps.VOLUME_RESTORE_PERCENT)
             gestureHint = "已取消静音"
         }
         controlsVisible = true
@@ -1397,27 +1392,34 @@ fun PlayerScreen(
                 // §8.4（E50 P1）九件：空格、←/→ ±5s、Shift+←/→ ±30s、↑/↓ 音量 ±5、
                 // M 静音、F 全屏、L 锁定、Esc 退层、Ctrl+O 打开文件。
                 // `,`/`.` 逐帧与 D-pad 方向导航按 §12 归 P2（§11 第 6 条）。
-                when (event.key) {
-                    Key.Spacebar -> {
+                // 会话级四件读 SessionKeys 的共用映射表（E99）：三栏浏览态那份实现
+                // 用的是同一张表与同一份步进数字，两处不会再各写一份漂掉。
+                // `Key.keyCode` 是 Long（Compose 1.7 起），映射表按 KeyEvent 的 Int 键码写。
+                when (val command = routeSessionKey(event.key.keyCode.toInt(), event.isShiftPressed)) {
+                    SessionKeyCommand.PlayPause -> {
                         togglePlay()
-                        true
+                        return@onPreviewKeyEvent true
                     }
-                    Key.DirectionLeft, Key.DirectionRight -> {
+                    is SessionKeyCommand.Seek -> {
                         seekByGesture(
-                            forward = event.key == Key.DirectionRight,
-                            stepMs = if (event.isShiftPressed) KEY_SEEK_LARGE_STEP_MS else KEY_SEEK_STEP_MS,
+                            forward = command.deltaMs >= 0,
+                            stepMs = if (command.deltaMs < 0) -command.deltaMs else command.deltaMs,
                         )
-                        true
+                        return@onPreviewKeyEvent true
                     }
-                    Key.DirectionUp, Key.DirectionDown -> {
+                    is SessionKeyCommand.Volume -> {
                         // 音量走系统流，与右侧竖滑手势同一个 setVolumePercent（不另起一路）
-                        setVolumePercent(volumePercent + if (event.key == Key.DirectionUp) KEY_VOLUME_STEP else -KEY_VOLUME_STEP)
-                        true
+                        setVolumePercent(volumePercent + command.deltaPercent)
+                        return@onPreviewKeyEvent true
                     }
-                    Key.M -> {
+                    SessionKeyCommand.Mute -> {
                         toggleMute()
-                        true
+                        return@onPreviewKeyEvent true
                     }
+                    null -> Unit
+                }
+                // 页面级三件（浏览态没有对应能力，不进共用表）：F 全屏、Ctrl+O 打开文件、Esc 退层
+                when (event.key) {
                     Key.F -> {
                         toggleFullscreen()
                         true
