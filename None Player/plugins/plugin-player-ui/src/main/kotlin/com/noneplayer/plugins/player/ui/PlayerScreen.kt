@@ -1172,14 +1172,21 @@ fun PlayerScreen(
             return
         }
         val a = context as? ComponentActivity ?: return
-        runCatching {
+        // L10①：反馈诚实性——`enterPictureInPictureMode` 失败会返回 false（设备/系统
+        // 不允许时也可能抛异常），此前无条件 toast「已进入画中画」，用户看不到小窗却被
+        // 告知成功。比例改用真实视频宽高比（与参数跟随同一口径），竖视频不再塞进 16:9。
+        val ratio = videoAspectRatio.takeIf { it > 0f } ?: 16f / 9f
+        val entered = runCatching {
             a.enterPictureInPictureMode(
-                android.app.PictureInPictureParams.Builder()
-                    .setAspectRatio(android.util.Rational(16, 9))
+                PictureInPictureParams.Builder()
+                    .setAspectRatio(
+                        android.util.Rational((ratio * 1000).roundToInt().coerceAtLeast(1), 1000),
+                    )
+                    .setActions(pipActions(context, state == PlaybackState.Playing))
                     .build(),
             )
-        }
-        toast.show("已进入画中画")
+        }.getOrDefault(false)
+        toast.show(if (entered) "已进入画中画" else "画中画不可用")
     }
 
     // 锁定语义：屏蔽**全部**舞台手势、返回键与键盘，舞台上仅解锁钮可点——
@@ -2666,12 +2673,20 @@ fun PlayerScreen(
                         tint = ink0.muted,
                         modifier = Modifier.size(18.dp),
                     )
-                    Text(
-                        text = "允许屏幕截图",
-                        style = NpTypography.bodyMedium,
-                        color = ink0.fg,
-                        modifier = Modifier.weight(1f),
-                    )
+                    // L17：这个开关是**会话级**（`rememberSaveable`，退页即复原成"允许"），
+                    // 副题如实标注生效范围，避免用户以为它像设置页开关一样持久
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "允许屏幕截图",
+                            style = NpTypography.bodyMedium,
+                            color = ink0.fg,
+                        )
+                        Text(
+                            text = "仅本次播放有效",
+                            style = NpTypography.bodySmall,
+                            color = ink0.muted,
+                        )
+                    }
                     NpSwitch(
                         checked = !screenshotBlocked,
                         onCheckedChange = { allow ->

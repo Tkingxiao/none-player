@@ -108,7 +108,8 @@ class HistoryRepository(context: Context) {
     }
 
     /** 收藏开关；返回切换后的状态 */
-    suspend fun toggleFavorite(item: MediaItem): Boolean {        val key = HistoryEntry.keyOf(item)
+    suspend fun toggleFavorite(item: MediaItem): Boolean {
+        val key = HistoryEntry.keyOf(item)
         return if (dao.isFavoriteNow(key)) {
             dao.removeFavorite(key)
             false
