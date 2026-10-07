@@ -80,6 +80,13 @@ internal interface HistoryDao {
     @Query("DELETE FROM playback_history WHERE media_key = :key")
     suspend fun delete(key: String)
 
+    /** L16：全量键（孤儿清理用——只取键，不把整行收下来） */
+    @Query("SELECT media_key FROM playback_history")
+    suspend fun allHistoryKeys(): List<String>
+
+    @Query("DELETE FROM playback_history WHERE media_key IN (:keys)")
+    suspend fun deleteHistoryKeys(keys: List<String>)
+
     @Query("DELETE FROM playback_history")
     suspend fun clear()
 
@@ -132,6 +139,13 @@ internal interface HistoryDao {
 
     @Query("SELECT * FROM favorites")
     suspend fun allFavorites(): List<FavoriteEntity>
+
+    /** L16：全量收藏键（孤儿清理用） */
+    @Query("SELECT media_key FROM favorites")
+    suspend fun allFavoriteKeys(): List<String>
+
+    @Query("DELETE FROM favorites WHERE media_key IN (:keys)")
+    suspend fun deleteFavoriteKeys(keys: List<String>)
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun addFavorite(row: FavoriteEntity)

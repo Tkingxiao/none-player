@@ -122,6 +122,29 @@ class HistoryRepository(context: Context) {
     suspend fun clearHistory() = dao.clear()
 
     /**
+     * L16：清孤儿记录（数据卫生）。
+     *
+     * 重扫完成后，把播放历史 / 收藏里 `media_key` 已**不在本次扫描结果中**的行删掉。
+     * 此前只有全量 [clearHistory]，没有按 id 删除的入口——文件在系统里删了、来源目录被
+     * 移除了，历史行却永远留着，「清除播放缓存 N 条」的计数把死记录也算进去（数据不可信）。
+     *
+     * **调用方必须只在"扫描覆盖了全部授权目录"时才调**：某个目录的持久化授权被系统撤销、
+     * 或 docId 解析失败时本轮跳过不删——那类故障是临时的，一次就把整个目录的断点静默清零
+     * 比留下几条死记录更糟（见 `LocalMediaSource.scanInternal` 的 `notes.isEmpty()` 门）。
+     *
+     * `IN (:keys)` 受 SQLite 变量数上限约束（旧实现约 999），按 [DELETE_CHUNK] 批切分下发。
+     *
+     * @return 删除的**历史**行数（不含收藏）
+     */
+    suspend fun pruneOrphans(validKeys: Set<String>): Int {
+        val historyOrphans = orphanKeys(dao.allHistoryKeys(), validKeys)
+        historyOrphans.chunked(DELETE_CHUNK).forEach { dao.deleteHistoryKeys(it) }
+        val favoriteOrphans = orphanKeys(dao.allFavoriteKeys(), validKeys)
+        favoriteOrphans.chunked(DELETE_CHUNK).forEach { dao.deleteFavoriteKeys(it) }
+        return historyOrphans.size
+    }
+
+    /**
      * 一次性迁移（E11）：把 DataStore 的 `playback_pos_*` / `playback_at_*` 读成历史行。
      *
      * 行数据（标题/封面/时长…）取自**当前媒体列表**——迁移需要一个"条目快照"的来源，
@@ -200,5 +223,12 @@ class HistoryRepository(context: Context) {
             if (positionMs >= MIN_PERSIST_POSITION_MS) return true
             return durationMs > 0L && watchedRatio(positionMs, durationMs) >= WATCHED_DONE_RATIO
         }
+
+        /** 纯函数（可单测）：库里存在、但本次扫描结果里没有的键（孤儿） */
+        fun orphanKeys(existing: Collection<String>, valid: Set<String>): List<String> =
+            existing.filterNot { it in valid }
+
+        /** `IN (:keys)` 的单批键数上限：SQLite 变量数限制（约 999）留足余量 */
+        private const val DELETE_CHUNK = 400
     }
 }

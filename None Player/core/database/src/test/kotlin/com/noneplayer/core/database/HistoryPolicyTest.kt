@@ -60,4 +60,15 @@ class HistoryPolicyTest {
         val item = MediaItem(id = "ms-1", sourceId = "local", title = "t", uri = "content://x")
         assertEquals("local:ms-1", HistoryEntry.keyOf(item))
     }
+
+    @Test
+    fun `孤儿键是库里存在但扫描结果里没有的那些`() {
+        // L16：重扫后只删"不在本次结果集"的行——存在的键一个都不能误删
+        val existing = listOf("local:ms-1", "local:ms-2", "local:saf-abc")
+        val valid = setOf("local:ms-1", "local:saf-abc")
+        assertEquals(listOf("local:ms-2"), HistoryRepository.orphanKeys(existing, valid))
+        assertTrue(HistoryRepository.orphanKeys(emptyList(), valid).isEmpty())
+        // valid 为空 = 库被清空，整表都是孤儿
+        assertEquals(existing, HistoryRepository.orphanKeys(existing, emptySet()))
+    }
 }
