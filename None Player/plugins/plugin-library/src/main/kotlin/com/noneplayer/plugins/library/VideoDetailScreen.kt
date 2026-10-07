@@ -17,6 +17,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -167,42 +170,55 @@ internal fun VideoDetailScreen(
                         onOpenInfo = { showDetail = true },
                     )
                 }
-                Column(
+                // 右栏自己就是滚动容器（LazyColumn）——同文件夹动辄几百集，
+                // 整表 `forEach` 会在打开详情的那一帧把全部行组合并测量一遍。
+                LazyColumn(
                     modifier = Modifier
                         .weight(1f)
-                        .verticalScroll(rememberScrollState()),
+                        .fillMaxSize(),
                 ) {
-                    SiblingList(item = item, siblings = siblings, onSelect = onSelect)
+                    siblingRows(item = item, siblings = siblings, onSelect = onSelect)
                 }
             }
             if (showDetail) {
                 DetailPopup(item = item, onDismiss = { showDetail = false })
             }
         } else {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(pad),
+            // 窄窗：整页一个 Lazy 列表——头部（封面 + 元信息）在前，同文件夹条目按需组合。
+            // contentPadding 与旧的 `verticalScroll + padding` 同义：内容整块内缩，
+            // 滚动时同样能进到顶栏与底条之下。
+            LazyColumn(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = pad,
             ) {
-                DetailHero(
-                    item = item,
-                    hue = hue,
-                    isAudio = isAudio,
-                    progress = progress,
-                    canResume = canResume,
-                    resumeMs = resumeMs,
-                    navigator = navigator,
-                    inlinePlayer = inlinePlayer,
-                    inlinePlaying = inlinePlaying,
-                    onStartInline = ::startPlayback,
-                    onFullscreen = { onFullscreen(item) },
-                )
-                Spacer(Modifier.height(22.dp))
-                DetailMeta(item = item)
+                item(key = "detail-hero") {
+                    DetailHero(
+                        item = item,
+                        hue = hue,
+                        isAudio = isAudio,
+                        progress = progress,
+                        canResume = canResume,
+                        resumeMs = resumeMs,
+                        navigator = navigator,
+                        inlinePlayer = inlinePlayer,
+                        inlinePlaying = inlinePlaying,
+                        onStartInline = ::startPlayback,
+                        onFullscreen = { onFullscreen(item) },
+                    )
+                }
+                item(key = "detail-meta") {
+                    Column {
+                        Spacer(Modifier.height(22.dp))
+                        DetailMeta(item = item)
+                    }
+                }
                 if (siblings.size > 1) {
-                    Spacer(Modifier.height(22.dp))
-                    SiblingList(item = item, siblings = siblings, onSelect = onSelect)
+                    siblingRows(
+                        item = item,
+                        siblings = siblings,
+                        onSelect = onSelect,
+                        topSpacing = 22.dp,
+                    )
                 }
             }
         }
@@ -372,56 +388,79 @@ private fun DetailMeta(
     }
 }
 
-/** 剧集列表（同文件夹）——宽屏常驻右侧，窄窗跟随详情 */
-@Composable
-private fun SiblingList(
+/**
+ * 剧集列表（同文件夹）——宽屏常驻右栏，窄窗跟随详情。
+ *
+ * 写成 [LazyListScope] 扩展而不是普通的 `@Composable Column`：两处调用点各自
+ * 已经是滚动容器，行必须交给它们**按需组合**。此前是 `Column { siblings.forEach }`，
+ * 一个几百集的文件夹在打开详情的瞬间要组合并测量全部行——平板/类 PC 档点任意
+ * 视频都会走详情页，这一跳就是主线程上一次实打实的停顿。
+ */
+private fun LazyListScope.siblingRows(
     item: MediaItem,
     siblings: List<MediaItem>,
     onSelect: (MediaItem) -> Unit,
-    modifier: Modifier = Modifier,
+    topSpacing: Dp = 0.dp,
 ) {
-    val ink = LocalNpInk.current
-    Column(modifier = modifier) {
-        if (siblings.size > 1) {
+    if (siblings.size <= 1) return
+    item(key = "siblings-head") {
+        Column {
+            Spacer(Modifier.height(topSpacing))
             NpSectionHead(title = "同文件夹（${siblings.size}）")
             Spacer(Modifier.height(6.dp))
-            siblings.forEachIndexed { index, sibling ->
-                val current = sibling.id == item.id
-                NpOptRow(
-                    // 短标题 + 集号：同名剧集（"剧集 · 第 2 集" / "剧集 · 第 10 集"）才分得清
-                    text = listOfNotNull(
-                        sibling.cardTitle.ifBlank { sibling.uri.substringAfterLast('/') },
-                        sibling.episodeLabel,
-                    ).joinToString(" · "),
-                    selected = current,
-                    onClick = { if (!current) onSelect(sibling) },
-                    leading = {
-                        Text(
-                            text = (index + 1).toString().padStart(2, '0'),
-                            style = NpMonoSmall,
-                            color = ink.muted,
-                            modifier = Modifier.width(28.dp),
-                        )
-                    },
-                    trailing = {
-                        if (current) {
-                            Text(
-                                text = "当前",
-                                style = NpTypography.labelSmall,
-                                color = ink.accent,
-                            )
-                        } else if (sibling.durationMs > 0) {
-                            Text(
-                                text = formatTimestamp(sibling.durationMs),
-                                style = NpMonoSmall,
-                                color = ink.muted,
-                            )
-                        }
-                    },
-                )
-            }
         }
     }
+    itemsIndexed(siblings, key = { _, sibling -> sibling.id }) { index, sibling ->
+        SiblingRow(
+            index = index,
+            sibling = sibling,
+            current = sibling.id == item.id,
+            onSelect = onSelect,
+        )
+    }
+}
+
+/** 同文件夹里的一行（设计稿 `.optrow`）；编号 / 当前项标记 / 时长三处口径与列表一致 */
+@Composable
+private fun SiblingRow(
+    index: Int,
+    sibling: MediaItem,
+    current: Boolean,
+    onSelect: (MediaItem) -> Unit,
+) {
+    val ink = LocalNpInk.current
+    NpOptRow(
+        // 短标题 + 集号：同名剧集（"剧集 · 第 2 集" / "剧集 · 第 10 集"）才分得清
+        text = listOfNotNull(
+            sibling.cardTitle.ifBlank { sibling.uri.substringAfterLast('/') },
+            sibling.episodeLabel,
+        ).joinToString(" · "),
+        selected = current,
+        onClick = { if (!current) onSelect(sibling) },
+        leading = {
+            Text(
+                text = (index + 1).toString().padStart(2, '0'),
+                style = NpMonoSmall,
+                color = ink.muted,
+                modifier = Modifier.width(28.dp),
+            )
+        },
+        trailing = {
+            if (current) {
+                Text(
+                    text = "当前",
+                    style = NpTypography.labelSmall,
+                    color = ink.accent,
+                )
+            } else if (sibling.durationMs > 0) {
+                Text(
+                    text = formatTimestamp(sibling.durationMs),
+                    style = NpMonoSmall,
+                    color = ink.muted,
+                )
+            }
+        },
+    )
 }
 
 /**
