@@ -18,6 +18,7 @@ import android.util.Size
 import androidx.core.net.toUri
 import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.CueSheet
 import com.noneplayer.core.media.kind
@@ -200,7 +201,7 @@ class LocalMediaSource(
             return ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
         }
         val previousIds = _media.value.map { it.id }.toSet()
-        val items = queryMediaStore(validScopes)
+        val storeItems = queryMediaStore(validScopes)
             // 垃圾文件过滤（§10 批次 4）：下载中的 .part/.tmp 等半成品不进库
             .filterNot { isJunkFile(it.title, it.sizeBytes) }
             // 元数据富化（E34 的消费端）：插件按注册顺序串行富化，失败不拖垮扫描
@@ -211,13 +212,28 @@ class LocalMediaSource(
             // 无扩展名文件拾取与 .cue 分轨展开在 queryMediaStore 内完成
             // （前者的 Files 集合查询、后者的逐文件配对都需要 dataPath/范围参数）
             .let { items -> items + sniffUnknownFiles(validScopes) }
+        // L14：MediaStore 跳过隐藏目录（`.` 前缀），这里用 SAF 遍历把其中的媒体补齐。
+        // 只补 MediaStore 看不到的那部分——按「相对路径 + 文件名」与已收项去重，
+        // 非隐藏文件仍以 MediaStore 为唯一来源，不重复采集。
+        val storePaths = storeItems.asSequence()
+            .mapNotNull { item -> item.folder?.let { "$it/${item.title}" } }
+            .toHashSet()
+        val hiddenItems = queryHiddenDocuments(liveFolders)
+            .filterNot { item ->
+                val path = item.folder?.let { "$it/${item.title}" }
+                path != null && path in storePaths
+            }
+            // 富化与 MediaStore 项同链路（短标题/集号对隐藏目录里的剧集一样有用）
+            .map { enrichAll(it) }
+        val items = storeItems + hiddenItems
         // §8.3/E11：首次扫描把 DataStore 的断点迁入 Room，随后清旧键
         migrateHistoryOnce(items)
-        // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存，故只看 "ms-" 前缀）
-        val validIds = items.filter { it.id.startsWith("ms-") }.map { it.id.removePrefix("ms-") }.toSet()
+        // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存）。
+        // L14：SAF 拾取的隐藏项也有缩略图，键一并纳入白名单，否则每轮扫描都会被删掉重建
+        val validThumbKeys = items.mapNotNull { thumbKeyOf(it.id) }.toSet()
         File(context.cacheDir, "video_thumbs")
             .listFiles()
-            ?.forEach { f -> if (f.nameWithoutExtension !in validIds) f.delete() }
+            ?.forEach { f -> if (f.nameWithoutExtension !in validThumbKeys) f.delete() }
         _media.value = items
         // E30（B7 收尾）：按 id 集合差集统计，而非净值——
         // 同时增删时净值会互相抵消（新增 3 删 2 显示为 +1/0）
@@ -226,6 +242,13 @@ class LocalMediaSource(
         val notes = buildList {
             if (skippedCount > 0) add("$skippedCount 个目录无法解析，已跳过")
             if (revoked.isNotEmpty()) add("${revoked.size} 个目录授权已被系统撤销，请重新选择或移除")
+        }
+        // L16：孤儿清理——只有本次扫描**覆盖了全部授权目录**（notes 为空）时才做。
+        // 任一目录被跳过/撤销时结果集不完整，此刻删记录会把整个目录的断点误清；
+        // 这批死记录留到下一次完整扫描再清即可，不会误导计数太久。
+        if (notes.isEmpty()) {
+            val pruned = history.pruneOrphans(items.map { HistoryEntry.keyOf(it) }.toSet())
+            if (pruned > 0) Log.i(TAG, "孤儿清理（L16）：删除 $pruned 条失效播放历史")
         }
         val summary = LocalScanSummary(
             added = (newIds - previousIds).size,
@@ -698,12 +721,109 @@ class LocalMediaSource(
         return dir
     }
 
+    /**
+     * L14：隐藏目录（`.` 前缀）里的媒体拾取。
+     *
+     * MediaStore 的媒体集合**跳过隐藏目录**：模拟器实测把同一个 mp4 放进
+     * `Movies/.nphidden/` 后，视频集合的 13 行里 0 行属于它——用户在手机上把片子
+     * 收进 `.xxx/` 目录，库里便一条都看不见。而 SAF（`DocumentsContract`）的 children
+     * 查询**不跳过隐藏项**（同一次实测里 `.nphidden` 与 `.thumbnails` 都照常返回）。
+     *
+     * 于是沿用户授权的每个 tree 递归：**目录一律下钻**（隐藏目录可能藏在非隐藏目录之下，
+     * 如 `Movies/Series/.hidden`），**只收"路径中含 `.` 前缀分段"的文件**——非隐藏文件
+     * 仍以 MediaStore 为唯一来源，绝不重复采集。返回项的 uri 是 document URI，引擎直接
+     * 可播（media3 走 ContentResolver）；tree 的持久化读授权已覆盖其全部子孙。
+     *
+     * 遍历有 [HIDDEN_WALK_BUDGET] 硬预算：目录树里混进 `node_modules`/`.git` 这类巨型结构
+     * 时，不把一次扫描拖成分钟级；超预算即停（fail-open，宁可少收也不卡死）。
+     */
+    private fun queryHiddenDocuments(treeUriStrs: List<String>): List<MediaItem> {
+        val out = mutableListOf<MediaItem>()
+        var budget = HIDDEN_WALK_BUDGET
+
+        fun walk(treeUri: Uri, docId: String, inheritedHidden: Boolean) {
+            if (budget <= 0) return
+            val childrenUri = runCatching {
+                DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
+            }.getOrNull() ?: return
+            runCatching {
+                context.contentResolver.query(
+                    childrenUri,
+                    arrayOf(
+                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+                        DocumentsContract.Document.COLUMN_MIME_TYPE,
+                        DocumentsContract.Document.COLUMN_SIZE,
+                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+                    ),
+                    null,
+                    null,
+                    null,
+                )?.use { cursor ->
+                    val idCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                    val nameCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                    val mimeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                    val sizeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                    val lmCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                    while (cursor.moveToNext()) {
+                        if (budget-- <= 0) return
+                        if (idCol < 0) continue
+                        val childDocId = cursor.getString(idCol) ?: continue
+                        val name = if (nameCol >= 0) cursor.getString(nameCol).orEmpty() else ""
+                        if (name.isEmpty()) continue
+                        val mime = if (mimeCol >= 0) cursor.getString(mimeCol).orEmpty() else ""
+                        val hidden = inheritedHidden || name.startsWith(".")
+                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                            if (name in HIDDEN_DENY_DIRS) continue
+                            walk(treeUri, childDocId, hidden)
+                        } else if (hidden) {
+                            if (isJunkSuffix(name)) continue
+                            val size = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
+                            if (sizeCol >= 0 && size <= 0L) continue
+                            val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childDocId)
+                            // mime 已是 video/*、audio/* 就用它；否则（application/octet-stream
+                            // 之类）按文件头嗅探——认不出的直接跳过，不往库里塞"点开必失败"的项
+                            val effectiveMime = if (mime.startsWith("video/") || mime.startsWith("audio/")) {
+                                mime
+                            } else {
+                                readHead(docUri, ContainerSniffer.HEAD_BYTES)
+                                    ?.let { ContainerSniffer.sniff(it) }
+                                    ?: continue
+                            }
+                            val id = hiddenDocumentId(childDocId)
+                            out += MediaItem(
+                                id = id,
+                                sourceId = sourceId,
+                                title = name,
+                                uri = docUri.toString(),
+                                mimeType = effectiveMime,
+                                sizeBytes = size,
+                                addedAtMs = if (lmCol >= 0) cursor.getLong(lmCol) else 0L,
+                                coverUri = thumbnailFor(id, docUri),
+                                folder = folderOfDocument(childDocId),
+                            )
+                        }
+                    }
+                }
+            }.onFailure { Log.w(TAG, "隐藏目录遍历失败（fail-open 跳过）", it) }
+        }
+
+        treeUriStrs.forEach { treeStr ->
+            if (budget <= 0) return@forEach
+            val treeUri = runCatching { treeStr.toUri() }.getOrNull() ?: return@forEach
+            val treeDocId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
+                ?: return@forEach
+            // tree 根自身就是隐藏目录（用户直接选了 `.foo`）时，其子项整支都算隐藏
+            val rootName = treeDocId.substringAfter(':', treeDocId).substringAfterLast('/')
+            walk(treeUri, treeDocId, rootName.startsWith("."))
+        }
+        return out
+    }
+
     /** 缩略图缓存：扫描时落盘为 JPEG，之后封面直接读文件 */
     private fun thumbnailFor(id: Long, videoUri: Uri): String? = runCatching {
-        val dir = File(context.cacheDir, "video_thumbs").apply { mkdirs() }
-        val file = File(dir, "$id.jpg")
-        if (!file.exists() || file.length() == 0L) {
-            val bitmap: Bitmap? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        writeThumbnail("$id") {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 context.contentResolver.loadThumbnail(videoUri, Size(480, 270), null)
             } else {
                 @Suppress("DEPRECATION")
@@ -714,12 +834,38 @@ class LocalMediaSource(
                     null,
                 ) ?: createFrameFallback(videoUri)
             }
-            if (bitmap != null) {
-                file.outputStream().use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out) }
-            }
         }
-        if (file.exists() && file.length() > 0) file.absolutePath else null
     }.getOrNull()
+
+    /**
+     * SAF/文档 URI 的封面（L14）：隐藏项没有 MediaStore 长整型 id，走不了旧缩略图接口。
+     * Q+ 用 `loadThumbnail`，更低版本直接抽首帧；键用项 id（`saf-…`），与 MediaStore 的
+     * 数字键天然分开，不会互相覆盖。
+     */
+    private fun thumbnailFor(key: String, docUri: Uri): String? = runCatching {
+        writeThumbnail(key) {
+            // 文档 URI 的 loadThumbnail 在部分 provider/版本上不可用（抛异常或返回 null），
+            // 兜一句 MediaMetadataRetriever 抽首帧，避免隐藏目录里的项永远只有占位图
+            val bySystem = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                runCatching { context.contentResolver.loadThumbnail(docUri, Size(480, 270), null) }
+                    .getOrNull()
+            } else {
+                null
+            }
+            bySystem ?: createFrameFallback(docUri)
+        }
+    }.getOrNull()
+
+    /** 缩略图落盘：文件名命中即复用（0 字节视为坏图），否则用 [produce] 抽帧写 JPEG */
+    private fun writeThumbnail(key: String, produce: () -> Bitmap?): String? {
+        val dir = File(context.cacheDir, "video_thumbs").apply { mkdirs() }
+        val file = File(dir, "$key.jpg")
+        if (!file.exists() || file.length() == 0L) {
+            val bitmap = produce() ?: return null
+            file.outputStream().use { out -> bitmap.compress(Bitmap.CompressFormat.JPEG, 85, out) }
+        }
+        return if (file.exists() && file.length() > 0) file.absolutePath else null
+    }
 
     /**
      * 音频封面：Android 没有音频系统缩略图接口，只能走相册封面 URI。
@@ -902,6 +1048,51 @@ private fun cueTracksFor(file: MediaItem, dataPath: String): List<MediaItem> {
 }
 
 private val JUNK_SUFFIXES = listOf(".part", ".tmp", ".crdownload", ".!qb", ".downloading")
+
+/** L14 遍历预算：单次扫描最多访问的文档数上限（防巨型目录把扫描拖成分钟级） */
+private const val HIDDEN_WALK_BUDGET = 20_000
+
+/** L14 下钻黑名单：这些隐藏目录只装系统缓存 / 回收站，不可能有用户媒体 */
+private val HIDDEN_DENY_DIRS = setOf(
+    ".thumbnails", ".trash", ".Trash", ".recycle", ".trashbin", ".cache", ".temp",
+)
+
+/** 半成品后缀（与 `isJunkFile` 共用 [JUNK_SUFFIXES]）：隐藏目录里的 .part 之类不该进库 */
+private fun isJunkSuffix(name: String): Boolean {
+    val lower = name.lowercase()
+    return JUNK_SUFFIXES.any { lower.endsWith(it) }
+}
+
+/** 缩略图文件名键：MediaStore 项剥 `ms-`（沿用既有缓存名），SAF 项直接用整 id */
+private fun thumbKeyOf(id: String): String? = when {
+    id.startsWith("ms-") -> id.removePrefix("ms-")
+    id.startsWith("saf-") -> id
+    else -> null
+}
+
+/**
+ * L14：SAF docId → 展示用相对目录（如 "Movies/.nphidden"）；卷根目录返回 null。
+ *
+ * `primary:Movies/.nphidden/secret.mp4` → "Movies/.nphidden"，与 MediaStore 的
+ * RELATIVE_PATH 同口径（相对媒体根、不带首尾斜杠），文件夹树与同目录队列直接可用。
+ */
+internal fun folderOfDocument(docId: String): String? =
+    docId.substringAfter(':', docId)
+        .trim('/')
+        .substringBeforeLast('/', "")
+        .trim('/')
+        .ifEmpty { null }
+
+/**
+ * L14：SAF docId → 稳定短 id（`saf-` + SHA-1 截断 16 位十六进制）。
+ *
+ * 断点/收藏/缩略图都认这个 id，所以必须**跨扫描稳定**（docId 不变则 id 不变），
+ * 且是文件系统安全的短名（既进 Room 键，也进 `video_thumbs/<key>.jpg`）。
+ */
+internal fun hiddenDocumentId(docId: String): String {
+    val digest = java.security.MessageDigest.getInstance("SHA-1").digest(docId.toByteArray())
+    return "saf-" + digest.joinToString("") { "%02x".format(it) }.take(16)
+}
 
 private const val TAG = "LocalMediaSource"
 
