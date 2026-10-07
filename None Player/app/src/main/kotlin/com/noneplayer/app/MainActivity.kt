@@ -51,7 +51,8 @@ import com.noneplayer.kernel.ui.api.KernelNavHost
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.rememberNpWindowInfo
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 
 /**
@@ -67,13 +68,20 @@ class MainActivity : ComponentActivity() {
      * 热启动深链（E2）：singleTask 复用实例时系统走 [onNewIntent]，
      * 投递到这里交给 NavController 处理；冷启动的 intent 由
      * NavController.setGraph 自动 handleDeepLink（见 KernelNavHost 注释）。
+     *
+     * 用 [Channel] 而不是 `MutableSharedFlow(replay = 0)`：SharedFlow 在**没有订阅者**
+     * 时直接丢弃发射，而订阅者（KernelNavHost 里那条收集协程）要等内核 Running、
+     * NavHost 组合之后才出现。启动画面期间点媒体通知进来，事件会静默消失——用户看到
+     * "点通知没反应"。Channel 会把无接收者时的元素缓冲下来，交给第一个后到的收集者，
+     * 且每条只投递一次。
      */
-    private val deepLinkIntents = MutableSharedFlow<Intent>(extraBufferCapacity = 1)
+    private val deepLinkIntents = Channel<Intent>(Channel.UNLIMITED)
+    private val deepLinkFlow = deepLinkIntents.receiveAsFlow()
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        deepLinkIntents.tryEmit(intent)
+        deepLinkIntents.trySend(intent)
     }
 
     /**
@@ -166,7 +174,7 @@ class MainActivity : ComponentActivity() {
                             com.noneplayer.core.ui.LocalNpHoverEnabled provides windowInfo.isHoverable,
                         ) {
                             PermissionRequester(kernel)
-                            KernelNavHost(deepLinkIntents = deepLinkIntents)
+                            KernelNavHost(deepLinkIntents = deepLinkFlow)
                         }
                         is BootState.Failed -> BootErrorScreen(cause = s.cause)
                     }

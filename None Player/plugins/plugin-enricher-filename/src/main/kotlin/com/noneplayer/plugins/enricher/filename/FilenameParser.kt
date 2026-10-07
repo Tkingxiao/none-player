@@ -86,8 +86,10 @@ internal object FilenameParser {
             }
         }
         if (episode == 0 && season == 0) {
-            // 末尾独立编号（"标题 - 01" / "标题 05"）：1–3 位，避开 1080/2024 这类四位数字
-            TAIL_NUMBER.find(flat)?.let {
+            // 末尾独立编号（"标题 - 01" / "标题 05"）：1–3 位，避开 1080/2024 这类四位数字。
+            // 必须取**最后一个**命中——"Rock 2 04" 里 2 与 04 都是合法的独立数字段，
+            // 只有末尾那个才是集号（取第一个会把年份/序号中段当成集号）。
+            TAIL_NUMBER.findAll(flat).lastOrNull()?.let {
                 episode = it.groupValues[1].toIntOrNull() ?: 0
                 matchedText = it.value
             }

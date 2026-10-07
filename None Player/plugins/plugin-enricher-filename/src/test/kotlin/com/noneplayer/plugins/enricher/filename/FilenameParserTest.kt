@@ -50,6 +50,13 @@ class FilenameParserTest {
     }
 
     @Test
+    fun `多个独立数字段时取末尾那个当集号`() {
+        // "2" 与 "04" 都是合法的 1–3 位独立数字段，只有末尾那个是集号
+        assertEquals(4, FilenameParser.parse("Rock 2 04.mkv")!!.episode)
+        assertEquals(12, FilenameParser.parse("Live 2024 12.mkv")!!.episode)
+    }
+
+    @Test
     fun `四位数字不当作集号（1080 与年份）`() {
         val parsed = FilenameParser.parse("演唱会 2024 1080p.mp4")
         // 只有编码没解析出来时不该产出结果；若产出，也绝不能把 2024 当集号

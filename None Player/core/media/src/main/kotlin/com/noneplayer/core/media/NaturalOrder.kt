@@ -28,28 +28,23 @@ object NaturalOrder : Comparator<String> {
         while (i < a.length && j < b.length) {
             val ca = a[i]
             val cb = b[j]
-            if (ca.isDigit() && cb.isDigit()) {
-                val (va, endA) = readAsciiNumber(a, i)
-                val (vb, endB) = readAsciiNumber(b, j)
-                val byValue = va.compareTo(vb)
+            // 数字段优先按数值比。阿拉伯与中文数字**可混排**（"第2集" vs "第十集"）——
+            // 此前只在"两侧同为数制"时才进数值分支，混排会掉回字符序（'1' < '十'），
+            // 同一部剧的集序就错位了。只有两侧都真读出数值才走这里，否则回退字符序。
+            val runA = readNumericRun(a, i)
+            val runB = readNumericRun(b, j)
+            if (runA != null && runB != null) {
+                val byValue = runA.value.compareTo(runB.value)
                 if (byValue != 0) return byValue
-                // 数值相等（1 vs 01）→ 位数少的在前，让 "1.mp4" 排在 "01.mp4" 前
-                val byZeros = (endA - i).compareTo(endB - j)
-                if (byZeros != 0) return byZeros
-                i = endA
-                j = endB
-                continue
-            }
-            if (isChineseNumeral(ca) && isChineseNumeral(cb)) {
-                val (va, endA) = readChineseNumber(a, i)
-                val (vb, endB) = readChineseNumber(b, j)
-                if (va != null && vb != null) {
-                    val byValue = va.compareTo(vb)
-                    if (byValue != 0) return byValue
-                    i = endA
-                    j = endB
-                    continue
+                // 数值相等（1 vs 01）→ 位数少的在前，让 "1.mp4" 排在 "01.mp4" 前。
+                // "前导零"只对阿拉伯数字成立，中文数字（十/十二）不比长度。
+                if (runA.ascii && runB.ascii) {
+                    val byWidth = runA.width.compareTo(runB.width)
+                    if (byWidth != 0) return byWidth
                 }
+                i = runA.end
+                j = runB.end
+                continue
             }
             val la = ca.lowercaseChar()
             val lb = cb.lowercaseChar()
@@ -72,10 +67,24 @@ object NaturalOrder : Comparator<String> {
         return value to end
     }
 
-    private fun readChineseNumber(s: String, start: Int): Pair<Long?, Int> {
+    /** 从 [start] 起读出的一段数字：数值 + 结束下标 + 原始宽度 + 是否阿拉伯数字 */
+    private class NumericRun(val value: Long, val end: Int, val width: Int, val ascii: Boolean)
+
+    /**
+     * 从 [start] 起读一段数字，读不出返回 null（调用方回退字符序，不猜）。
+     * 阿拉伯数字直接取整串；中文数字交给 [parseChineseNumber]（简写解析不了就返回 null）。
+     */
+    private fun readNumericRun(s: String, start: Int): NumericRun? {
+        val c = s[start]
+        if (c.isDigit()) {
+            val (value, end) = readAsciiNumber(s, start)
+            return NumericRun(value, end, end - start, ascii = true)
+        }
+        if (!isChineseNumeral(c)) return null
         var end = start
         while (end < s.length && isChineseNumeral(s[end])) end++
-        return parseChineseNumber(s.substring(start, end)) to end
+        val value = parseChineseNumber(s.substring(start, end)) ?: return null
+        return NumericRun(value, end, end - start, ascii = false)
     }
 
     /**

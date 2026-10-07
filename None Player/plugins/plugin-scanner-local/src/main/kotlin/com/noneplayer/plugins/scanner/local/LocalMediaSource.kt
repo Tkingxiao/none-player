@@ -113,29 +113,29 @@ class LocalMediaSource(
     private var observerJob: kotlinx.coroutines.Job? = null
     private var lifecycleJob: kotlinx.coroutines.Job? = null
 
+    /**
+     * 扫描互斥闸门。
+     *
+     * `_scanning` 是给 UI 看的 StateFlow，**不能当锁用**：scan() 跑在
+     * `dispatchers.io`（多线程），`if (_scanning.value) …` 与随后的 `_scanning.value = true`
+     * 之间没有原子性。下拉刷新、选目录、`onStart`、ContentObserver 去抖四条路径
+     * 可以同时通过那道判断，跑出两份全量 MediaStore 查询；后完成的那次还会用陈旧结果
+     * 覆盖 `_media` 并广播一条假的 MediaScanned。判重只认这个 CAS 闸门。
+     */
+    private val scanGate = java.util.concurrent.atomic.AtomicBoolean(false)
+
     override suspend fun isAvailable(): Boolean = hasMediaPermission(context)
 
     override suspend fun scan(): ScanResult = withContext(dispatchers.io) {
-        if (_scanning.value) {
-            // E67 修复：扫描进行中到达的请求不再是无条件丢弃——短轮询等待当前扫描
-            // 结束后重新发起一次，避免 ContentObserver 去抖触发的变更被永久遗漏
-            // （debounce 已经消费了那次发射，之前不重试就等于丢了这批文件增删）。
-            var waited = 0
-            while (_scanning.value && waited < SCAN_WAIT_TIMEOUT_MS) {
-                delay(SCAN_WAIT_POLL_MS)
-                waited += SCAN_WAIT_POLL_MS.toInt()
-            }
-            if (_scanning.value) {
-                return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
-            }
-        }
-        val folderUriStrs = settings.scanFolderUris.first()
-        if (folderUriStrs.isEmpty()) {
+        if (!acquireScanGate()) {
             return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
         }
-
         _scanning.value = true
         try {
+            val folderUriStrs = settings.scanFolderUris.first()
+            if (folderUriStrs.isEmpty()) {
+                return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
+            }
             // E59 修复：scan() 本体现在整体包一层 runCatching——任何异常（如 OEM
             // MediaStore 列缺失、Provider 查询失败）都不再向上冒泡崩溃插件 onStart()
             // 乃至拖垮整个内核启动，而是落成一条带原因的失败摘要。
@@ -154,7 +154,26 @@ class LocalMediaSource(
                 }
         } finally {
             _scanning.value = false
+            scanGate.set(false)
         }
+    }
+
+    /**
+     * 抢扫描闸门。拿到返回 true；有人正在扫则短轮询等它结束再抢一次——
+     * E67 的语义要保留：ContentObserver 的 debounce 已经消费掉那次发射，
+     * 这里的请求再被丢弃就等于永久漏掉这批文件增删。
+     *
+     * 等超时或抢不到（说明又有人开跑）时返回 false，交给持有方，避免 N 个调用者
+     * 排队跑 N 次全量查询。
+     */
+    private suspend fun acquireScanGate(): Boolean {
+        if (scanGate.compareAndSet(false, true)) return true
+        var waited = 0L
+        while (scanGate.get() && waited < SCAN_WAIT_TIMEOUT_MS) {
+            delay(SCAN_WAIT_POLL_MS)
+            waited += SCAN_WAIT_POLL_MS
+        }
+        return scanGate.compareAndSet(false, true)
     }
 
     private suspend fun scanInternal(folderUriStrs: List<String>): ScanResult {

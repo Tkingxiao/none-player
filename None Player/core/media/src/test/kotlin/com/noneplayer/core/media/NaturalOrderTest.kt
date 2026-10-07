@@ -45,6 +45,21 @@ class NaturalOrderTest {
     }
 
     @Test
+    fun `阿拉伯数字与中文数字混排也按数值`() {
+        val sorted = sortedOf("第10集.mp4", "第二集.mp4", "第1集.mp4", "第三集.mp4")
+        assertEquals(
+            listOf("第1集.mp4", "第二集.mp4", "第三集.mp4", "第10集.mp4"),
+            sorted,
+        )
+    }
+
+    @Test
+    fun `中文数字不吃前导零规则`() {
+        // "十" 与 "10" 数值相等；位数比较只对阿拉伯数字生效，所以两者继续比后续字符，最终相等
+        assertEquals(0, NaturalOrder.compare("十集", "10集"))
+    }
+
+    @Test
     fun `中文数字解析覆盖常见写法`() {
         assertEquals(12L, NaturalOrder.parseChineseNumber("十二"))
         assertEquals(20L, NaturalOrder.parseChineseNumber("二十"))
