@@ -57,6 +57,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -214,107 +216,120 @@ fun NpSheet(
         label = "npSheetProgress",
     )
 
-    BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        // 设计稿 .sheet{max-height:82vh}——在 BoxWithConstraints 作用域先固化，
-        // 内层 lambda 里拿不到这个隐式接收器
-        val sheetMaxHeight = maxHeight * 0.82f
-        // 遮罩（设计稿 --scrim 62%，fade 跟随 sheet 进度，并随下滑同步变淡）
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                // 进度读在绘制层 lambda 里：sheet 的 320ms 进出场只让遮罩层与
-                // 面板层重绘，不重组下面的整棵 sheet 内容（此前 `alpha(progress)`
-                // 在组合期取值，每帧都要把 content() 重组一遍——开合时的主要掉帧源）。
-                .graphicsLayer {
-                    val dragged = if (panelHeightPx > 0f) dragOffset.value / panelHeightPx else 0f
-                    alpha = (progress.value - dragged).coerceIn(0f, 1f)
-                }
-                .background(ink.scrim)
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = { close() },
-                ),
-        )
-        val shape = RoundedCornerShape(topStart = NpRadius.sheet, topEnd = NpRadius.sheet)
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .graphicsLayer { translationY = (1f - progress.value) * size.height + dragOffset.value },
-        ) {
-            Column(
+    // E100：Sheet 必须长在**窗口层**，不能长在调用方的布局流里。它的一个宿主是
+    // LazyVerticalGrid 的 item{}（媒体库「控制行」的视图面板），惰性项拿到的是**无限高度**约束，
+    // fillMaxSize() 顶不住 → 内层 verticalScroll 直接抛
+    // "Vertically scrollable component was measured with an infinity maximum height constraints"
+    // 整应用闪退。Popup 的约束来自窗口，任何宿主都成立。**必须 focusable**：
+    // 非聚焦弹窗不进无障碍树（uiautomator dump 里整块内容消失，TalkBack 同样读不到）。
+    // 代价是聚焦的 PopupWindow 会**自己吞掉系统返回键**，页面里的 BackHandler 收不到——
+    // 所以退出必须走 onDismissRequest（它同样承接"点到弹窗外"，本弹窗铺满窗口故不会触发）。
+    Popup(
+        onDismissRequest = { close() },
+        properties = PopupProperties(focusable = true),
+    ) {
+        BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+            // 设计稿 .sheet{max-height:82vh}——在 BoxWithConstraints 作用域先固化，
+            // 内层 lambda 里拿不到这个隐式接收器
+            val sheetMaxHeight = maxHeight * 0.82f
+            // 遮罩（设计稿 --scrim 62%，fade 跟随 sheet 进度，并随下滑同步变淡）
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = sheetMaxHeight)
-                    .onSizeChanged { panelHeightPx = it.height.toFloat() }
-                    .clip(shape)
-                    .background(ink.surface)
-                    .border(1.dp, ink.border, shape)
-                    .npShadow(ink, shape, elevation = 18.dp)
-                    .npTopHairline(ink)
-                    .nestedScroll(contentDragConnection)
-                    .then(releaseFallback)
-                    .draggable(
-                        state = rememberDraggableState { delta ->
-                            // 只跟手向下：向上拖不产生"更开"，但过头的那段按橡皮筋跟随，
-                            // 抬手弹回——而不是夹紧成死区。
-                            applyDrag(delta)
-                        },
-                        orientation = Orientation.Vertical,
-                        onDragStopped = { velocity -> settle(velocity) },
-                        enabled = !dismissDragged,
+                    .fillMaxSize()
+                    // 进度读在绘制层 lambda 里：sheet 的 320ms 进出场只让遮罩层与
+                    // 面板层重绘，不重组下面的整棵 sheet 内容（此前 `alpha(progress)`
+                    // 在组合期取值，每帧都要把 content() 重组一遍——开合时的主要掉帧源）。
+                    .graphicsLayer {
+                        val dragged = if (panelHeightPx > 0f) dragOffset.value / panelHeightPx else 0f
+                        alpha = (progress.value - dragged).coerceIn(0f, 1f)
+                    }
+                    .background(ink.scrim)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = { close() },
                     ),
+            )
+            val shape = RoundedCornerShape(topStart = NpRadius.sheet, topEnd = NpRadius.sheet)
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .graphicsLayer { translationY = (1f - progress.value) * size.height + dragOffset.value },
             ) {
-                // 把手（设计稿 `.grab`：38×4 r999 居中）
-                Box(
+                Column(
                     modifier = Modifier
-                        .padding(top = 8.dp, bottom = 6.dp)
-                        .size(width = 38.dp, height = 4.dp)
-                        .clip(RoundedCornerShape(NpRadius.chip))
-                        .background(ink.border)
-                        .align(Alignment.CenterHorizontally),
-                )
-                // 内容滚出遮罩（§4.5 第四处）：16dp、取 **surface**（Sheet 自己的底），
-                // 只在"那个方向确实还有内容"时挂——常驻会让短内容 Sheet 上下各糊一道灰。
-                val contentScroll = rememberScrollState()
-                Box(
-                    modifier = Modifier
-                        .widthIn(max = 640.dp)
                         .fillMaxWidth()
-                        .align(Alignment.CenterHorizontally),
+                        .heightIn(max = sheetMaxHeight)
+                        .onSizeChanged { panelHeightPx = it.height.toFloat() }
+                        .clip(shape)
+                        .background(ink.surface)
+                        .border(1.dp, ink.border, shape)
+                        .npShadow(ink, shape, elevation = 18.dp)
+                        .npTopHairline(ink)
+                        .nestedScroll(contentDragConnection)
+                        .then(releaseFallback)
+                        .draggable(
+                            state = rememberDraggableState { delta ->
+                                // 只跟手向下：向上拖不产生"更开"，但过头的那段按橡皮筋跟随，
+                                // 抬手弹回——而不是夹紧成死区。
+                                applyDrag(delta)
+                            },
+                            orientation = Orientation.Vertical,
+                            onDragStopped = { velocity -> settle(velocity) },
+                            enabled = !dismissDragged,
+                        ),
                 ) {
-                    Column(
+                    // 把手（设计稿 `.grab`：38×4 r999 居中）
+                    Box(
                         modifier = Modifier
+                            .padding(top = 8.dp, bottom = 6.dp)
+                            .size(width = 38.dp, height = 4.dp)
+                            .clip(RoundedCornerShape(NpRadius.chip))
+                            .background(ink.border)
+                            .align(Alignment.CenterHorizontally),
+                    )
+                    // 内容滚出遮罩（§4.5 第四处）：16dp、取 **surface**（Sheet 自己的底），
+                    // 只在"那个方向确实还有内容"时挂——常驻会让短内容 Sheet 上下各糊一道灰。
+                    val contentScroll = rememberScrollState()
+                    Box(
+                        modifier = Modifier
+                            .widthIn(max = 640.dp)
                             .fillMaxWidth()
-                            .verticalScroll(contentScroll)
-                            .padding(start = 20.dp, end = 20.dp, bottom = 26.dp),
+                            .align(Alignment.CenterHorizontally),
                     ) {
-                        if (title != null) {
-                            Text(
-                                text = title,
-                                style = NpTypography.titleMedium,
-                                color = ink.fg,
-                                modifier = Modifier.padding(bottom = 14.dp),
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .verticalScroll(contentScroll)
+                                .padding(start = 20.dp, end = 20.dp, bottom = 26.dp),
+                        ) {
+                            if (title != null) {
+                                Text(
+                                    text = title,
+                                    style = NpTypography.titleMedium,
+                                    color = ink.fg,
+                                    modifier = Modifier.padding(bottom = 14.dp),
+                                )
+                            }
+                            content()
+                        }
+                        if (contentScroll.canScrollBackward) {
+                            NpMaskFade(
+                                color = ink.surface,
+                                modifier = Modifier.align(Alignment.TopCenter),
+                                size = 16.dp,
+                                fromTop = true,
                             )
                         }
-                        content()
-                    }
-                    if (contentScroll.canScrollBackward) {
-                        NpMaskFade(
-                            color = ink.surface,
-                            modifier = Modifier.align(Alignment.TopCenter),
-                            size = 16.dp,
-                            fromTop = true,
-                        )
-                    }
-                    if (contentScroll.canScrollForward) {
-                        NpMaskFade(
-                            color = ink.surface,
-                            modifier = Modifier.align(Alignment.BottomCenter),
-                            size = 16.dp,
-                            fromTop = false,
-                        )
+                        if (contentScroll.canScrollForward) {
+                            NpMaskFade(
+                                color = ink.surface,
+                                modifier = Modifier.align(Alignment.BottomCenter),
+                                size = 16.dp,
+                                fromTop = false,
+                            )
+                        }
                     }
                 }
             }
