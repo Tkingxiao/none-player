@@ -322,7 +322,9 @@ private suspend fun loadFileSource(
                 stream.readBytes().decodeText()
             }
         }.getOrNull() ?: continue
-        val items = parseDanmakuFile(text, format, blocklist)
+        // E98：解析失败（畸形文件、平台正则差异）只丢这一个来源——弹幕是增益功能，
+        // 任何解析异常都不许冒到播放主链路（此前一个坏 .ass 就让整进程闪退）
+        val items = runCatching { parseDanmakuFile(text, format, blocklist) }.getOrDefault(emptyList())
         if (items.isNotEmpty()) {
             val name = java.net.URLDecoder.decode(uri.substringAfterLast('/'), "UTF-8")
             return DanmakuSource.File(items, name)

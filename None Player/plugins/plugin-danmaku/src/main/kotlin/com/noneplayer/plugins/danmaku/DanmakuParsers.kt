@@ -28,6 +28,9 @@ object DanmakuParsers {
     /** B 站标准字号；来源字号全部归一到它的比例 */
     private const val BASE_FONT_SIZE = 25f
 
+    /** ASS 覆盖标签 `{\...}`（E98：闭合花括号必须转义，ICU 正则不容忍裸 `}`） */
+    private val OVERRIDE_TAG = Regex("\\{[^}]*\\}")
+
     fun parse(content: String, format: DanmakuFormat): List<Danmaku> = when (format) {
         DanmakuFormat.BilibiliXml -> parseBilibiliXml(content)
         DanmakuFormat.ConverterJson -> parseConverterJson(content)
@@ -181,8 +184,11 @@ object DanmakuParsers {
         val startSec = assTimestamp(parts[fields.indexOf("start")]) ?: return null
         val style = parts.getOrNull(fields.indexOf("style"))?.trim().orEmpty()
         val textRaw = parts.last()
-        val overrides = Regex("\\{[^}]*}").findAll(textRaw).joinToString("") { it.value }
-        val text = textRaw.replace(Regex("\\{[^}]*}"), "")
+        // E98：闭合 `}` 必须转义——JVM 正则容忍裸 `}`，Android 的 ICU 实现
+        // 直接 PatternSyntaxException（`\{[^}]*}` 在真机上编译即崩，
+        // 同名 .ass 弹幕一挂载就闪退）。`[^}]*` 里的 `}` 在字符类内不受影响。
+        val overrides = OVERRIDE_TAG.findAll(textRaw).joinToString("") { it.value }
+        val text = textRaw.replace(OVERRIDE_TAG, "")
             .replace("\\N", " ")
             .replace("\\n", " ")
             .trim()
