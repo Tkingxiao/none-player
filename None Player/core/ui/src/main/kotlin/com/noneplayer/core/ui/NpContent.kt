@@ -136,8 +136,10 @@ fun NpKindTag(
     val tint = if (isAudio) NpMediaColor.audioTint else ink.accent
     Row(
         modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(Color.Black.copy(alpha = 0.58f))
+            // 圆角底直接用带 shape 的 background 画：`clip + background` 会为这个
+            // 小角标多开一次**模板裁剪**（HWUI 的 clipSmoothCorner + stencil），
+            // 而这里没有任何需要被裁的子内容——背景形状够用，绘制指令少一遍。
+            .background(Color.Black.copy(alpha = 0.58f), RoundedCornerShape(6.dp))
             .border(1.dp, tint.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
             .padding(start = 5.dp, end = 7.dp, top = 3.dp, bottom = 3.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -311,8 +313,7 @@ fun NpFolderTag(
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = modifier
-            .clip(RoundedCornerShape(NpRadius.chip))
-            .background(facc.copy(alpha = 0.16f))
+            .background(facc.copy(alpha = 0.16f), RoundedCornerShape(NpRadius.chip))
             .border(1.dp, facc.copy(alpha = 0.38f), RoundedCornerShape(NpRadius.chip))
             .padding(horizontal = 7.dp, vertical = 1.dp),
     )
@@ -381,8 +382,7 @@ fun NpCoverBox(
                         .align(Alignment.TopStart)
                         .padding(6.dp)
                         .size(20.dp)
-                        .clip(RoundedCornerShape(6.dp))
-                        .background(Color.Black.copy(alpha = 0.58f))
+                        .background(Color.Black.copy(alpha = 0.58f), RoundedCornerShape(6.dp))
                         .border(1.dp, tint.copy(alpha = 0.55f), RoundedCornerShape(6.dp)),
                     contentAlignment = Alignment.Center,
                 ) {
@@ -410,8 +410,7 @@ fun NpCoverBox(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
                     .padding(8.dp)
-                    .clip(RoundedCornerShape(5.dp))
-                    .background(ink.accent)
+                    .background(ink.accent, RoundedCornerShape(5.dp))
                     .padding(horizontal = 7.dp, vertical = 3.dp),
             )
         }
@@ -423,8 +422,7 @@ fun NpCoverBox(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
                     .padding(8.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color.Black.copy(alpha = 0.72f))
+                    .background(Color.Black.copy(alpha = 0.72f), RoundedCornerShape(4.dp))
                     .padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
@@ -434,8 +432,7 @@ fun NpCoverBox(
                     .align(Alignment.BottomStart)
                     .padding(8.dp)
                     .size(34.dp)
-                    .clip(RoundedCornerShape(NpRadius.chip))
-                    .background(Color.Black.copy(alpha = 0.55f)),
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(NpRadius.chip)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
@@ -738,8 +735,7 @@ fun NpFolderCard(
             Box(
                 modifier = Modifier
                     .size(26.dp)
-                    .clip(RoundedCornerShape(8.dp))
-                    .background(facc.copy(alpha = 0.18f)),
+                    .background(facc.copy(alpha = 0.18f), RoundedCornerShape(8.dp)),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(

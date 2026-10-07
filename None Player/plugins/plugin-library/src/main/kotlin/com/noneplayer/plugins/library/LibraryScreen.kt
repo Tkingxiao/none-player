@@ -184,6 +184,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val onViewStyle: (String) -> Unit = { scope.launch { settings.setListViewStyle(it) } }
     // 视图由调用方（Tab）固定：首页 Home 版式、文件夹 Tab 文件夹版式
     val viewMode = forcedView
+    // 首屏错峰窗口：**每页取一次**，再发给各区块（首页 rail / 文件夹网格 / 聚合网格）。
+    // 放在区块内部取会让"滚动进来的区块"每次都当成首屏，滚动全程都在跑入场动画。
+    val staggerWindow = npStaggerWindow(viewMode)
     // B5 修复：rememberSaveable，横竖屏切换/进程回收后文件夹选中态不丢
     var selectedFolder by rememberSaveable { mutableStateOf<String?>(null) }
     // 页内层级：聚合列表（继续观看 / 全部视频 / …）不下探到导航栈，
@@ -623,6 +626,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                             recent = recentItems,
                             folders = folderRoot.children,
                             compact = compact,
+                            staggerWindow = staggerWindow,
                             onOpen = openDetailOrPlayer,
                             onMore = { aggregate = it },
                             onOpenFolder = {
@@ -845,6 +849,7 @@ private fun HomeView(
     recent: List<MediaItem>,
     folders: List<FolderNode>,
     compact: Boolean,
+    staggerWindow: Long,
     onOpen: (MediaItem) -> Unit,
     onMore: (String) -> Unit,
     onOpenFolder: (FolderNode) -> Unit,
@@ -878,7 +883,12 @@ private fun HomeView(
                     showTopDivider = false,
                     onMore = { onMore("continue") },
                 ) {
-                    MediaRail(items = unfinished, compact = compact, onOpen = onOpen)
+                    MediaRail(
+                        items = unfinished,
+                        compact = compact,
+                        staggerWindow = staggerWindow,
+                        onOpen = onOpen,
+                    )
                 }
             }
         }
@@ -892,7 +902,12 @@ private fun HomeView(
                     // 此前错映射到 videos，点"全部"标题就变成了「全部视频」
                     onMore = { onMore("recent") },
                 ) {
-                    MediaRail(items = recent, compact = compact, onOpen = onOpen)
+                    MediaRail(
+                        items = recent,
+                        compact = compact,
+                        staggerWindow = staggerWindow,
+                        onOpen = onOpen,
+                    )
                 }
             }
         }
@@ -926,7 +941,12 @@ private fun HomeView(
                     showTopDivider = hasContinue || hasRecent || hasFolders,
                     onMore = { onMore("videos") },
                 ) {
-                    MediaRail(items = videos.take(8), compact = compact, onOpen = onOpen)
+                    MediaRail(
+                        items = videos.take(8),
+                        compact = compact,
+                        staggerWindow = staggerWindow,
+                        onOpen = onOpen,
+                    )
                 }
             }
         }
@@ -945,7 +965,12 @@ private fun HomeView(
                         message = "纯音频文件会显示在这里。",
                     )
                 } else {
-                    MediaRail(items = audios.take(8), compact = compact, onOpen = onOpen)
+                    MediaRail(
+                        items = audios.take(8),
+                        compact = compact,
+                        staggerWindow = staggerWindow,
+                        onOpen = onOpen,
+                    )
                 }
             }
         }
@@ -1057,12 +1082,19 @@ private fun HomeBlock(
 private fun MediaRail(
     items: List<MediaItem>,
     compact: Boolean,
+    /**
+     * 首屏错峰窗口——由**页面**取一次后传进来（见 [npStaggerWindow]）。
+     *
+     * 这里曾经自己 `npStaggerWindow()` 取一次：那等于把每个 rail 都当首屏。
+     * 首页是纵向 LazyColumn + 每个区块一条 rail，滚动时新区块进入视野会重新组合，
+     * 于是每露出一段就有 8 张卡片同时起"延迟最多 372ms + 220ms"的入场动画——
+     * 实测这正是主页纵向滚动卡顿的最大单一来源（卡顿帧里 Compose 动画相位占 ~49%）。
+     */
+    staggerWindow: Long,
     onOpen: (MediaItem) -> Unit,
 ) {
     val ink = LocalNpInk.current
     val gutter = if (compact) 14.dp else 20.dp
-    // 首屏窗口取在容器外层：rail 右端滚进来的卡片不再补播入场动画
-    val staggerWindow = npStaggerWindow()
     // 右栏占位时右端贴着栏边界，渐隐带会被读成"半透明过渡"——只保留左端（§4.5）
     LazyRow(
         modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),

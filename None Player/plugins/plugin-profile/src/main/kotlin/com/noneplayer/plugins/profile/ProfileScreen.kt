@@ -173,6 +173,11 @@ private fun ProfileScreen(navigator: Navigator) {
         Toast.makeText(context, "$name 尚未接入", Toast.LENGTH_SHORT).show()
     }
 
+    // 错峰入场窗口：**整页只取一次**。窗口若在区块内部取（此前的写法），
+    // 每个区块滚进视野时都会被当成"首屏"重新起窗——于是纵向滚动每露出一段，
+    // 它下面的卡片就整体再错峰入场一遍，滚动全程都背着几十个入场动画。
+    val staggerWindow = npStaggerWindow()
+
     NpPageScaffold(
         maxContentWidth = if (compact) Dp.Unspecified else windowInfo.maxContentWidth,
         topBar = {
@@ -242,8 +247,6 @@ private fun ProfileScreen(navigator: Navigator) {
                                 }
                             }
                             Spacer(modifier = Modifier.height(14.dp))
-                            // 首屏窗口在容器外层取一次：rail 滚到后面的卡片不再补播入场
-                            val staggerWindow = npStaggerWindow()
                             LazyRow(
                                 modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
                                 contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
@@ -296,7 +299,6 @@ private fun ProfileScreen(navigator: Navigator) {
                                 message = "播放过的条目会出现在这里。先在媒体库里开始播放任意一条。",
                             )
                         } else {
-                            val staggerWindow = npStaggerWindow()
                             LazyRow(
                                 modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
                                 contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
