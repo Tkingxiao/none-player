@@ -126,6 +126,49 @@ class DanmakuPlannerTest {
         )
         assertEquals(1, scroll.size)
     }
+
+    @Test
+    fun `binary window equals linear filter on large list`() {
+        // 0..185s、每 37ms 一条：稠密大列表，二分窗口须与逐条过滤（旧语义）逐条一致
+        val list = (0 until 5_000).map { danmaku(it * 37L) }
+        val display = 100_000L
+        val placed = DanmakuPlanner.plan(list, display, 1000f, 1000f, config, 70f, measureStub())
+        val expected = list.filter {
+            it.timeMs > display - DanmakuPlanner.BASE_SCROLL_SPAN_MS && it.timeMs <= display
+        }
+        assertTrue(expected.isNotEmpty())
+        assertEquals(expected.size, placed.size)
+        assertEquals(expected.map { it.timeMs }, placed.map { it.danmaku.timeMs })
+    }
+
+    @Test
+    fun `window boundary mirrors strict span filter`() {
+        // 恰落在窗口起点的滚动弹幕：驻留判定是严格 `>`，应当已消失
+        val atWindowStart = listOf(danmaku(10_000L - DanmakuPlanner.BASE_SCROLL_SPAN_MS))
+        assertTrue(DanmakuPlanner.plan(atWindowStart, 10_000L, 1000f, 1000f, config, 70f, measureStub()).isEmpty())
+        // 恰在 displayPosMs 时刻出生（如 seek 到该时刻）：必须可见
+        val atDisplay = listOf(danmaku(10_000L))
+        assertEquals(1, DanmakuPlanner.plan(atDisplay, 10_000L, 1000f, 1000f, config, 70f, measureStub()).size)
+        // 顶/底的 4s 边界同样严格：出生 6000ms、显示 10000ms 恰满 4s → 已消失；6001ms 仍在
+        assertTrue(
+            DanmakuPlanner.plan(listOf(danmaku(6_000L, DanmakuMode.Top)), 10_000L, 1000f, 1000f, config, 70f, measureStub())
+                .isEmpty(),
+        )
+        assertEquals(
+            1,
+            DanmakuPlanner.plan(listOf(danmaku(6_001L, DanmakuMode.Top)), 10_000L, 1000f, 1000f, config, 70f, measureStub())
+                .size,
+        )
+    }
+
+    @Test
+    fun `degenerate inputs stay empty`() {
+        // 空列表 / 画布尺寸未就绪（首帧前）
+        assertTrue(DanmakuPlanner.plan(emptyList(), 0L, 1000f, 1000f, config, 70f, measureStub()).isEmpty())
+        assertTrue(DanmakuPlanner.plan(listOf(danmaku(0L)), 0L, 0f, 0f, config, 70f, measureStub()).isEmpty())
+        // 窗口内无内容：显示位置远早于第一条
+        assertTrue(DanmakuPlanner.plan(listOf(danmaku(50_000L)), 0L, 1000f, 1000f, config, 70f, measureStub()).isEmpty())
+    }
 }
 
 class DanmakuBlocklistTest {

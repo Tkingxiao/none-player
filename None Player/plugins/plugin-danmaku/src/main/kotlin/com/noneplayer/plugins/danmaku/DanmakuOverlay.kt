@@ -112,7 +112,6 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
     val blocklist by settings.danmakuBlocklist.collectAsStateWithLifecycle(initialValue = emptyList())
     val manualUri by settings.danmakuManualUri(context.media.uri).collectAsStateWithLifecycle(initialValue = null)
 
-    val positionMs by context.player.positionMs.collectAsStateWithLifecycle()
     val playbackState by context.player.state.collectAsStateWithLifecycle()
     val tracks by context.player.tracks.collectAsStateWithLifecycle()
     val textTracks = tracks.filter { it.type == com.noneplayer.kernel.api.NpTrackType.TEXT }
@@ -139,7 +138,19 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
     // ---- 内嵌通路：新 cue 出现 → 按当前位置 spawn 滚动弹幕 ----
     var spawned by remember(context.media.uri) { mutableStateOf<List<Danmaku>>(emptyList()) }
     val anchor = remember { Anchor() }
-    LaunchedEffect(positionMs) { anchor.reanchor(positionMs) }
+    // 帧号状态先于锚定效果声明——暂停态的锚点修正要写它
+    val frame = remember { mutableLongStateOf(0L) }
+    // 位置锚定走 Flow 收集，不用 `LaunchedEffect(positionMs)`：后者把位置读进组合，
+    // 引擎每 250ms 一次的上报会重组整个覆盖层（§9.2 反例）。
+    // 暂停态帧循环停转，锚点变化（seek）补一次重绘把新摆位画出来。
+    LaunchedEffect(context.player) {
+        context.player.positionMs.collect { position ->
+            anchor.reanchor(position)
+            if (context.player.state.value != PlaybackState.Playing) {
+                frame.longValue += 1L
+            }
+        }
+    }
     LaunchedEffect(source is DanmakuSource.Embedded) {
         if (source !is DanmakuSource.Embedded) return@LaunchedEffect
         var lastText: String? = null
@@ -154,18 +165,29 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
     }
 
     // ---- 帧循环：只写一个 Long 状态，逐帧失效仅进 draw 阶段 ----
-    val frame = remember { mutableLongStateOf(0L) }
+    // 播放中逐帧推进；暂停/缓冲态画面本应定格——不再逐帧重绘（纯浪费），
+    // 但把壁钟锚点保持在当下：否则恢复播放的瞬间会把整段暂停时长当作"已播"
+    // 外推进显示位置，弹幕窗口闪跳一次。
     val hasContent = source is DanmakuSource.File || source is DanmakuSource.Embedded
     LaunchedEffect(enabled, hasContent) {
         if (!enabled || !hasContent) return@LaunchedEffect
         while (true) {
-            androidx.compose.runtime.withFrameNanos { frame.longValue = it }
+            androidx.compose.runtime.withFrameNanos { frameNanos ->
+                if (context.player.state.value == PlaybackState.Playing) {
+                    frame.longValue = frameNanos
+                } else {
+                    anchor.reanchor(context.player.positionMs.value)
+                }
+            }
         }
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (enabled && hasContent) {
             val textPaint = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
+            // 逐帧 measureText 是纯排版热（CJK 每次都要走 shaping）；
+            // 窗口内文字在字号不变时宽度恒定，按 (文字, 字号) 记忆
+            val textWidth = remember { TextWidthCache(textPaint) }
             Canvas(modifier = Modifier.fillMaxSize()) {
                 frame.longValue // 读帧号：订阅 draw 阶段逐帧失效
                 val danmaku = when (val s = source) {
@@ -185,19 +207,19 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
                     canvasHeight = size.height,
                     config = DanmakuPlanner.Config(areaFraction, speed, fontScale, maxOnScreen),
                     laneHeightPx = laneHeight,
-                    measure = { d, px ->
-                        textPaint.textSize = px
-                        textPaint.measureText(d.text)
-                    },
+                    measure = { d, px -> textWidth.width(d.text, px) },
                 )
                 drawIntoCanvas { canvas ->
                     val nc = canvas.nativeCanvas
+                    // 整帧一致的常量属性提到循环外；alpha 例外——setColor 会把
+                    // alpha 重置回色值自带的 FF，必须在各条 color 之后重设
+                    val alphaInt = (alpha * 255).toInt().coerceIn(0, 255)
+                    textPaint.setShadowLayer(2f, 0f, 1f, android.graphics.Color.BLACK)
                     placed.forEach { p ->
                         textPaint.textSize = p.textPx
                         textPaint.color = p.danmaku.colorArgb
-                        textPaint.alpha = (alpha * 255).toInt().coerceIn(0, 255)
-                        textPaint.setShadowLayer(2f, 0f, 1f, android.graphics.Color.BLACK)
-                        val x = if (p.x >= 0f) p.x else (size.width - textPaint.measureText(p.danmaku.text)) / 2f
+                        textPaint.alpha = alphaInt
+                        val x = if (p.x >= 0f) p.x else (size.width - textWidth.width(p.danmaku.text, p.textPx)) / 2f
                         val fm = textPaint.fontMetrics
                         val baseline = p.y - (fm.ascent + fm.descent) / 2f
                         nc.drawText(p.danmaku.text, x, baseline, textPaint)
@@ -371,4 +393,30 @@ private fun pillLabel(enabled: Boolean, source: DanmakuSource, manualUri: String
         DanmakuSource.None -> if (manualUri != null) "手动" else "弹"
     }
     return if (enabled) "弹·$name" else "弹·关"
+}
+
+/**
+ * 文字宽度缓存：`Paint.measureText` 每次都要走一遍排版 shaping，而弹幕窗口内的
+ * 文字宽度在字号不变时恒定——逐帧重算是叠加在刷新率上的纯浪费（CJK 尤甚）。
+ * 按字号分代记忆：字号一变整体失效重算，退化为"不缓存"但绝不产出错值。
+ */
+private class TextWidthCache(private val paint: Paint) {
+    private var sizePx = Float.NaN
+    private val widths = HashMap<String, Float>()
+
+    fun width(text: String, textSizePx: Float): Float {
+        if (textSizePx != sizePx) {
+            widths.clear()
+            sizePx = textSizePx
+        }
+        widths[text]?.let { return it }
+        if (widths.size >= MAX_ENTRIES) widths.clear()
+        paint.textSize = textSizePx
+        return paint.measureText(text).also { widths[text] = it }
+    }
+
+    private companion object {
+        /** 记忆上限：同屏窗口只有几十条；超限说明输入异常，丢弃重来即可 */
+        const val MAX_ENTRIES = 4_096
+    }
 }

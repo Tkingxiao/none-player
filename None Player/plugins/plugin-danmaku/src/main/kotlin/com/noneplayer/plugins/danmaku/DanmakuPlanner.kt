@@ -48,6 +48,9 @@ object DanmakuPlanner {
     /**
      * 对排序后的 [danmaku]（时间升序）做窗口截取与摆位。
      *
+     * 窗口截取走**二分**（依赖 timeMs 升序契约）：本函数是逐帧热路径，
+     * 全表线性扫描在数万条的弹幕文件上会按刷新率放大成毫秒级积压。
+     *
      * [measure] 由调用方提供文字宽度测量（滚动模式用于出生点右移与越界判定）；
      * [laneHeightPx] = 单条弹幕占用的行高（字号 × 1.4）。
      */
@@ -63,35 +66,39 @@ object DanmakuPlanner {
         if (danmaku.isEmpty() || canvasWidth <= 0f || canvasHeight <= 0f) return emptyList()
         val layerHeight = canvasHeight * config.areaFraction
 
-        // 窗口起点：滚动弹幕最长的存活时间决定回看距离
+        // 窗口起点：滚动弹幕最长的存活时间决定回看距离。
+        // 二分定位 [windowStart, displayPosMs] 两端，逐帧不再全表扫描；
+        // 各模式的驻留时长差异（顶/底 4s < 滚动 8s）仍逐条收紧，语义不变
         val scrollSpan = (BASE_SCROLL_SPAN_MS / config.speed).toLong()
-        val windowStart = displayPosMs - scrollSpan
-        val window = danmaku.asSequence()
-            .filter { it.timeMs in windowStart..displayPosMs }
-            .filter {
-                val span = when (it.mode) {
+        val fromIdx = lowerBound(danmaku, displayPosMs - scrollSpan)
+        val toIdx = upperBound(danmaku, displayPosMs)
+        if (fromIdx >= toIdx) return emptyList()
+        val window = buildList {
+            for (i in fromIdx until toIdx) {
+                val d = danmaku[i]
+                val span = when (d.mode) {
                     DanmakuMode.Scroll -> scrollSpan
                     DanmakuMode.Top, DanmakuMode.Bottom -> HOLD_SPAN_MS
                 }
-                displayPosMs < it.timeMs + span
+                if (displayPosMs < d.timeMs + span) add(d)
             }
-            .toList()
-            .let { if (config.maxOnScreen > 0) it.takeLast(config.maxOnScreen) else it }
+        }.let { if (config.maxOnScreen > 0) it.takeLast(config.maxOnScreen) else it }
         if (window.isEmpty()) return emptyList()
 
         val baseTextPx = (laneHeightPx / 1.4f) * config.fontScale
-        val lanesByMode = mapOf(
-            DanmakuMode.Scroll to maxOf(1, floorDiv(layerHeight, laneHeightPx)),
-            DanmakuMode.Top to maxOf(1, floorDiv(layerHeight, laneHeightPx)),
-            DanmakuMode.Bottom to maxOf(1, floorDiv(layerHeight, laneHeightPx)),
-        )
-        // 各模式的序号计数器：同模式内顺序编号 → 取模散轨
-        val counters = mutableMapOf<DanmakuMode, Int>()
+        // 三种模式轨道数一致（同占层内等高轨道）；各模式独立顺序编号 → 取模散轨
+        val lanes = maxOf(1, floorDiv(layerHeight, laneHeightPx))
+        var scrollNo = 0
+        var topNo = 0
+        var bottomNo = 0
 
         return buildList {
             window.forEach { d ->
-                val lanes = lanesByMode.getValue(d.mode)
-                val i = counters.merge(d.mode, 1, Int::plus)!! - 1
+                val i = when (d.mode) {
+                    DanmakuMode.Scroll -> scrollNo++
+                    DanmakuMode.Top -> topNo++
+                    DanmakuMode.Bottom -> bottomNo++
+                }
                 val lane = i % lanes
                 val textPx = baseTextPx * d.fontScale
                 val y = when (d.mode) {
@@ -116,4 +123,26 @@ object DanmakuPlanner {
     }
 
     private fun floorDiv(a: Float, b: Float): Int = ceil(a / b).toInt().coerceAtLeast(1)
+
+    /** 升序列表中第一个 timeMs >= [target] 的下标（全部小于时返回 size） */
+    private fun lowerBound(danmaku: List<Danmaku>, target: Long): Int {
+        var lo = 0
+        var hi = danmaku.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (danmaku[mid].timeMs < target) lo = mid + 1 else hi = mid
+        }
+        return lo
+    }
+
+    /** 升序列表中第一个 timeMs > [target] 的下标（全部不大于时返回 size） */
+    private fun upperBound(danmaku: List<Danmaku>, target: Long): Int {
+        var lo = 0
+        var hi = danmaku.size
+        while (lo < hi) {
+            val mid = (lo + hi) ushr 1
+            if (danmaku[mid].timeMs <= target) lo = mid + 1 else hi = mid
+        }
+        return lo
+    }
 }
