@@ -12,7 +12,11 @@ import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.material3.windowsizeclass.calculateWindowSizeClass
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
@@ -100,8 +104,7 @@ fun rememberNpWindowInfo(
     val context = LocalContext.current
     val sizeClass: WindowSizeClass = calculateWindowSizeClass(activity)
     val configuration = LocalConfiguration.current
-    // 有指针设备的状态在插拔鼠标时会变，用 configuration 作为失效键重新探测
-    val hoverable = remember(configuration) { detectHoverable(context) }
+    val hoverable = rememberHoverable(context)
     return remember(sizeClass, configuration, hasFoldingFeature, hoverable) {
         buildNpWindowInfo(
             sizeClass = sizeClass,
@@ -188,6 +191,38 @@ private fun isDesktopPlatform(context: Context): Boolean = runCatching {
  *
  * 用 InputManager 实查而非猜"平板就有鼠标"——平板也可能纯触屏。
  */
+/**
+ * 指针设备的**纯判据**（输入源位）：鼠标或触控板即"有指针"。
+ * 提出来是为了能被单测钉住——检测本身要 InputManager（设备枚举），没法在 JVM 里跑。
+ */
+internal fun hasPointerSource(sources: Int): Boolean =
+    sources and InputDevice.SOURCE_MOUSE == InputDevice.SOURCE_MOUSE ||
+        sources and InputDevice.SOURCE_TOUCHPAD == InputDevice.SOURCE_TOUCHPAD
+
+/**
+ * 「有没有指针设备」的**可失效**状态（§14 #18）。
+ *
+ * 关键在失效键：**插拔鼠标不会触发 Configuration 变化**，此前拿 `configuration` 当失效键，
+ * 于是"插上鼠标仍自动隐藏 / 拔掉鼠标不恢复 3.5s 超时"两个方向都不对（§14 #18 的两半）。
+ * 正确的信号是 [InputManager.InputDeviceListener]——增/删/改各来一发，都能被它抓到。
+ * 监听只挂在组合期（`DisposableEffect`），退出即注销。
+ */
+@Composable
+private fun rememberHoverable(context: Context): Boolean {
+    var version by remember { mutableIntStateOf(0) }
+    DisposableEffect(context) {
+        val manager = context.getSystemService(Context.INPUT_SERVICE) as? InputManager
+        val listener = object : InputManager.InputDeviceListener {
+            override fun onInputDeviceAdded(deviceId: Int) { version++ }
+            override fun onInputDeviceRemoved(deviceId: Int) { version++ }
+            override fun onInputDeviceChanged(deviceId: Int) { version++ }
+        }
+        manager?.registerInputDeviceListener(listener, null)
+        onDispose { manager?.unregisterInputDeviceListener(listener) }
+    }
+    return remember(version) { detectHoverable(context) }
+}
+
 private fun detectHoverable(context: Context): Boolean = runCatching {
     val inputManager = context.getSystemService(Context.INPUT_SERVICE) as? InputManager
         ?: return@runCatching false

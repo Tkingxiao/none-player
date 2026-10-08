@@ -38,6 +38,9 @@ dependencies {
     api(libs.compose.material3.adaptive.navigation.suite)
     api(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+
+    // hasPointerSource 纯判据的单测（§14 #18 的判据钉死，设备枚举本身不进单测）
+    testImplementation(libs.junit)
     // hinge 避让（折叠屏）用的 WindowInfoTracker 只在实现内使用，不必外泄
     implementation(libs.androidx.window)
 }
