@@ -180,6 +180,27 @@ object NpDimens {
 }
 
 /**
+ * WCAG 相对亮度对比度（§14 #9 的红线判据）。
+ *
+ * 自带一份纯实现的原因：`androidx.core.graphics.ColorUtils.calculateContrast` 内部会碰
+ * `android.graphics.Color`，JVM 单测里直接 "not mocked"——而这条红线恰恰必须被门禁守住
+ * （`ContrastPolicyTest`），所以生产与测试共用这一个函数，公式即规范。
+ */
+fun npContrastRatio(fg: Color, bg: Color): Double {
+    fun linear(channel: Float): Double {
+        val c = channel.toDouble()
+        return if (c <= 0.03928) c / 12.92 else Math.pow((c + 0.055) / 1.055, 2.4)
+    }
+    fun luminance(color: Color): Double =
+        0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
+    val a = luminance(fg)
+    val b = luminance(bg)
+    val hi = maxOf(a, b)
+    val lo = minOf(a, b)
+    return (hi + 0.05) / (lo + 0.05)
+}
+
+/**
  * **不随主题走的固定色**——两类：压在视频画面之上的覆盖层色，和黑胶这类实物器材的材质色。
  *
  * 它们看着像"该用 ink.* 却硬编了"，实际不能用主题色：画面永远是暗的（亮色主题下视频

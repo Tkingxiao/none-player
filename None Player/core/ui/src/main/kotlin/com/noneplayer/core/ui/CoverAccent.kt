@@ -20,6 +20,7 @@ import java.io.File
 import java.util.Collections
 import java.util.LinkedHashMap
 import kotlin.math.abs
+import kotlin.math.floor
 
 /**
  * 封面取色（§4.7）——把"当前这一集封面的主色"变成播放页与音频模式的底。
@@ -130,16 +131,40 @@ object NpCoverAccent {
             }
         }
         if (bestScore == -Float.MAX_VALUE) return null
-        // 选中色 → scrim 用色：亮度压进 [0.28,0.42]、饱和度上限 0.55。
         AndroidColor.colorToHSV(bestArgb, hsv)
-        hsv[1] = hsv[1].coerceAtMost(0.55f)
-        hsv[2] = hsv[2].coerceIn(0.28f, 0.42f)
-        return Color(AndroidColor.HSVToColor(hsv))
+        return scrimFor(hsv[0], hsv[1], hsv[2])
     }
 
-    /** 供 §4.7 的对比度复核：scrim 上压白字前先看这条是否达标（<4.5 则回退纯黑）。 */
-    fun whiteTextContrast(scrim: Color): Double =
-        ColorUtils.calculateContrast(AndroidColor.WHITE, scrim.toArgb())
+    /**
+     * 选中色 → scrim 用色（§4.7）：**饱和度上限 0.55、亮度压进 [0.28,0.42]**。
+     *
+     * 纯函数（不碰 `android.graphics`，JVM 单测可跑）：这两条钳制本身就是"白字对比度 ≥4.5"
+     * 的红线——两个上界都顶满时（`S=0.55`、`V=0.42`、色相取最亮的绿向）白字对比度约 5.3，
+     * 所以这条路的 **scrim 永远不需要回退纯黑**；[whiteTextContrast] 是留给"将来有人改钳制"
+     * 的复核口，`ContrastPolicyTest` 用整域扫描守着它。
+     */
+    fun scrimFor(hueDeg: Float, saturation: Float, value: Float): Color {
+        val s = saturation.coerceAtMost(0.55f)
+        val v = value.coerceIn(0.28f, 0.42f)
+        val h = ((hueDeg % 360f) + 360f) % 360f / 60f
+        val i = floor(h).toInt() % 6
+        val f = h - floor(h)
+        val q = v * (1f - s * f)
+        val t = v * (1f - s * (1f - f))
+        val pv = v * (1f - s)
+        val (r, g, b) = when (i) {
+            0 -> Triple(v, t, pv)
+            1 -> Triple(q, v, pv)
+            2 -> Triple(pv, v, t)
+            3 -> Triple(pv, q, v)
+            4 -> Triple(t, pv, v)
+            else -> Triple(v, pv, q)
+        }
+        return Color(r, g, b)
+    }
+
+    /** §4.7 的对比度复核：scrim 上压白字必须 ≥4.5（`ContrastPolicyTest` 用整域扫描守着）。 */
+    fun whiteTextContrast(scrim: Color): Double = npContrastRatio(Color.White, scrim)
 }
 
 /**
