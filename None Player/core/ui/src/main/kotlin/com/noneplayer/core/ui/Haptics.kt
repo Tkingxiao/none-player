@@ -92,7 +92,13 @@ class NpHaptics internal constructor(
             NpHaptic.Tap -> HapticFeedbackConstants.KEYBOARD_TAP
             NpHaptic.LightTap -> HapticFeedbackConstants.CONTEXT_CLICK
             NpHaptic.Tick -> HapticFeedbackConstants.CLOCK_TICK
-            NpHaptic.Segment -> HapticFeedbackConstants.SEGMENT_TICK
+            // API 34 才有 SEGMENT_TICK；31–33 上按本文件开头的纪律"没有等价形就不出声"——
+            // 不能拿 34 的号位去撞旧平台，那读出来是"震错东西"而不是"没反应"（lint `InlinedApi` 实测揪出）
+            NpHaptic.Segment -> if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                HapticFeedbackConstants.SEGMENT_TICK
+            } else {
+                NO_HAPTIC
+            }
             NpHaptic.Long -> HapticFeedbackConstants.LONG_PRESS
             NpHaptic.Reject -> HapticFeedbackConstants.REJECT
             // §7.5 写的 `VIBRATE_LONG` 不是公开常量（API 29 起即非 public）。

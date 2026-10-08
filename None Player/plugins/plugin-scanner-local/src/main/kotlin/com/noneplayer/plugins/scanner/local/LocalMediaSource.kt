@@ -970,7 +970,7 @@ private fun readHead(uri: android.net.Uri, maxBytes: Int): ByteArray? = runCatch
 private fun sniffMimeCorrection(item: MediaItem): MediaItem {
     // .cue 分轨与原文件同 uri，逐轨重复嗅探纯属浪费 I/O
     if (item.isClipped) return item
-    val head = readHead(android.net.Uri.parse(item.uri), ContainerSniffer.HEAD_BYTES) ?: return item
+    val head = readHead(item.uri.toUri(), ContainerSniffer.HEAD_BYTES) ?: return item
     val sniffed = ContainerSniffer.sniff(head) ?: return item
     if (sniffed.equals(item.mimeType, true)) return item
     if (sameContainerFamily(sniffed, item.mimeType)) return item
@@ -1031,7 +1031,7 @@ private fun sniffUnknownFiles(scopes: List<ScanScope>): List<MediaItem> {
                     if (idCol < 0 || nameCol < 0) continue
                     val id = cursor.getLong(idCol)
                     val uri = ContentUris.withAppendedId(collection, id).toString()
-                    val head = readHead(android.net.Uri.parse(uri), ContainerSniffer.HEAD_BYTES)
+                    val head = readHead(uri.toUri(), ContainerSniffer.HEAD_BYTES)
                     val mime = head?.let { ContainerSniffer.sniff(it) } ?: continue
                     val dataPath = if (dataCol >= 0) cursor.getString(dataCol).orEmpty() else ""
                     val name = cursor.getString(nameCol).orEmpty()
