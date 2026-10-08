@@ -77,16 +77,14 @@ import com.noneplayer.core.ui.npMaskFadeEdges
 import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.core.ui.npStaggeredEntry
 import com.noneplayer.core.ui.npStaggerWindow
-import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.ui.api.LocalKernel
+import com.noneplayer.kernel.ui.api.rememberMediaItems
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 /** 搜索页路由（顶栏搜索钮 → navigator.navigate） */
@@ -132,15 +130,8 @@ fun SearchScreen(navigator: Navigator) {
     val gridColumns by settings.gridColumns.collectAsStateWithLifecycle(2)
     val viewStyle by settings.listViewStyle.collectAsStateWithLifecycle("grid")
 
-    val sources by remember { kernel.registry.observe<MediaSourceProvider>() }
-        .collectAsStateWithLifecycle(initialValue = emptyList())
-    val mediaState by remember(sources) {
-        if (sources.isEmpty()) {
-            flowOf<List<MediaItem>?>(null)
-        } else {
-            combine(sources.map { it.observeMedia() }) { lists -> lists.flatMap { it } }
-        }
-    }.collectAsStateWithLifecycle(initialValue = null)
+    // E105：媒体列表用共享助手的"首帧同步快照"版（重进页面不再闪一帧空模板）
+    val mediaState = rememberMediaItems()
     val items = mediaState ?: emptyList()
 
     val results = remember(items, debouncedQuery, sortMode, sortAscending) {

@@ -448,8 +448,25 @@ fun npItemFadeSpec(): DurationBasedAnimationSpec<Float> =
  * [key] 变化时重新起窗：搜索页把 query 传进来，每次新结果集都值得再错峰入场一次。
  */
 @Composable
-fun npStaggerWindow(key: Any? = Unit): Long = remember(key) {
-    SystemClock.uptimeMillis() + Motion.Stagger * StaggerMaxItems + Motion.Switch
+fun npStaggerWindow(key: Any? = Unit): Long = remember(key) { staggerWindowFor(key) }
+
+/**
+ * 错峰窗口的**进程级登记**：同一个 [key] 的"首屏入场"只认**第一次**。
+ *
+ * 之前窗口是每次组合现算的，于是**切 Tab / 进出页面**拿到的是全新窗口——整页卡片
+ * 每次都重播一遍入场（淡入 + 12dp 上移），用户看到的就是"每切一次界面闪一帧空模板"
+ * （2026-10-08 用户实报；同页复用直接给终态是本项目在 M15 空态上已经立过的规矩，
+ * 错峰窗口此前没照做）。
+ *
+ * 窗口只增不删是有意的：key 就那几个（版式 / 查询词 / 目录路径），不为省几十字节
+ * 引入淘汰逻辑与它自己的边界情况。
+ */
+private val staggerWindows = mutableMapOf<Any?, Long>()
+
+private fun staggerWindowFor(key: Any?): Long = synchronized(staggerWindows) {
+    staggerWindows.getOrPut(key) {
+        SystemClock.uptimeMillis() + Motion.Stagger * StaggerMaxItems + Motion.Switch
+    }
 }
 
 /**

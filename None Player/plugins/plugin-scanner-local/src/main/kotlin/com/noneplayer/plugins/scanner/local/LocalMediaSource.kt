@@ -107,6 +107,10 @@ class LocalMediaSource(
     private val _media = MutableStateFlow<List<MediaItem>>(emptyList())
     override fun observeMedia(): Flow<List<MediaItem>> = _media.asStateFlow()
 
+    /** 首扫完成（`_lastScan` 有值）之后才能给快照——之前的空是"还没扫"而不是"没有"。 */
+    override fun mediaSnapshot(): List<MediaItem>? =
+        if (_lastScan.value != null) _media.value else null
+
     private val _scanning = MutableStateFlow(false)
     val scanning: StateFlow<Boolean> = _scanning.asStateFlow()
 

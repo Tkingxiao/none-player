@@ -137,15 +137,14 @@ import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.LocalKernel
+import com.noneplayer.kernel.ui.api.rememberMediaItems
 import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.NpTabChannel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -223,20 +222,20 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // Application 级 Coil 单例（NonePlayerApplication.newImageLoader）
     val sources by remember {
         kernel.registry.observe<MediaSourceProvider>()
-    }.collectAsStateWithLifecycle(initialValue = emptyList())
+    }.collectAsStateWithLifecycle(
+        // E105：初始值用 registry 的同步查询——`observe` 的首次发射也要等一帧
+        initialValue = remember { kernel.registry.query<MediaSourceProvider>() },
+    )
     // E78：媒体列表用「可空哨兵」承载，以区分两种语义完全不同的空：
     //   null      = 尚未收到任何发射（插件/扫描数据未就绪）
     //   emptyList = 已确实加载，且结果就是空
     // 此前二者不可区分，导致下面的「目录失效 → 回根层」守卫在**入口重建的首帧**
     // 拿空树去校验刚被 rememberSaveable 恢复的选中路径，把状态当场清掉：
     // 表现为「文件夹进到第 N 层 → 切 Tab 或看视频返回 → 退回根层」。
-    val mediaState by remember(sources) {
-        if (sources.isEmpty()) {
-            flowOf<List<MediaItem>?>(null)
-        } else {
-            combine(sources.map { it.observeMedia() }) { lists -> lists.flatMap { it } }
-        }
-    }.collectAsStateWithLifecycle(initialValue = null)
+    // E105：媒体列表改用 `rememberMediaItems()`——它首帧就给**同步快照**。此前这里
+    // 首帧必然是 null → 先渲染一帧"0 个视频 · 0 个文件夹"的空模板，叠上转场淡出就是
+    // 用户实报的"每切一次界面闪一帧模板页"。E78 的可空哨兵语义不变（null＝确实还没扫过）。
+    val mediaState = rememberMediaItems()
     val mediaLoaded = mediaState != null
     val items = mediaState ?: emptyList()
 

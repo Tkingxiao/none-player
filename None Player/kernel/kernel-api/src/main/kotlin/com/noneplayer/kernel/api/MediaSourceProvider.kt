@@ -20,6 +20,16 @@ interface MediaSourceProvider : ExtensionPoint {
     /** 观察该来源的媒体列表（增量推送） */
     fun observeMedia(): Flow<List<MediaItem>>
 
+    /**
+     * **同步快照**：已经拿到过的列表（没有就 null）。
+     *
+     * 给页面**首帧**用：`observeMedia()` 的收集是异步的，页面重进时首帧必然拿到空，
+     * 先渲染一帧骨架/"0 个视频/0 个文件夹"，叠上转场淡出就成了用户看到的
+     * "切界面闪一帧模板页"。实现方若用 StateFlow 持有列表，这里直接回当前值即可；
+     * 首扫完成之前回 null（＝"确实还没数据"，交给骨架）。
+     */
+    fun mediaSnapshot(): List<MediaItem>? = null
+
     /** 触发一次扫描 */
     suspend fun scan(): ScanResult
 }
