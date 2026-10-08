@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -169,7 +170,9 @@ import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpMaskFade
 import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.ui.LocalNpReduceMotion
 import com.noneplayer.core.ui.npDuration
+import com.noneplayer.core.ui.npQuality
 import com.noneplayer.core.ui.npItemFadeSpec
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.rememberNpHaptics
@@ -1079,12 +1082,27 @@ fun PlayerScreen(
         gestureHint = if (forward) "快进 $seconds 秒" else "快退 $seconds 秒"
     }
 
+    // M8 半屏水波（§6/§9.6）：双击快进/快退时从**点的那一侧**扩散到半屏。
+    // 与 M6 的中央水波共用 `centerBubble` 门控（High 档；§9.4 播放中自动降档会关掉
+    // 装饰类，所以真正会看到的是"暂停时双击预览落点"这一路）。时长读在组合期。
+    val seekWaveOn = npQuality().centerBubble
+    val seekWaveMs = npDuration(Motion.Bubble)
+    val seekWave = remember { Animatable(0f) }
+    var seekWaveFromRight by remember { mutableStateOf(false) }
+
     /** 双击分区（§4.3）：左右 1/3 = 快退/快进 10 秒；**中心 = 播放/暂停**。 */
     fun onStageDoubleTap(zone: StageTapZone) {
         when (zone) {
             StageTapZone.Back -> seekByGesture(false)
             StageTapZone.Forward -> seekByGesture(true)
             StageTapZone.Center -> togglePlay()
+        }
+        if (zone != StageTapZone.Center && seekWaveOn) {
+            seekWaveFromRight = zone == StageTapZone.Forward
+            scope.launch {
+                seekWave.snapTo(0f)
+                seekWave.animateTo(1f, tween(seekWaveMs, easing = NpEasing.Emphasized))
+            }
         }
     }
 
@@ -1604,6 +1622,26 @@ fun PlayerScreen(
                         speed = speed,
                         modifier = Modifier.align(Alignment.TopStart),
                     )
+                    // M8 半屏水波：从双击那一侧扩散、500ms 淡出（放在胶囊之前 = 压在胶囊下面）
+                    if (seekWaveOn) {
+                        Box(
+                            modifier = Modifier
+                                .align(
+                                    if (seekWaveFromRight) Alignment.CenterEnd
+                                    else Alignment.CenterStart,
+                                )
+                                .fillMaxHeight(0.5f)
+                                .aspectRatio(1f)
+                                .graphicsLayer {
+                                    val p = seekWave.value
+                                    val scale = 0.35f + 0.65f * p
+                                    scaleX = scale
+                                    scaleY = scale
+                                    alpha = (0.34f * (1f - p)).coerceAtLeast(0f)
+                                }
+                                .border(2.dp, Color.White, CircleShape),
+                        )
+                    }
                     GestureHintPill(
                         text = gestureHint,
                         modifier = Modifier.align(Alignment.Center),
@@ -3576,6 +3614,11 @@ private fun PlayerTopBar(
 /**
  * 中央"继续播放"钮（设计稿 `.bigplay`）：64dp 玻璃圆 + 白三角。
  * 只在暂停时出现——播放中它不该占着画面。
+ *
+ * **M6 水波**（§5.3/§9.6）：点按后一圈水波从钮后扩散并淡出（`Bubble` 500ms、
+ * `Emphasized` 曲线——该曲线规格里"只给共享元素与主播放键"）。仅 High 档
+ * （`centerBubble`），播放中自动降档与 Reduce Motion 下都不出现。
+ * 动画值只读在 `graphicsLayer` 里（§9.2：逐帧只重绘，不重组）。
  */
 @Composable
 internal fun CenterResumeButton(
@@ -3583,32 +3626,64 @@ internal fun CenterResumeButton(
     onPlay: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    AnimatedVisibility(
-        visible = visible,
-        enter = fadeIn(animationSpec = silkSpring(Motion.Field)) +
-            scaleIn(initialScale = 0.86f, animationSpec = silkSpring(Motion.Field)),
-        exit = fadeOut(animationSpec = silkSpring(Motion.Field)) +
-            scaleOut(targetScale = 0.86f, animationSpec = silkSpring(Motion.Field)),
-        modifier = modifier,
-    ) {
-        // 暗色玻璃 + 白图标（与锁定徽标/控制条同一套播放器覆盖层语言）。
-        // 此前用 NpGlass 浅色玻璃 + 白 icon：浅色主题或浅色画面上是白底白图，
-        // 图标整个隐形（用户实报"暂停按钮看不清"）。
-        Box(
-            modifier = Modifier
-                .size(64.dp)
-                .clip(CircleShape)
-                .background(Color.Black.copy(alpha = 0.45f))
-                .border(1.dp, Color.White.copy(alpha = 0.28f), CircleShape)
-                .clickable(onClick = onPlay),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Filled.PlayArrow,
-                contentDescription = "播放",
-                tint = Color.White,
-                modifier = Modifier.size(32.dp),
+    val bubbleOn = npQuality().centerBubble && !LocalNpReduceMotion.current
+    // 时长读在组合期：协程里拿不到 @Composable 的 npDuration（同 transitionSpec 那条约束）
+    val bubbleMs = npDuration(Motion.Bubble)
+    val scope = rememberCoroutineScope()
+    val wave = remember { Animatable(0f) }
+    fun playWithWave() {
+        if (bubbleOn) {
+            scope.launch {
+                wave.snapTo(0f)
+                wave.animateTo(1f, tween(bubbleMs, easing = NpEasing.Emphasized))
+            }
+        }
+        onPlay()
+    }
+    // 槽位固定 124dp（水波的最大直径），按钮 64dp 居中——水波必须画在
+    // AnimatedVisibility **之外**：点按会立刻让按钮隐去（播放开始），波纹要能自己走完。
+    Box(modifier = modifier.size(124.dp), contentAlignment = Alignment.Center) {
+        if (bubbleOn) {
+            Box(
+                modifier = Modifier
+                    .size(124.dp)
+                    // 水波：半径 64→124dp、整圈淡出——动画值只读在绘制层（§9.2）
+                    .graphicsLayer {
+                        val p = wave.value
+                        val scale = (64f + 56f * p) / 124f
+                        scaleX = scale
+                        scaleY = scale
+                        alpha = (0.5f * (1f - p)).coerceAtLeast(0f)
+                    }
+                    .border(2.dp, Color.White, CircleShape),
             )
+        }
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(animationSpec = silkSpring(Motion.Field)) +
+                scaleIn(initialScale = 0.86f, animationSpec = silkSpring(Motion.Field)),
+            exit = fadeOut(animationSpec = silkSpring(Motion.Field)) +
+                scaleOut(targetScale = 0.86f, animationSpec = silkSpring(Motion.Field)),
+        ) {
+            // 暗色玻璃 + 白图标（与锁定徽标/控制条同一套播放器覆盖层语言）。
+            // 此前用 NpGlass 浅色玻璃 + 白 icon：浅色主题或浅色画面上是白底白图，
+            // 图标整个隐形（用户实报"暂停按钮看不清"）。
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(Color.Black.copy(alpha = 0.45f))
+                    .border(1.dp, Color.White.copy(alpha = 0.28f), CircleShape)
+                    .clickable(onClick = ::playWithWave),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.PlayArrow,
+                    contentDescription = "播放",
+                    tint = Color.White,
+                    modifier = Modifier.size(32.dp),
+                )
+            }
         }
     }
 }

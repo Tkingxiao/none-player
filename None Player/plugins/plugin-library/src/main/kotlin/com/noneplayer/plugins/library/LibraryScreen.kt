@@ -1005,13 +1005,20 @@ private fun FolderRailOrGrid(
     }
     if (compact) {
         val ink = LocalNpInk.current
+        // §20.3 余量②：紧凑档横排也接首屏错峰（窗口在本函数取一次 = 整个文件夹区块一次）
+        val staggerWindow = npStaggerWindow()
         LazyRow(
             modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
             contentPadding = PaddingValues(horizontal = gutter),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            items(folders.take(8), key = { it.path }) { node ->
-                FolderCardCell(node = node, modifier = Modifier.width(200.dp))
+            itemsIndexed(folders.take(8), key = { _, node -> node.path }) { index, node ->
+                FolderCardCell(
+                    node = node,
+                    modifier = Modifier
+                        .width(200.dp)
+                        .npStaggeredEntry(index, staggerWindow),
+                )
             }
         }
         return
@@ -1029,8 +1036,13 @@ private fun FolderRailOrGrid(
             verticalArrangement = Arrangement.spacedBy(12.dp),
             maxItemsInEachRow = columns,
         ) {
-            folders.take(4).forEach { node ->
-                Box(modifier = Modifier.width(cellWidth)) { FolderCardCell(node) }
+            folders.take(4).forEachIndexed { index, node ->
+                // §20.3 余量③：非 Lazy 的一小组不传 window（按首屏错峰，见 npStaggeredEntry）
+                Box(
+                    modifier = Modifier
+                        .width(cellWidth)
+                        .npStaggeredEntry(index),
+                ) { FolderCardCell(node) }
             }
         }
     }
@@ -1421,12 +1433,15 @@ private fun FolderBrowser(
                 onToggleAscending = onToggleAscending,
             )
         }
-        items(node.children, key = { "folder:${it.path}" }) { child ->
+        // §20.3 余量①：子文件夹也接首屏错峰（此前只有本级视频接了）
+        gridItemsIndexed(node.children, key = { _, child -> "folder:${child.path}" }) { index, child ->
             NpFolderCard(
                 name = child.name,
                 countLabel = "${child.totalCount} 项",
                 onClick = { onOpenFolder(child) },
-                modifier = Modifier.animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade),
+                modifier = Modifier
+                    .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                    .npStaggeredEntry(index, staggerWindow),
                 cover = {
                     FolderCover(
                         node = child,
