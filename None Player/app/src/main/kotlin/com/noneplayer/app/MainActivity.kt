@@ -91,18 +91,38 @@ class MainActivity : ComponentActivity() {
      * （右栏是另一份实现），快捷键随之消失；把处理函数放进右栏子树也救不了——用户
      * 点一下列表卡片，焦点就离开了那一栏。
      *
-     * 因此放在 `super` 之后：**任何 Compose 组件处理过的键都不经过这里**（播放页自己的
-     * 快捷键、搜索框里的空格），只接没人要的键，天然不与页面级快捷键争抢。
+     * 挂在 `onKeyUp` 上而不是覆写 `dispatchKeyEvent`：框架的 `Activity.dispatchKeyEvent`
+     * 本来就是**先把键交给窗口（含 Compose 视图树），没人要才回调 `onKeyDown/onKeyUp`**，
+     * 所以这里拿到的正是"Compose 树没消费"的键——语义与"super 之后"完全一致，
+     * `ACTION_UP` 也天然成立；而覆写 `dispatchKeyEvent` 会碰 `ComponentActivity` 上
+     * 带 `@RestrictedApi` 的重载，对本工程是 lint **Error**（实测 `:app:lintDebug` 三条）。
+     *
+     * 于是：播放页自己的快捷键、搜索框里的空格天然优先，本回调只接没人要的键。
+     *
+     * **只看 UP 还不够**：文本框只消费 `ACTION_DOWN`（敲字发生在按下那一刻），`UP` 照样漏到
+     * `onKeyUp`——搜索框里敲空格/M，字符插进去了，兜底派发却顺手把播放暂停/静音也做了一遍
+     * （模拟器实测：搜索框里按 `M` 把音量静音）。所以用「这个键的 DOWN 有没有人接」当判据：
+     * DOWN 被视图树消费过 = 这个键有人在管，它的 UP 也归它。
      */
-    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (super.dispatchKeyEvent(event)) return true
-        if (event.action == KeyEvent.ACTION_UP) {
-            val kernel = (application as? NonePlayerApplication)?.kernel ?: return false
-            if (kernel.registry.query<SessionKeyProvider>()
-                    .any { it.onSessionKey(event.keyCode, event.isShiftPressed, event.isCtrlPressed) }
+    private var unclaimedDownKeyCode = 0
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        if (super.onKeyDown(keyCode, event)) return true
+        unclaimedDownKeyCode = keyCode
+        return false
+    }
+
+    override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
+        val unclaimed = unclaimedDownKeyCode == keyCode
+        unclaimedDownKeyCode = 0
+        if (unclaimed) {
+            val kernel = (application as? NonePlayerApplication)?.kernel
+            if (kernel != null &&
+                kernel.registry.query<SessionKeyProvider>()
+                    .any { it.onSessionKey(keyCode, event.isShiftPressed, event.isCtrlPressed) }
             ) return true
         }
-        return false
+        return super.onKeyUp(keyCode, event)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
