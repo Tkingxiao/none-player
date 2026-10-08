@@ -88,14 +88,19 @@ class Kernel private constructor(
      */
     fun boot() {
         if (!bootGate.compareAndSet(false, true)) return
+        // 核心服务**同步**注册，必须留在协程之前：它们是 UI 首帧就可能读到的
+        // （MainActivity 的组合在 Running 之前就读 AppSettings 的主题/动效档），
+        // 放进协程会与主线程的组合赛跑——内核引导稍慢的那一次就撞出
+        // "内核服务未注册: com.noneplayer.core.data.AppSettings" 闪退
+        // （2026-10-08 实测一次）。这几行只登记句柄（DataStore / Room 都是惰性打开，
+        // 不碰磁盘），放主线程安全；宿主契约因此成立：`boot()` 返回即可读服务。
+        registerKernelServices()
+        _bootState.value = BootState.Booting
         scope.launch { bootInternal() }
     }
 
     private suspend fun bootInternal() {
-        _bootState.value = BootState.Booting
         try {
-            registerKernelServices()
-
             val allPlugins = pluginIndexes.flatMap { it.plugins() }
             check(allPlugins.isNotEmpty()) {
                 "未收集到任何插件。请确认 :app 装配了至少一个 PluginIndex（kernel-ksp 生成）。"
