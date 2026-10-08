@@ -1029,7 +1029,8 @@ fun PlayerScreen(
         volumePercent = value.coerceIn(0, 100)
         audioManager.setStreamVolume(
             android.media.AudioManager.STREAM_MUSIC,
-            maxVolume * volumePercent / 100,
+            // 与右栏兜底派发共用同一条换算（E101 观察②：截断会让 ±5% 步进偶发无效果）
+            volumeIndexFor(maxVolume, volumePercent),
             0,
         )
     }

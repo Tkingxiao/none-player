@@ -81,6 +81,31 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         navigator: Navigator,
         onFullscreen: () -> Unit,
         modifier: Modifier,
+    ) = InlinePlayerView(media, navigator, onFullscreen, modifier, autoPlay = true)
+
+    /**
+     * 类 PC 右栏专用入口（E101）：**只接管画面，不动播放状态**。
+     *
+     * 与 [InlinePlayer] 只差"装载时要不要起播"：右栏是常驻的"陪你看"，不是一次播放意图——
+     * 用户刚在播放页暂停、退回浏览态，右栏一挂载就 `play()` 会把暂停顶掉（模拟器实测）。
+     * 接口方法（[InlinePlaybackProvider.InlinePlayer]）不能带默认参数（§二.1 的
+     * `AbstractMethodError` 约束），所以另开一个具名入口而不是给接口加开关。
+     */
+    @Composable
+    fun InlinePlayerAttached(
+        media: MediaItem,
+        navigator: Navigator,
+        onFullscreen: () -> Unit,
+        modifier: Modifier,
+    ) = InlinePlayerView(media, navigator, onFullscreen, modifier, autoPlay = false)
+
+    @Composable
+    private fun InlinePlayerView(
+        media: MediaItem,
+        navigator: Navigator,
+        onFullscreen: () -> Unit,
+        modifier: Modifier,
+        autoPlay: Boolean,
     ) {
         val kernel = LocalKernel.current
         val context = LocalContext.current
@@ -107,7 +132,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         }
 
         // 装载/续播：同一媒体只续播（含 ENDED 退位），不同媒体走完整装载链
-        LaunchedEffect(media.uri) {
+        LaunchedEffect(media.uri, autoPlay) {
             ensureSessionPlaying(
                 context = context,
                 registry = kernel.registry,
@@ -116,6 +141,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 player = player,
                 session = session,
                 item = media,
+                autoPlay = autoPlay,
                 onSubtitleMatched = { hit -> scope.launch { settings.setSubtitleUri(media.id, hit) } },
             )
         }

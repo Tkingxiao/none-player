@@ -108,7 +108,9 @@ class PlaybackPaneChrome : DetailPaneProvider {
                 Spacer(modifier = Modifier.width(NpSpace.lg))
             }
             Box(modifier = Modifier.weight(1f)) {
-                surface.InlinePlayer(
+                // E101：走"只接管画面"的入口——右栏挂载不得改写播放状态
+                // （用户在播放页暂停后退回浏览态，暂停必须保持；结束态也不退位）。
+                surface.InlinePlayerAttached(
                     media = snapshot.item,
                     navigator = navigator,
                     onFullscreen = {

@@ -65,6 +65,18 @@ class SessionKeysTest {
     }
 
     @Test
+    fun `音量档位换算四舍五入而不是截断`() {
+        // 15 档设备上一档 ≈6.7%：33%+5%=38% 必须落到 6 档（截断会停在 5 档，"按了没反应"）
+        assertEquals(6, volumeIndexFor(15, 38))
+        assertEquals(5, volumeIndexFor(15, 33))
+        assertEquals(0, volumeIndexFor(15, 0))
+        assertEquals(15, volumeIndexFor(15, 100))
+        // 越界与除零护栏
+        assertEquals(15, volumeIndexFor(15, 999))
+        assertEquals(0, volumeIndexFor(0, 50))
+    }
+
+    @Test
     fun `不认识的键返回空，绝不吞键`() {
         // 字母键与系统音量硬键都不在共用表里——
         // 认了就等于在浏览态把别的界面行为抢走

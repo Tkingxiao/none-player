@@ -53,6 +53,14 @@ internal suspend fun ensureSessionPlaying(
     item: MediaItem,
     /** false = 从头播（长按菜单「从头播放」）：不恢复断点，已播完的也退位 */
     restorePosition: Boolean = true,
+    /**
+     * false = **只装载、不动播放状态**（E101）：类 PC 右栏接管画面时用。
+     *
+     * 右栏的常驻语义是"陪着你浏览"，不是"点了一次播放"——用户刚在播放页暂停、
+     * 退回浏览态，右栏一挂载就 `play()` 会把暂停覆盖掉（模拟器实测）。
+     * 默认 true 保迷你条 / 详情页内嵌的既有语义不变。
+     */
+    autoPlay: Boolean = true,
     onSubtitleMatched: ((String) -> Unit)? = null,
 ): SessionStart {
     if (!isPlayableUriScheme(item.uri)) return SessionStart(accepted = false)
@@ -107,8 +115,12 @@ internal suspend fun ensureSessionPlaying(
         // 会话里已经是同一个媒体（从迷你条/内嵌播放器点回来）。
         // **已播完的必须从头起**：media3 在 STATE_ENDED 上 `play()` 是空操作，
         // 不退位就永远停在结束画面——用户看到"点进来没反应"。
-        if (!restorePosition || player.state.value == PlaybackState.Ended) player.seekTo(0L)
-        player.play()
+        // E101：`autoPlay = false` 的宿主（类 PC 右栏）连退位都不做——它是"接管画面"，
+        // 不是一次播放意图，暂停/结束状态原样保留给用户决定。
+        if (autoPlay) {
+            if (!restorePosition || player.state.value == PlaybackState.Ended) player.seekTo(0L)
+            player.play()
+        }
         // 会话本来就在播同一媒体：进度是连续的，不算"从断点续播"，不弹提示。
         return SessionStart(accepted = true)
     }

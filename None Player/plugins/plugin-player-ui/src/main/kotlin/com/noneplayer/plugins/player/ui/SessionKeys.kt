@@ -31,6 +31,16 @@ internal object SessionKeySteps {
     const val VOLUME_RESTORE_PERCENT = 30
 }
 
+/**
+ * 百分比 → 系统音量档位：**四舍五入**（E101 观察②）。
+ *
+ * 截断会让 ±5% 的按键/手势步进在档位少的设备上偶发无效果：15 档时一档 ≈6.7%，
+ * `33% + 5% = 38%` 换算回来 `15 × 38 / 100 = 5.7` 截成 5，与原来同档（"按了没反应"）；
+ * 静音还原同理掉一档。播放页手势/按键与右栏兜底派发共用这一条算式。
+ */
+internal fun volumeIndexFor(max: Int, percent: Int): Int =
+    if (max <= 0) 0 else ((max * percent.coerceIn(0, 100) + 50) / 100).coerceIn(0, max)
+
 /** 与界面无关的会话指令——映射与执行分离，映射才能被单测覆盖。 */
 internal sealed interface SessionKeyCommand {
     data object PlayPause : SessionKeyCommand
@@ -119,7 +129,7 @@ internal class BrowseSessionKeys(
         if (max <= 0) return
         audioManager?.setStreamVolume(
             AudioManager.STREAM_MUSIC,
-            max * value.coerceIn(0, 100) / 100,
+            volumeIndexFor(max, value),
             0,
         )
     }
