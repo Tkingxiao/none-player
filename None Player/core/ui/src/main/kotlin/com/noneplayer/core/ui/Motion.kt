@@ -133,8 +133,11 @@ object Motion {
     const val NavFade = 240     // 交叉淡入
     const val NavExit = 180     // pop / 退场
 
-    // 装饰（批次 5 新增；共享元素 M2 已按 §12 顺延批次 5.1，落地时再开令牌）
+    // 装饰（批次 5 新增）
     const val Bubble = 500      // 中央播放键水波（High 档装饰，见 §9.6）
+
+    // M2 共享封面（批次 5 唯一允许顺延项，2026-10-08 落地）
+    const val Shared = 300      // 卡片 → 播放页共享封面（曲线只用 Emphasized）
     const val AccentShift = 400 // 封面主色切集过渡
 }
 

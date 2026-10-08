@@ -109,6 +109,12 @@ class MotionTokensTest {
         assertEquals(Motion.Overlay, NpMotionQuality.Balanced.scaled(Motion.Overlay))
         assertEquals(Motion.Sheet, NpMotionQuality.High.scaled(Motion.Sheet))
 
+        // M2 共享封面的档位门控（§9.6）：轻量档关，平衡/全效开——卡片侧的起飞条件
+        // （plugin-library）与播放页的接手都靠这一位，掉档就不该有飞行帧。
+        assertFalse(NpMotionQuality.Lightweight.sharedElement)
+        assertTrue(NpMotionQuality.Balanced.sharedElement)
+        assertTrue(NpMotionQuality.High.sharedElement)
+
         // §9.4 播放中降一档：只关装饰列，倍率/位移/触觉不动
         val dropped = NpMotionQuality.High.forPlayback()
         assertFalse(dropped.stagger)

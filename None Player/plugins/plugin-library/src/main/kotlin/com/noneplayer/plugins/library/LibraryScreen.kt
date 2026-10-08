@@ -93,6 +93,9 @@ import com.noneplayer.core.ui.NpHaptic
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpListRow
+import com.noneplayer.core.ui.NpCoverFlight
+import com.noneplayer.core.ui.npQuality
+import com.noneplayer.core.ui.LocalNpReduceMotion
 import com.noneplayer.core.ui.NpMediaCard
 import com.noneplayer.core.ui.NpMediaColor
 import com.noneplayer.core.ui.NpMono
@@ -1172,11 +1175,17 @@ internal fun MediaCardBody(
     }
     // 设计稿 `v.neu`：48 小时内加入 → 右上「新增」角标。取一次时间即可，无需逐帧读钟。
     val isNew = remember(item) { System.currentTimeMillis() - item.addedAtMs < NEW_BADGE_WINDOW_MS }
+    // M2 共享封面（§6）：起飞条件 = 档位允许（§9.6 `sharedElement`）且非 Reduce Motion。
+    // 机位就是长按菜单用的那个锚点（窗口坐标，滚动期零重组）；没量到就不起飞。
+    val sharedCoverOn = npQuality().sharedElement && !LocalNpReduceMotion.current
     NpMediaCard(
         // E42：富化出短标题就用它（「标题」而不是「[字幕组] 标题 - 01 [1080p]」）
         title = item.cardTitle,
         meta = meta,
-        onClick = { onOpen(item) },
+        onClick = {
+            if (sharedCoverOn) NpCoverFlight.launch(item.id, anchor.current())
+            onOpen(item)
+        },
         onLongClick = longPress?.let { cb -> { cb(item, anchor.current()) } },
         modifier = modifier.npAnchor(anchor),
         folderTag = if (showFolderTag) item.folder else null,

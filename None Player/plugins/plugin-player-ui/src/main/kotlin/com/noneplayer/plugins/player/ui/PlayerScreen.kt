@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -110,6 +111,7 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
@@ -129,6 +131,8 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.util.lerp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -148,6 +152,9 @@ import com.noneplayer.core.media.MediaNames
 import com.noneplayer.core.media.PlaybackFailure
 import com.noneplayer.core.media.resolutionLabel
 import com.noneplayer.core.ui.LocalNpInk
+import androidx.compose.ui.layout.ContentScale
+import coil.compose.AsyncImage
+import com.noneplayer.core.ui.NpCoverFlight
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEyebrow
@@ -469,6 +476,26 @@ fun PlayerScreen(
     // 保证媒体通知有标题封面、播放页标题栏不空
     var displayTitle by remember(uri) { mutableStateOf(title) }
     var artworkUri by remember(uri) { mutableStateOf<String?>(null) }
+
+    // M2 共享封面（§6）：媒体库卡片点击时记下的"机位"，本页取走并把封面从那儿补间到舞台
+    // （`Shared` 300ms + `Emphasized`——规格里该曲线只给共享元素与主播放键）。
+    // 档位（§9.6 `sharedElement`）与 Reduce Motion 已在起飞侧拦过，这里只认 pending。
+    val coverTakeoff = remember(mediaId) {
+        if (mediaId.isEmpty()) null else NpCoverFlight.take(mediaId)
+    }
+    val coverFlight = remember { Animatable(1f) }
+    val coverMorphMs = npDuration(Motion.Shared)
+    val coverFadeMs = npDuration(Motion.ReduceFade)
+    var stageRectInWindow by remember { mutableStateOf<Rect?>(null) }
+    LaunchedEffect(coverTakeoff) {
+        coverTakeoff ?: return@LaunchedEffect
+        coverFlight.snapTo(0f)
+        // 等舞台量出目标矩形（首帧之内）再起飞；量不到就不飞（比飞错位置体面）
+        while (stageRectInWindow == null) delay(16)
+        coverFlight.animateTo(1f, tween(coverMorphMs, easing = NpEasing.Emphasized))
+        // 落位后短暂停留，再把封面淡出让位给已经出帧的视频（末段 15% 行程读作淡出）
+        coverFlight.animateTo(1.15f, tween(coverFadeMs))
+    }
     // 深链只带 uri（不带 mime/id）时，从 MediaStore 取真实 MIME_TYPE 供页头容器名显示。
     // 路由 mime 默认值是 video/mp4，直接用它会把一个 .avi 显示成「MP4」（§7.4）；
     // 而 content:// 地址没有扩展名，靠扩展名也猜不出来——只有 MediaStore 知道真相。
@@ -1578,6 +1605,7 @@ fun PlayerScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .background(Color.Black)
+                        .onGloballyPositioned { stageRectInWindow = it.boundsInWindow() }
                         .then(stageGestures()),
                 ) {
                     VideoStage(
@@ -1595,6 +1623,13 @@ fun PlayerScreen(
                         rotation = rotation,
                         onSurfaceView = { surfaceViewRef.value = it },
                         modifier = Modifier.fillMaxSize(),
+                    )
+                    // M2 共享封面：从卡片机位补间到舞台（挂在舞台内，坐标相对舞台）
+                    CoverFlightOverlay(
+                        takeoff = coverTakeoff,
+                        model = artworkUri,
+                        stageRect = stageRectInWindow,
+                        wave = coverFlight,
                     )
                     // 暂停时的中央"继续"：64dp 玻璃圆（设计稿 .bigplay），
                     // 播放中不出现——它只在"用户可能需要我"的时刻存在。
@@ -1947,6 +1982,7 @@ fun PlayerScreen(
                         Box(
                             modifier = stageHeight
                                 .background(Color.Black)
+                                .onGloballyPositioned { stageRectInWindow = it.boundsInWindow() }
                                 .then(stageGestures()),
                         ) {
                             VideoStage(
@@ -1964,6 +2000,13 @@ fun PlayerScreen(
                                 rotation = rotation,
                                 onSurfaceView = { surfaceViewRef.value = it },
                                 modifier = Modifier.fillMaxSize(),
+                            )
+                            // M2 共享封面：从卡片机位补间到舞台（挂在舞台内，坐标相对舞台）
+                            CoverFlightOverlay(
+                                takeoff = coverTakeoff,
+                                model = artworkUri,
+                                stageRect = stageRectInWindow,
+                                wave = coverFlight,
                             )
                             CenterResumeButton(
                                 visible = state == PlaybackState.Paused && !userDragging && !inPipMode && !stageLocked,
@@ -4575,3 +4618,37 @@ internal suspend fun resolveSiblingSubtitle(context: Context, uri: String): Stri
             }
         }.getOrNull()
     }
+
+/**
+ * M2 共享封面飞行帧：从卡片机位补间到舞台（挂在舞台 Box 内，坐标相对舞台）。
+ *
+ * 动画值只读在**布局/绘制层**（`layout {}` 与 `graphicsLayer {}`）——逐帧只重排那块
+ * 贴图，不重组整页（§9.2 同一条纪律）。`progress` 末段 15% 行程读作淡出，把画面让给
+ * 已经出帧的视频。
+ */
+@Composable
+private fun CoverFlightOverlay(
+    takeoff: NpCoverFlight.Takeoff?,
+    model: String?,
+    stageRect: Rect?,
+    wave: Animatable<Float, AnimationVector1D>,
+) {
+    if (takeoff == null || model == null || stageRect == null) return
+    AsyncImage(
+        model = model,
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = Modifier
+            .layout { measurable, constraints ->
+                val p = wave.value
+                val from = takeoff.from
+                val w = lerp(from.width, stageRect.width, p).roundToInt().coerceAtLeast(1)
+                val h = lerp(from.height, stageRect.height, p).roundToInt().coerceAtLeast(1)
+                val x = lerp(from.left - stageRect.left, 0f, p).roundToInt()
+                val y = lerp(from.top - stageRect.top, 0f, p).roundToInt()
+                val placeable = measurable.measure(Constraints.fixed(w, h))
+                layout(constraints.maxWidth, constraints.maxHeight) { placeable.place(x, y) }
+            }
+            .graphicsLayer { alpha = ((1.15f - wave.value) / 0.15f).coerceIn(0f, 1f) },
+    )
+}
