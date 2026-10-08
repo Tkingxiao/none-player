@@ -229,14 +229,16 @@ fun NpTrackBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(NpDimens.trackLine)
-                .clip(RoundedCornerShape(2.dp))
-                .background(track),
+                // §19.14 同族：圆角交给 background 自己画，不做 RenderNode 裁剪
+                // （`clip()` 每处都会开一次模板裁剪；卡片热路径上每帧几十次）。
+                .background(track, RoundedCornerShape(2.dp)),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(shown.coerceIn(0f, 1f))
                     .height(NpDimens.trackLine)
-                    .background(fill),
+                    // 填充轨自带同形圆角：方角会盖住底轨两端的圆角
+                    .background(fill, RoundedCornerShape(2.dp)),
             )
         }
         Box(
@@ -246,8 +248,7 @@ fun NpTrackBar(
                     translationX = (shown.coerceIn(0f, 1f) * size.width) - knobSize.dp.toPx() / 2f
                 }
                 .size(knobSize.dp)
-                .clip(RoundedCornerShape(NpRadius.chip))
-                .background(fill),
+                .background(fill, RoundedCornerShape(NpRadius.chip)),
         )
     }
 }
@@ -286,8 +287,7 @@ fun NpMiniProgress(
             modifier = Modifier
                 .fillMaxWidth(animated)
                 .height(NpDimens.miniProgress)
-                .clip(RoundedCornerShape(topEnd = 2.dp, bottomEnd = 2.dp))
-                .background(fillColor ?: ink.accent),
+                .background(fillColor ?: ink.accent, RoundedCornerShape(topEnd = 2.dp, bottomEnd = 2.dp)),
         )
     }
 }
@@ -709,11 +709,13 @@ fun NpFolderCard(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .padding(8.dp)
-                        .clip(RoundedCornerShape(5.dp))
                         // 设计稿 `.folder .pill`：`color-mix(in oklch, facc 42%, #000 58%)`
                         // ——底色是文件夹色相与黑的混合，不是纯黑；纯黑会让胶囊与封面
                         // 的色相编码断开（这一枚 pill 也承担"哪个文件夹"的线索）。
-                        .background(facc.copy(alpha = 0.42f).compositeOver(Color.Black))
+                        .background(
+                            facc.copy(alpha = 0.42f).compositeOver(Color.Black),
+                            RoundedCornerShape(5.dp),
+                        )
                         .border(1.dp, facc.copy(alpha = 0.55f), RoundedCornerShape(5.dp))
                         .padding(horizontal = 7.dp, vertical = 2.dp),
                 )
