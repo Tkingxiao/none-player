@@ -41,6 +41,19 @@ internal object SessionKeySteps {
 internal fun volumeIndexFor(max: Int, percent: Int): Int =
     if (max <= 0) 0 else ((max * percent.coerceIn(0, 100) + 50) / 100).coerceIn(0, max)
 
+/**
+ * 独占播放页是否在场（E102）。
+ *
+ * 方向键在播放页里应当归**页面自己**——那边的手势/按键路径带"快进 5 秒"提示与边界
+ * 拒绝触觉（批次 2/5 的既定反馈），而会话兜底是"静默执行"。所以窗口层抢下方向键后，
+ * 由 [BrowseSessionKeys] 在页内主动让位（返回 false → 键回到视图树 → 页面自己的
+ * `onPreviewKeyEvent` 接手）。
+ */
+internal object PlayerPagePresence {
+    @Volatile
+    var active: Boolean = false
+}
+
 /** 与界面无关的会话指令——映射与执行分离，映射才能被单测覆盖。 */
 internal sealed interface SessionKeyCommand {
     data object PlayPause : SessionKeyCommand
@@ -91,6 +104,10 @@ internal class BrowseSessionKeys(
 
     override fun onSessionKey(keyCode: Int, shiftPressed: Boolean, ctrlPressed: Boolean): Boolean {
         val command = routeSessionKey(keyCode, shiftPressed) ?: return false
+        // E102：播放页在场时方向键让位给页面（那边带"快进 5 秒"提示与边界拒绝触觉）
+        if (PlayerPagePresence.active &&
+            (command is SessionKeyCommand.Seek || command is SessionKeyCommand.Volume)
+        ) return false
         val session = sessionOf()
         // 没有会话可操作就别把键吞掉：从未播过、引擎还没起来（含 E88 的无引擎体面失败）
         val player = session.player ?: return false

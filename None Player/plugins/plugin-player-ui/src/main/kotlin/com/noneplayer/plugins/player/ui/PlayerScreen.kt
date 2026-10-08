@@ -534,6 +534,12 @@ fun PlayerScreen(
                 coverUri = cover,
             ),
             restorePosition = !fromStart,
+            // E104：进播放页不再无条件起播——**会话是真相，页面只是显示它**。
+            // 暂停态进来保持暂停、结束态停在结束画面（让用户自己按播放/重播）；
+            // 唯一"要它播"的显式入口是「从头播放」（from=start，见上一行）与新装载
+            // （不同媒体 / 新会话，那条分支照旧 play）。此前"进页一律 play()"与类 PC
+            // 右栏的被动语义正好相反，来回按 F/⛶ 会读成"暂停只在浏览侧有效"。
+            autoPlay = fromStart,
             onSubtitleMatched = { hit -> scope.launch { settings.setSubtitleUri(mediaId, hit) } },
         )
         // 只有真的从断点起播才提示（从头播放/会话本来就在播同一媒体都不会走到这里）
@@ -1424,6 +1430,12 @@ fun PlayerScreen(
     // 否则这层 onPreviewKeyEvent 永远收不到任何按键。
     val keyFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { keyFocus.requestFocus() } }
+    // E102：告诉会话兜底"播放页在场"——方向键归本页处理（带手势提示与边界触觉），
+    // 窗口层的兜底派发主动让位
+    DisposableEffect(Unit) {
+        PlayerPagePresence.active = true
+        onDispose { PlayerPagePresence.active = false }
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1445,7 +1457,9 @@ fun PlayerScreen(
                 // 会话级四件读 SessionKeys 的共用映射表（E99）：三栏浏览态那份实现
                 // 用的是同一张表与同一份步进数字，两处不会再各写一份漂掉。
                 // `Key.keyCode` 是 Long（Compose 1.7 起），映射表按 KeyEvent 的 Int 键码写。
-                when (val command = routeSessionKey(event.key.keyCode.toInt(), event.isShiftPressed)) {
+                // E102 修正：**不能用 Compose 的 `Key.keyCode`**——它在 Android 上是`androidKeyCode shl 32`，`.toInt()` 截出来恒为 0，共享键在这里会全部静默失效
+                // （E99 回合埋的坑，一直被窗口层兜底无声盖住）。取平台键码走 native。
+                when (val command = routeSessionKey(event.nativeKeyEvent.keyCode, event.isShiftPressed)) {
                     SessionKeyCommand.PlayPause -> {
                         togglePlay()
                         return@onPreviewKeyEvent true

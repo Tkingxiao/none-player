@@ -1,5 +1,6 @@
 package com.noneplayer.app
 
+import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -32,6 +33,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.ThemeMode
@@ -105,6 +108,62 @@ class MainActivity : ComponentActivity() {
      * DOWN 被视图树消费过 = 这个键有人在管，它的 UP 也归它。
      */
     private var unclaimedDownKeyCode = 0
+
+    /** E102：已被我们抢下的方向键（DOWN 认领后 UP 也要吞掉，不能漏回视图树） */
+    private var preemptedArrow = 0
+
+    /**
+     * E102：**方向键要抢在视图树之前**派发。
+     *
+     * 其余键走 [onKeyUp] 的"兜底"（视图树没要才轮到我们）就够；方向键不行——Compose 的
+     * **焦点导航**会在视图树里把它们吃掉：实测浏览态焦点落在顶栏按钮上时，`↑` 只把焦点
+     * 挪到另一个按钮、音量纹丝不动（焦点 bounds `[748,88]` → `[934,48]`），`↓` 也复现过；
+     * 而 §8.4 要求方向键是"桌面化输入"的音量与 seek。
+     *
+     * 抢在视图树之前只能靠覆写 `dispatchKeyEvent`（框架先问 Activity 再进视图树）。
+     * `super` 撞到 `ComponentActivity` 上带 `@RestrictedApi` 的重载，**抑制理由**：那是
+     * androidx 的库边界声明，而这里就是 Android 官方的"覆写后交回框架"写法，语义与
+     * 未覆写时逐字一致；不抑制就得自己复刻 Window 派发链，反而更容易漂。
+     *
+     * 三条纪律：只在**会话真能处理**时才抢（没有会话 → 交回框架，焦点导航照旧）；输入态
+     * （软键盘在屏）一律不抢，方向键归输入框；抢下的 DOWN 对应 UP 一并吞掉。
+     */
+    @SuppressLint("RestrictedApi")
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (isArrowKey(event.keyCode) && !imeVisible()) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> if (dispatchToSession(event)) {
+                    preemptedArrow = event.keyCode
+                    return true
+                }
+                KeyEvent.ACTION_UP -> if (preemptedArrow == event.keyCode) {
+                    preemptedArrow = 0
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun dispatchToSession(event: KeyEvent): Boolean {
+        val kernel = (application as? NonePlayerApplication)?.kernel ?: return false
+        return kernel.registry.query<SessionKeyProvider>()
+            .any { it.onSessionKey(event.keyCode, event.isShiftPressed, event.isCtrlPressed) }
+    }
+
+    private fun isArrowKey(keyCode: Int): Boolean = keyCode == KeyEvent.KEYCODE_DPAD_UP ||
+        keyCode == KeyEvent.KEYCODE_DPAD_DOWN ||
+        keyCode == KeyEvent.KEYCODE_DPAD_LEFT ||
+        keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+
+    /**
+     * 软键盘是否在屏（输入态）：打字时方向键归输入框（移动光标），会话不抢。
+     * 如实记档的代价：外接硬键盘且软键盘收起时，输入框里的方向键仍会被抢——
+     * 没有可靠的"Compose 焦点是不是文本框"查询口（见档案 §19.16 E102）。
+     */
+    private fun imeVisible(): Boolean =
+        ViewCompat.getRootWindowInsets(window.decorView)
+            ?.isVisible(WindowInsetsCompat.Type.ime()) == true
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (super.onKeyDown(keyCode, event)) return true
