@@ -5,6 +5,13 @@ package com.noneplayer.plugins.library
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -96,6 +103,10 @@ import com.noneplayer.core.ui.NpListRow
 import com.noneplayer.core.ui.NpCoverFlight
 import com.noneplayer.core.ui.npQuality
 import com.noneplayer.core.ui.LocalNpReduceMotion
+import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.NpEasing
+import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.ui.npDuration
 import com.noneplayer.core.ui.NpMediaCard
 import com.noneplayer.core.ui.NpMediaColor
 import com.noneplayer.core.ui.NpMono
@@ -162,6 +173,34 @@ import kotlinx.coroutines.withContext
  * 状态机：无来源 → 空状态；缺权限 → 授权引导；未选目录 → 选择文件夹；
  * 有目录未扫描 → 开始扫描；有数据 → 封面墙/文件夹卡片。
  */
+/**
+ * 媒体库的**页内态**（`AnimatedContent` 的 key）。
+ *
+ * 桌面档把"详情 / 聚合 / 文件夹层级"做成了**页内态**而不是路由——没有路由转场可借，
+ * 此前它们之间是硬切（`when` 直接换块，见 2026-10-08 的走查）。这里给每态一个 [rank]
+ * （层级深度）：交叉淡入是底色，**层级差不等于零**时才给 8dp 方向位移。
+ */
+private sealed interface LibraryStage {
+    val rank: Int
+
+    data object NoSource : LibraryStage { override val rank = 0 }
+    data object NoPermission : LibraryStage { override val rank = 0 }
+    data object NoFolder : LibraryStage { override val rank = 0 }
+    data object Loading : LibraryStage { override val rank = 0 }
+    data object Empty : LibraryStage { override val rank = 0 }
+    data object Home : LibraryStage { override val rank = 0 }
+
+    data object Folder : LibraryStage { override val rank = 1 }
+
+    /**
+     * 载荷**随 key 一起走**：`AnimatedContent` 在过渡期会继续渲染旧帧，而旧帧读到的
+     * 实时状态（`detailItem` / `aggregate`）可能已经被置空——第一版就是这么崩的
+     * （NPE，`LibraryScreen.kt` 旧帧的 `detailItem!!`）。臂里一律用 key 里的载荷。
+     */
+    data class Aggregate(val mode: String) : LibraryStage { override val rank = 1 }
+    data class Detail(val item: MediaItem) : LibraryStage { override val rank = 2 }
+}
+
 @Composable
 fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val kernel = LocalKernel.current
@@ -503,153 +542,187 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                     },
                 ) {
                 Column(modifier = Modifier.fillMaxSize()) {
-                    when {
-                        // 详情页（平板横屏）：整块内容区替换为视频详情，Rail 与选中态不变。
-                        // 同文件夹列表与播放器队列用同一个比较器，顺序与"下一集"一致。
-                        detailItem != null -> {
-                            val detail = detailItem!!
-                            val siblings = remember(detail.id, detail.folder, sortedItems) {
-                                val folder = detail.folder
-                                if (folder.isNullOrBlank()) {
-                                    emptyList()
-                                } else {
-                                    // 与游玩器队列同一比较器（原注释承诺的"顺序一致"）
-                                    sortedItems
-                                        .filter { it.kind == MediaKind.VIDEO && it.folder == folder }
-                                        .sortedWith(MediaNaturalOrder)
+                        // 页内态：把上面这串条件**只写一遍**，分支按枚举分派——条件与动效同源，
+                        // 不会出现"加了分支忘了动效"（M2 的"其余 fade"与 M13 的"骨架→内容 240"都在这里兑现）。
+                        val stage = when {
+                            detailItem != null -> LibraryStage.Detail(detailItem!!)
+                            sources.isEmpty() -> LibraryStage.NoSource
+                            missingPermission -> LibraryStage.NoPermission
+                            folderUris.isEmpty() -> LibraryStage.NoFolder
+                            !mediaLoaded && items.isEmpty() -> LibraryStage.Loading
+                            items.isEmpty() -> LibraryStage.Empty
+                            aggregate != null -> LibraryStage.Aggregate(aggregate!!)
+                            viewMode == LibraryView.FOLDERS -> LibraryStage.Folder
+                            else -> LibraryStage.Home
+                        }
+                        val stageFadeMs = npDuration(Motion.NavFade)
+                        val stageExitMs = npDuration(Motion.NavExit)
+                        val stageShiftPx = with(LocalDensity.current) { 8.dp.roundToPx() }
+                        val stageShiftAllowed = npDisplacementAllowed()
+                        AnimatedContent(
+                            targetState = stage,
+                            // 层级前进/后退带 8dp 方向位移（"读得出方向"的最小量），同级切换只交叉淡入；
+                            // 位移在轻量档 / Reduce Motion 下并掉（§9.6）。
+                            transitionSpec = {
+                                val forward = targetState.rank > initialState.rank
+                                val shift = if (stageShiftAllowed) {
+                                    if (forward) stageShiftPx else -stageShiftPx
+                                } else { 0 }
+                                (fadeIn(tween(stageFadeMs, easing = NpEasing.Silk)) +
+                                    slideInHorizontally(tween(stageFadeMs, easing = NpEasing.Silk)) { shift }) togetherWith
+                                    fadeOut(tween(stageExitMs, easing = NpEasing.SilkExit))
+                            },
+                            label = "libraryStage",
+                        ) { stageValue ->
+                            when (stageValue) {
+                            // 详情页（平板横屏）：整块内容区替换为视频详情，Rail 与选中态不变。
+                            // 同文件夹列表与播放器队列用同一个比较器，顺序与"下一集"一致。
+                        is LibraryStage.Detail -> {
+                                val detail = stageValue.item
+                                val siblings = remember(detail.id, detail.folder, sortedItems) {
+                                    val folder = detail.folder
+                                    if (folder.isNullOrBlank()) {
+                                        emptyList()
+                                    } else {
+                                        // 与游玩器队列同一比较器（原注释承诺的"顺序一致"）
+                                        sortedItems
+                                            .filter { it.kind == MediaKind.VIDEO && it.folder == folder }
+                                            .sortedWith(MediaNaturalOrder)
+                                    }
                                 }
+                                VideoDetailScreen(
+                                    item = detail,
+                                    siblings = siblings,
+                                    resumeMs = positions[detail.id] ?: 0L,
+                                    navigator = navigator,
+                                    inlinePlayer = inlinePlayer,
+                                    // ⛶ = 明确的全屏意图：独占播放页只有沉浸一种（假全屏已删除）
+                                    onFullscreen = { openPlayer(navigator, it, immersive = true) },
+                                    onSelect = { detailItem = it },
+                                )
                             }
-                            VideoDetailScreen(
-                                item = detail,
-                                siblings = siblings,
-                                resumeMs = positions[detail.id] ?: 0L,
-                                navigator = navigator,
-                                inlinePlayer = inlinePlayer,
-                                // ⛶ = 明确的全屏意图：独占播放页只有沉浸一种（假全屏已删除）
-                                onFullscreen = { openPlayer(navigator, it, immersive = true) },
-                                onSelect = { detailItem = it },
+
+                        LibraryStage.NoSource -> EmptyStage {
+                                NpEmptyState(
+                                    title = "还没有媒体",
+                                    message = "安装媒体来源插件后，视频与音乐会出现在这里。",
+                                )
+                            }
+
+                        LibraryStage.NoPermission -> EmptyStage {
+                                NpEmptyState(
+                                    title = "需要媒体权限",
+                                    message = "None Player 需要访问设备上的视频与音频，才能在这里展示和播放。",
+                                    actionLabel = "授予媒体权限",
+                                    onAction = { permissionLauncher.launch(permissionStrings.toTypedArray()) },
+                                )
+                            }
+
+                        LibraryStage.NoFolder -> EmptyStage {
+                                NpEmptyState(
+                                    title = "选择要观看的文件夹",
+                                    message = "选择一个媒体文件夹，None Player 只扫描你指定的位置（可在设置中添加多个）。",
+                                    actionLabel = "选择媒体文件夹",
+                                    onAction = { folderPicker.launch(null) },
+                                )
+                            }
+
+                            // 数据未就绪时**不渲染列表**，而是给它一块骨架。
+                            //
+                            // 这不只是观感问题：媒体数据到达前，首页唯一能渲染的区块是"全部音频"
+                            // （其余区块都要求列表非空才会出现）。LazyColumn 按 key 锚定当前可见项，
+                            // 于是数据到达、前面的区块被插入后，它会**保住"全部音频"的屏幕位置**，
+                            // 把新插入的"最近添加 / 文件夹 / 全部视频"顶到上方——用户冷启动看到的是
+                            // 一个已经滚到底部的页面。先给骨架再换内容，锚点与内容一起重置。
+                        LibraryStage.Loading -> LoadingPlaceholder(compact = compact)
+
+                            // E78：媒体已加载完但确实没有内容 → 空库。
+                        LibraryStage.Empty -> EmptyStage {
+                                NpEmptyState(
+                                    title = "媒体库是空的",
+                                    message = "扫描所选文件夹中的媒体，建立你的媒体库。",
+                                    actionLabel = if (requestedScan) null else "开始扫描",
+                                    onAction = if (requestedScan) null else {
+                                        { requestedScan = true; scanAll() }
+                                    },
+                                )
+                            }
+
+                        is LibraryStage.Aggregate -> AggregateList(
+                                mode = stageValue.mode,
+                                all = sortedItems,
+                                positions = positions,
+                                lastAt = lastAt,
+                                favoriteKeys = favoriteKeysList,
+                                sortMode = sortMode,
+                                sortAscending = sortAscending,
+                                gridColumns = gridColumns,
+                                onGridColumns = { scope.launch { settings.setGridColumns(it) } },
+                                viewStyle = listViewStyle,
+                                onViewStyle = onViewStyle,
+                                filter = filter,
+                                onFilter = { filter = it },
+                                compact = compact,
+                                onSort = { scope.launch { settings.setSortMode(it) } },
+                                onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
+                                onOpen = openDetailOrPlayer,
+                                onOpenEpisodes = { episodeSheet = it },
+                                onBack = { aggregate = null },
                             )
-                        }
 
-                        sources.isEmpty() -> EmptyStage {
-                            NpEmptyState(
-                                title = "还没有媒体",
-                                message = "安装媒体来源插件后，视频与音乐会出现在这里。",
+                        LibraryStage.Folder -> FolderBrowser(
+                                root = folderRoot,
+                                selected = currentFolder,
+                                positions = positions,
+                                gridColumns = gridColumns,
+                                onGridColumns = { scope.launch { settings.setGridColumns(it) } },
+                                sortMode = sortMode,
+                                sortAscending = sortAscending,
+                                viewStyle = listViewStyle,
+                                onViewStyle = onViewStyle,
+                                filter = filter,
+                                onFilter = { filter = it },
+                                compact = compact,
+                                onSort = { scope.launch { settings.setSortMode(it) } },
+                                onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
+                                onOpenFolder = { selectedFolder = it.path },
+                                onOpenParent = {
+                                    selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
+                                },
+                                onOpenVideo = openDetailOrPlayer,
+                                onOpenEpisodes = { episodeSheet = it },
                             )
-                        }
 
-                        missingPermission -> EmptyStage {
-                            NpEmptyState(
-                                title = "需要媒体权限",
-                                message = "None Player 需要访问设备上的视频与音频，才能在这里展示和播放。",
-                                actionLabel = "授予媒体权限",
-                                onAction = { permissionLauncher.launch(permissionStrings.toTypedArray()) },
-                            )
-                        }
-
-                        folderUris.isEmpty() -> EmptyStage {
-                            NpEmptyState(
-                                title = "选择要观看的文件夹",
-                                message = "选择一个媒体文件夹，None Player 只扫描你指定的位置（可在设置中添加多个）。",
-                                actionLabel = "选择媒体文件夹",
-                                onAction = { folderPicker.launch(null) },
-                            )
-                        }
-
-                        // 数据未就绪时**不渲染列表**，而是给它一块骨架。
-                        //
-                        // 这不只是观感问题：媒体数据到达前，首页唯一能渲染的区块是"全部音频"
-                        // （其余区块都要求列表非空才会出现）。LazyColumn 按 key 锚定当前可见项，
-                        // 于是数据到达、前面的区块被插入后，它会**保住"全部音频"的屏幕位置**，
-                        // 把新插入的"最近添加 / 文件夹 / 全部视频"顶到上方——用户冷启动看到的是
-                        // 一个已经滚到底部的页面。先给骨架再换内容，锚点与内容一起重置。
-                        !mediaLoaded && items.isEmpty() -> LoadingPlaceholder(compact = compact)
-
-                        // E78：媒体已加载完但确实没有内容 → 空库。
-                        items.isEmpty() -> EmptyStage {
-                            NpEmptyState(
-                                title = "媒体库是空的",
-                                message = "扫描所选文件夹中的媒体，建立你的媒体库。",
-                                actionLabel = if (requestedScan) null else "开始扫描",
-                                onAction = if (requestedScan) null else {
-                                    { requestedScan = true; scanAll() }
+                        LibraryStage.Home -> HomeView(
+                                videos = videos,
+                                audios = audios,
+                                recent = recentItems,
+                                folders = folderRoot.children,
+                                compact = compact,
+                                staggerWindow = staggerWindow,
+                                onOpen = openDetailOrPlayer,
+                                onMore = { aggregate = it },
+                                onOpenFolder = {
+                                    // 首页的"文件夹"区块点进去 = 切到**文件夹 Tab**，
+                                    // 而不是在本页内换视图。
+                                    //
+                                    // 必须走 Tab 切换通道：`folders` 注册在**内层** Tab NavHost，
+                                    // 而 `TabProvider.register` 拿到的是**外层** Navigator。
+                                    // 用 `navigator.navigate("folders")` 会抛
+                                    // `IllegalArgumentException: Navigation destination that
+                                    // matches route folders cannot be found` 直接把 App 打崩。
+                                    FolderNav.request(it.path)
+                                    switchTab("folders")
+                                },
+                                onManageFolders = {
+                                    // 管理 = 文件夹 Tab 根层：只切 Tab，不请求任何子目录
+                                    FolderNav.clear()
+                                    switchTab("folders")
                                 },
                             )
                         }
-
-                        aggregate != null -> AggregateList(
-                            mode = aggregate!!,
-                            all = sortedItems,
-                            positions = positions,
-                            lastAt = lastAt,
-                            favoriteKeys = favoriteKeysList,
-                            sortMode = sortMode,
-                            sortAscending = sortAscending,
-                            gridColumns = gridColumns,
-                            onGridColumns = { scope.launch { settings.setGridColumns(it) } },
-                            viewStyle = listViewStyle,
-                            onViewStyle = onViewStyle,
-                            filter = filter,
-                            onFilter = { filter = it },
-                            compact = compact,
-                            onSort = { scope.launch { settings.setSortMode(it) } },
-                            onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
-                            onOpen = openDetailOrPlayer,
-                            onOpenEpisodes = { episodeSheet = it },
-                            onBack = { aggregate = null },
-                        )
-
-                        viewMode == LibraryView.FOLDERS -> FolderBrowser(
-                            root = folderRoot,
-                            selected = currentFolder,
-                            positions = positions,
-                            gridColumns = gridColumns,
-                            onGridColumns = { scope.launch { settings.setGridColumns(it) } },
-                            sortMode = sortMode,
-                            sortAscending = sortAscending,
-                            viewStyle = listViewStyle,
-                            onViewStyle = onViewStyle,
-                            filter = filter,
-                            onFilter = { filter = it },
-                            compact = compact,
-                            onSort = { scope.launch { settings.setSortMode(it) } },
-                            onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
-                            onOpenFolder = { selectedFolder = it.path },
-                            onOpenParent = {
-                                selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
-                            },
-                            onOpenVideo = openDetailOrPlayer,
-                            onOpenEpisodes = { episodeSheet = it },
-                        )
-
-                        else -> HomeView(
-                            videos = videos,
-                            audios = audios,
-                            recent = recentItems,
-                            folders = folderRoot.children,
-                            compact = compact,
-                            staggerWindow = staggerWindow,
-                            onOpen = openDetailOrPlayer,
-                            onMore = { aggregate = it },
-                            onOpenFolder = {
-                                // 首页的"文件夹"区块点进去 = 切到**文件夹 Tab**，
-                                // 而不是在本页内换视图。
-                                //
-                                // 必须走 Tab 切换通道：`folders` 注册在**内层** Tab NavHost，
-                                // 而 `TabProvider.register` 拿到的是**外层** Navigator。
-                                // 用 `navigator.navigate("folders")` 会抛
-                                // `IllegalArgumentException: Navigation destination that
-                                // matches route folders cannot be found` 直接把 App 打崩。
-                                FolderNav.request(it.path)
-                                switchTab("folders")
-                            },
-                            onManageFolders = {
-                                // 管理 = 文件夹 Tab 根层：只切 Tab，不请求任何子目录
-                                FolderNav.clear()
-                                switchTab("folders")
-                            },
-                        )
-                    }
+                            }
+                        }
                 }
                 }
             }
@@ -755,7 +828,6 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                 }
             }
         }
-    }
     }
 }
 

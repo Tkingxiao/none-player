@@ -9,6 +9,10 @@ import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -975,27 +979,43 @@ fun NpAppTopBar(
                 tint = ink.fg,
             )
         }
+        // 标题/副题随页内态或路由变化：**淡变**而不是瞬时跳字。
+        // 背景（2026-10-08 走查）：库页的正文已经交叉淡入，标题却先一步跳变，
+        // 读起来是"两段动作"；两者同节拍才叫衔接完整。只做 alpha——同字号、单行、
+        // 左对齐，不动布局（轻量档/Reduce Motion 下本来也没有可并的位移）。
+        val titleFadeMs = npDuration(Motion.NavFade)
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = if (compact) {
-                    NpTypography.displayLarge.copy(fontSize = NpTypography.headlineMedium.fontSize)
-                } else {
-                    NpTypography.displayLarge
+            AnimatedContent(
+                targetState = title to subtitle,
+                transitionSpec = {
+                    fadeIn(tween(titleFadeMs, easing = NpEasing.Silk)) togetherWith
+                        fadeOut(tween(titleFadeMs, easing = NpEasing.SilkExit))
                 },
-                color = ink.fg,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (!compact && subtitle != null && subtitle.isNotEmpty()) {
-                Text(
-                    text = subtitle,
-                    style = NpTypography.bodySmall,
-                    color = ink.muted,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
+                label = "npTopBarTitle",
+            ) { (t, sub) ->
+                Column {
+                    Text(
+                        text = t,
+                        style = if (compact) {
+                            NpTypography.displayLarge.copy(fontSize = NpTypography.headlineMedium.fontSize)
+                        } else {
+                            NpTypography.displayLarge
+                        },
+                        color = ink.fg,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (!compact && sub != null && sub.isNotEmpty()) {
+                        Text(
+                            text = sub,
+                            style = NpTypography.bodySmall,
+                            color = ink.muted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 2.dp),
+                        )
+                    }
+                }
             }
         }
         trailing()
