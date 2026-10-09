@@ -71,4 +71,30 @@ class HistoryPolicyTest {
         // valid 为空 = 库被清空，整表都是孤儿
         assertEquals(existing, HistoryRepository.orphanKeys(existing, emptySet()))
     }
+
+    // ---- A1-3 断点失效校验 ----
+
+    @Test
+    fun `指纹一致时断点可信`() {
+        assertTrue(HistoryRepository.breakpointIntact(100L, 20L, 100L, 20L))
+    }
+
+    @Test
+    fun `文件被替换后断点失效`() {
+        // 大小变了 = 换了内容；大小没变但 mtime 变了 = 重录/覆写
+        assertFalse(HistoryRepository.breakpointIntact(100L, 20L, 101L, 20L))
+        assertFalse(HistoryRepository.breakpointIntact(100L, 20L, 100L, 21L))
+    }
+
+    @Test
+    fun `任一指纹缺一侧就不参与比对`() {
+        // v1 老行两列都是 0：升级不能顺手把老用户的续播清掉
+        assertTrue(HistoryRepository.breakpointIntact(0L, 0L, 100L, 20L))
+        // 来源拿不到 size（部分 SAF 文档 / 云盘）：同一道理，不否决
+        assertTrue(HistoryRepository.breakpointIntact(100L, 20L, 0L, 0L))
+        // 一轴可比且相等、另一轴不可比 → 仍然可信
+        assertTrue(HistoryRepository.breakpointIntact(100L, 0L, 100L, 20L))
+        // 一轴可比且不等 → 直接失效，另一轴不可比也不能救
+        assertFalse(HistoryRepository.breakpointIntact(100L, 0L, 99L, 20L))
+    }
 }

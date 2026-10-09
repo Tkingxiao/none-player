@@ -8,7 +8,7 @@ import com.noneplayer.kernel.api.ExtensionPoint
 import com.noneplayer.kernel.api.Navigator
 
 /**
- * 右栏（详情/播放栏）扩展点——《界面设计路线.md》§8.2「路径 A」的落点。
+ * 右栏（详情/播放栏）扩展点——《设计文档.md》§8.2「路径 A」的落点。
  *
  * 解决的问题：宽窗口（类 PC 档）里"列表 + 播放"本来只能二选一——要么画面独占
  * 整屏、列表看不见，要么边播边跳页。本槽位让外壳在 `isDesktopLike` 档位把窗口

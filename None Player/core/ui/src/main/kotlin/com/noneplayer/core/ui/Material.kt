@@ -255,6 +255,10 @@ fun NpLeadLine(modifier: Modifier = Modifier) {
  *   （视频不是主题色，四种主题下它都是那块亮的东西）。
  * - [startAlpha] 默认 0.9 而非 1.0：留一点"底下还在动"的暗示，
  *   完全不透的边带会读成一条色块压在内容上。
+ * - [floorAlpha] 是**中段那个 stop 的下限**（默认 0 = 沿用 `startAlpha * 0.30`）。
+ *   压字的控制层要它：白画面（过曝帧、白底标题卡）上中段那点 alpha 抬不起
+ *   白图标，§14 #9 的 4.5:1 红线会在"控件正好落在渐变中段"时塌陷——
+ *   只有压在视频上的控制层需要，页面底渐隐不该拿它垫黑。
  */
 @Composable
 fun NpMaskFade(
@@ -265,15 +269,17 @@ fun NpMaskFade(
     size: Dp = 88.dp,
     startAlpha: Float = 0.9f,
     stops: Float = 0.55f,
+    floorAlpha: Float = 0f,
 ) {
     fun at(alpha: Float) = color.copy(alpha = alpha)
+    val midAlpha = maxOf(startAlpha * 0.30f, floorAlpha)
     // 中段过渡位按渐变**起点**算：fromTop=false 时整条曲线镜像，
     // 否则"从下往上渐隐"会变成"下面先淡掉"，读起来方向反了。
     val gradientStops = if (fromTop) {
-        arrayOf(0f to at(startAlpha), stops to at(startAlpha * 0.30f), 1f to at(0f))
+        arrayOf(0f to at(startAlpha), stops to at(midAlpha), 1f to at(0f))
     } else {
         val mirrored = 1f - stops
-        arrayOf(0f to at(0f), mirrored to at(startAlpha * 0.30f), 1f to at(startAlpha))
+        arrayOf(0f to at(0f), mirrored to at(midAlpha), 1f to at(startAlpha))
     }
     val brush = if (vertical) {
         Brush.verticalGradient(*gradientStops)

@@ -3,6 +3,7 @@ package com.noneplayer.app
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.app.Activity
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
@@ -199,7 +200,15 @@ class MainActivity : ComponentActivity() {
             // E45/E52：形态判定层的**唯一注入点**（§13.2）——全应用一次判定，
             // 经 LocalNpWindowInfo 下发；各页面一律消费它，不得各自读 LocalConfiguration
             // 做档位分支（唯一例外是"窗口是否横向"，见 NpWindowInfo 文档注释）。
-            val windowInfo = rememberNpWindowInfo(activity = this@MainActivity)
+            // A2-9（E51 余项）：折叠/铰链真值接进来。此前 `hasFoldingFeature` 只是形参、
+            // 零调用方喂值——折叠屏需要的是「铰链避让」语义而不是平板分栏语义（§13.2 优先级），
+            // 那条判定链一直拿的是默认 false，等于形同虚设。
+            // WindowLayoutInfo 是异步流，只能在组合期 collect，故提到这里而不是 rememberNpWindowInfo 内部。
+            val hasFoldingFeature = rememberFoldingFeature(this@MainActivity)
+            val windowInfo = rememberNpWindowInfo(
+                activity = this@MainActivity,
+                hasFoldingFeature = hasFoldingFeature,
+            )
             val settings = remember { app.kernel.services.get<AppSettings>() }
             val scope = rememberCoroutineScope()
             // B6：Rail 底部「主题」按钮的二态语义——按"当前实际是否暗色"翻转：
@@ -336,4 +345,26 @@ private fun BootErrorScreen(cause: Throwable) {
             modifier = Modifier.padding(top = 8.dp),
         )
     }
+}
+
+/**
+ * 折叠屏铰链态（A2-9 / E51 余项）。
+ *
+ * 判据取"**存在非 FLAT 的 FoldingFeature**"= 这台设备此刻是折起来/半展开的折叠屏，
+ * 只要布尔值不要角度与矩形：形态判定层（§13.2）要回答的是"这是折叠屏还是平板"，
+ * 而折叠屏的语义是**铰链避让**、不是平板的分栏，故它的优先级排在平板之前。
+ *
+ * 非折叠设备上 `windowLayoutInfo` 只会发射空列表，代价是一次 Flow 订阅。
+ */
+@Composable
+private fun rememberFoldingFeature(activity: Activity): Boolean {
+    val context = LocalContext.current
+    val layoutInfo by androidx.window.layout.WindowInfoTracker
+        .getOrCreate(context)
+        .windowLayoutInfo(activity)
+        .collectAsStateWithLifecycle(initialValue = null)
+    return layoutInfo?.displayFeatures?.any { feature ->
+        feature is androidx.window.layout.FoldingFeature &&
+            feature.state != androidx.window.layout.FoldingFeature.State.FLAT
+    } == true
 }

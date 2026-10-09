@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Environment
 import android.os.Handler
+import android.os.SystemClock
 import android.os.Looper
 import android.provider.DocumentsContract
 import android.provider.MediaStore
@@ -18,6 +19,7 @@ import android.util.Size
 import androidx.core.net.toUri
 import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.data.LOCAL_MEDIA_SOURCE_ID
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.CueSheet
@@ -88,7 +90,7 @@ class LocalMediaSource(
     private val processLifecycle: ProcessLifecycle? = null,
 ) : MediaSourceProvider, CacheProvider {
 
-    override val sourceId: String = "local"
+    override val sourceId: String = LOCAL_MEDIA_SOURCE_ID
     override val displayName: String = "本地媒体"
 
     /** 缩略图缓存目录（唯一落盘缓存，清掉可再生成——下次扫描时重建） */
@@ -122,6 +124,10 @@ class LocalMediaSource(
     private var contentObserver: ContentObserver? = null
     private var observerJob: kotlinx.coroutines.Job? = null
     private var lifecycleJob: kotlinx.coroutines.Job? = null
+
+    /** 上一次扫描完成时刻（[SystemClock.elapsedRealtime] 基准，A5/P2-2）；0 = 还没扫过 */
+    @Volatile
+    private var lastScanFinishedAt = 0L
 
     /**
      * 扫描互斥闸门。
@@ -165,6 +171,8 @@ class LocalMediaSource(
         } finally {
             _scanning.value = false
             scanGate.set(false)
+            // A5/P2-2：记下「这次扫描完成于何时」，回前台的补扫据此去重
+            lastScanFinishedAt = SystemClock.elapsedRealtime()
         }
     }
 
@@ -439,7 +447,12 @@ class LocalMediaSource(
             lifecycle.isForeground.collect { foreground ->
                 if (foreground && contentObserver == null) {
                     registerObservers()
-                    mediaChanges.value = System.currentTimeMillis()
+                    // 回前台补扫是必要的：观察者注销期间 MediaStore 的事件收不到。
+                    // 但快速往返（拉通知栏、切出去看一眼就回来）不该再来一遍全量查询——
+                    // 距上次完成不足 MIN_RESCAN_INTERVAL_MS 时，中间根本没有「观察者没注册」的窗口。
+                    if (SystemClock.elapsedRealtime() - lastScanFinishedAt >= MIN_RESCAN_INTERVAL_MS) {
+                        mediaChanges.value = System.currentTimeMillis()
+                    }
                 } else if (!foreground && contentObserver != null) {
                     unregisterObservers()
                 }
@@ -581,6 +594,7 @@ class LocalMediaSource(
             MediaStore.Video.Media.DISPLAY_NAME,
             MediaStore.Video.Media.DURATION,
             MediaStore.Video.Media.SIZE,
+            MediaStore.Video.Media.DATE_MODIFIED,
             MediaStore.Video.Media.DATE_ADDED,
             MediaStore.Video.Media.MIME_TYPE,
             MediaStore.Video.Media.DATA,
@@ -612,6 +626,7 @@ class LocalMediaSource(
             val nameCol = cursor.getColumnIndex(MediaStore.Video.Media.DISPLAY_NAME)
             val durationCol = cursor.getColumnIndex(MediaStore.Video.Media.DURATION)
             val sizeCol = cursor.getColumnIndex(MediaStore.Video.Media.SIZE)
+            val modifiedCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED)
             val addedCol = cursor.getColumnIndex(MediaStore.Video.Media.DATE_ADDED)
             val mimeCol = cursor.getColumnIndex(MediaStore.Video.Media.MIME_TYPE)
             val dataCol = cursor.getColumnIndex(MediaStore.Video.Media.DATA)
@@ -635,6 +650,7 @@ class LocalMediaSource(
                     mimeType = (if (mimeCol >= 0) cursor.getString(mimeCol) else null) ?: "video/mp4",
                     durationMs = if (durationCol >= 0) cursor.getLong(durationCol) else 0L,
                     sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
+                    lastModifiedSec = if (modifiedCol >= 0) cursor.getLong(modifiedCol) else 0L,
                     addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
                     // 封面不在这里生成：游标里逐项抽帧是**串行**的，几百部片子会把首扫
                     // 拖到分钟级。统一交给扫描末尾的 attachCovers 并发补齐（见该方法）。
@@ -678,6 +694,7 @@ class LocalMediaSource(
             MediaStore.Audio.Media.DISPLAY_NAME,
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.SIZE,
+            MediaStore.Audio.Media.DATE_MODIFIED,
             MediaStore.Audio.Media.DATE_ADDED,
             MediaStore.Audio.Media.MIME_TYPE,
             MediaStore.Audio.Media.DATA,
@@ -706,6 +723,7 @@ class LocalMediaSource(
             val nameCol = cursor.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME)
             val durationCol = cursor.getColumnIndex(MediaStore.Audio.Media.DURATION)
             val sizeCol = cursor.getColumnIndex(MediaStore.Audio.Media.SIZE)
+            val modifiedCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_MODIFIED)
             val addedCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
             val mimeCol = cursor.getColumnIndex(MediaStore.Audio.Media.MIME_TYPE)
             val dataCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
@@ -734,6 +752,7 @@ class LocalMediaSource(
                     mimeType = (if (mimeCol >= 0) cursor.getString(mimeCol) else null) ?: "audio/mpeg",
                     durationMs = if (durationCol >= 0) cursor.getLong(durationCol) else 0L,
                     sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
+                    lastModifiedSec = if (modifiedCol >= 0) cursor.getLong(modifiedCol) else 0L,
                     addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
                     coverUri = audioCoverUri(if (albumCol >= 0) cursor.getLong(albumCol) else 0L),
                     folder = folderOf(
@@ -855,6 +874,8 @@ class LocalMediaSource(
                                 uri = docUri.toString(),
                                 mimeType = effectiveMime,
                                 sizeBytes = size,
+                                // SAF 的 LAST_MODIFIED 是毫秒；断点指纹统一按秒（与 MediaStore 同单位）
+                                lastModifiedSec = if (lmCol >= 0) cursor.getLong(lmCol) / 1000 else 0L,
                                 addedAtMs = if (lmCol >= 0) cursor.getLong(lmCol) else 0L,
                                 // 同 queryScope：封面统一由 attachCovers 并发补齐
                                 coverUri = null,
@@ -1171,6 +1192,9 @@ private const val ALBUM_ART_URI = "content://media/external/audio/albumart"
 /** E67：scan() 命中并发守卫时的最长等待时长与轮询间隔 */
 private const val SCAN_WAIT_TIMEOUT_MS = 10_000L
 private const val SCAN_WAIT_POLL_MS = 100L
+
+/** A5/P2-2：回前台补扫的最小间隔——比它更短的往返不值得再跑一次全量 MediaStore 查询 */
+private const val MIN_RESCAN_INTERVAL_MS = 30_000L
 
 /**
  * 用户授权目录（SAF tree）解析出的扫描范围（E24）。

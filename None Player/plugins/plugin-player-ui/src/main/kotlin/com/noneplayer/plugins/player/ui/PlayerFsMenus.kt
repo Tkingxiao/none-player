@@ -1,6 +1,10 @@
 package com.noneplayer.plugins.player.ui
 
 import androidx.compose.animation.core.animateFloatAsState
+import com.noneplayer.core.ui.NpMono
+import com.noneplayer.core.ui.NpSpace
+import com.noneplayer.core.ui.NpRadius
+import com.noneplayer.core.ui.npClickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -582,15 +586,55 @@ fun FsMainMenuContent(
     )
 }
 
-/** 倍速页：纵向档位列表（替代横向选择条） */
+/** 微调步进钮（L14）：与档位行分开——它改的是当前值的 ±0.05，不是跳档 */
+@Composable
+private fun FsMenuStepButton(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(44.dp)
+            .clip(RoundedCornerShape(NpRadius.button))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .npClickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = label,
+            style = NpMono,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+    }
+}
+
+/** 倍速页：纵向档位列表（替代横向选择条）+ 0.05 微调行（L14） */
 @Composable
 fun FsSpeedMenuContent(
     speed: Float,
     onPick: (Float) -> Unit,
+    onNudge: (Float) -> Unit,
     onBack: () -> Unit,
 ) {
     FsMenuBackRow(title = "播放倍速", onBack = onBack)
-    SPEED_PRESETS.forEach { preset ->
+    // 微调行（L14）：档位表覆盖不到「就要 1.1x」这类手感；两步 = ±0.05，长按不加速
+    // （长按加速与 §4.3 的长按 3× boost 语义冲突，这里不做第二套）。
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = NpSpace.sm),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(NpSpace.sm),
+    ) {
+        FsMenuStepButton(label = "-0.05", onClick = { onNudge(-SPEED_FINE_STEP) })
+        Text(
+            text = speedLabel(speed),
+            style = NpMono,
+            color = if (kotlin.math.abs(speed - 1f) < 0.001f) {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            } else {
+                MaterialTheme.colorScheme.primary
+            },
+            modifier = Modifier.weight(1f),
+        )
+        FsMenuStepButton(label = "+0.05", onClick = { onNudge(SPEED_FINE_STEP) })
+    }
+    SPEED_PRESETS_ALL.forEach { preset ->
         val on = kotlin.math.abs(preset - speed) < 0.001f
         FsMenuRow(
             label = speedLabel(preset),

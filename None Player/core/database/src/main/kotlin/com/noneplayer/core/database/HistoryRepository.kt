@@ -2,8 +2,15 @@ package com.noneplayer.core.database
 
 import android.content.Context
 import com.noneplayer.core.media.MediaItem
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.withContext
 
 /**
  * 播放历史 + 收藏的统一读写口（§8.3）。
@@ -21,8 +28,30 @@ class HistoryRepository(context: Context) {
 
     private val dao: HistoryDao by lazy { NonePlayerDatabase.build(context.applicationContext).historyDao() }
 
-    /** 时间倒序的全部历史 */
-    val recent: Flow<List<HistoryEntry>> = dao.recent().map { rows -> rows.map { it.toEntry() } }
+    /**
+     * 共享作用域（A5/P1-6）：本仓库是进程级单例，作用域与它同寿、不取消。
+     *
+     * 存在的理由是 `stateIn` ——见下面 [recent]/[favoriteKeysFlow] 的说明。
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /**
+     * 时间倒序的全部历史。
+     *
+     * **`by lazy` 而不是急切属性**（P1-4）：急切写 `dao.recent()` 会在构造本仓库时
+     * 就把 `Room.databaseBuilder().build()` 跑到——而构造发生在 `Kernel.boot()` 的
+     * **主线程同步段**（E107 要求核心服务同步注册）。现在建库/首查由 [prime] 在
+     * 启动画面期间的 IO 协程里做。
+     *
+     * **`stateIn` 而不是把 DAO 流直接暴露**（P1-6）：库页与「我的」页各订一份时，
+     * 一次写入会回灌两条全表查询。共享后 N 个收集者共用一条查询，
+     * 无人收集 5s 后自动停订。
+     */
+    val recent: Flow<List<HistoryEntry>> by lazy {
+        dao.recent()
+            .map { rows -> rows.map { it.toEntry() } }
+            .stateIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
+    }
 
     /**
      * 历史条数——设置页「清除播放缓存」的计数与按钮文案。
@@ -31,17 +60,48 @@ class HistoryRepository(context: Context) {
      * 曾经这里另有一条 `continueWatching` 查询用 0.95 阈值，与 UI 的 0.99 各说各话
      * （且从未被消费）。同一份语义保留一处实现，避免调阈值时只改一边。
      */
-    val count: Flow<Int> = dao.count()
+    val count: Flow<Int> by lazy { dao.count() }
+
+    /** 收藏键的**唯一一条** DAO 订阅（P1-6）：下面两个视图都从它派生 */
+    private val favoriteKeysFlow: Flow<List<String>> by lazy {
+        dao.favoriteKeys().stateIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
+    }
 
     /** 收藏键集合（卡片红心 / 菜单文案 / 我的页联动都读它） */
-    val favoriteKeys: Flow<Set<String>> = dao.favoriteKeys().map { it.toSet() }
+    val favoriteKeys: Flow<Set<String>> by lazy { favoriteKeysFlow.map { it.toSet() } }
 
     /** 收藏键（按收藏时间倒序）——聚合列表与我的页横排的排序依据 */
-    val favorites: Flow<List<String>> = dao.favoriteKeys()
+    val favorites: Flow<List<String>> by lazy { favoriteKeysFlow }
 
     fun isFavorite(mediaKey: String): Flow<Boolean> = dao.isFavorite(mediaKey)
 
-    /** 断点读取（装载链恢复用；无记录返回 null） */
+    /**
+     * 预热（P1-4）：把"建库 + 第一次开库查询"放到启动画面期间的 IO 协程里做完，
+     * 不留给 UI 首帧的收集动作。失败不抛——首帧收集时还会再试一次。
+     */
+    suspend fun prime() {
+        withContext(Dispatchers.IO) {
+            runCatching { dao.count().first() }
+        }
+    }
+
+    /**
+     * 断点读取（装载链恢复用）。
+     *
+     * A1-3：**先比对文件指纹再交位置**——库里那行记录的 size/mtime 与当前条目对不上，
+     * 说明文件被替换或重录过，此时旧位置可能落在另一部片子的中间，
+     * **静默从头播**（不弹提示：用户关心的是"接着看"，而不是"为什么没接着"）。
+     * 任一指纹有一侧为 0（未知/旧行）时该轴不参与比对，所以升级不会清掉老用户的续播。
+     */
+    suspend fun positionOfIfIntact(item: MediaItem): Long? {
+        val row = dao.breakpointOf(HistoryEntry.keyOf(item)) ?: return null
+        if (!breakpointIntact(row.sizeBytes, row.lastModifiedSec, item.sizeBytes, item.lastModifiedSec)) {
+            return null
+        }
+        return row.positionMs
+    }
+
+    /** 断点读取（无指纹校验）：仅供展示与迁移用，恢复链一律走 [positionOfIfIntact] */
     suspend fun positionOf(mediaKey: String): Long? = dao.positionOf(mediaKey)
 
     /**
@@ -72,6 +132,8 @@ class HistoryRepository(context: Context) {
                 lastPlayedAt = System.currentTimeMillis(),
                 width = item.width,
                 height = item.height,
+                sizeBytes = item.sizeBytes,
+                lastModifiedSec = item.lastModifiedSec,
             ),
             countPlay = countPlay,
         )
@@ -102,6 +164,8 @@ class HistoryRepository(context: Context) {
                 lastPlayedAt = now,
                 width = item.width,
                 height = item.height,
+                sizeBytes = item.sizeBytes,
+                lastModifiedSec = item.lastModifiedSec,
             ),
             now = now,
         )
@@ -179,6 +243,8 @@ class HistoryRepository(context: Context) {
                     lastPlayedAt = lastPlayedAt[item.id] ?: 0L,
                     width = item.width,
                     height = item.height,
+                    sizeBytes = item.sizeBytes,
+                    lastModifiedSec = item.lastModifiedSec,
                 ),
             )
             migrated++
@@ -228,7 +294,32 @@ class HistoryRepository(context: Context) {
         fun orphanKeys(existing: Collection<String>, valid: Set<String>): List<String> =
             existing.filterNot { it in valid }
 
+        /**
+         * 纯函数（可单测）：断点是否还落在**同一个文件**上（A1-3）。
+         *
+         * 两路指纹（大小 / 修改时间）各自独立判定：**有一侧是 0 就当这条轴没法比**，
+         * 只有"两侧都有值且不相等"才判失效。理由——
+         * ① v1 老行两列都是默认 0（升级不能顺手把老用户的续播清了）；
+         * ② 某些来源拿不到 mtime 或 size（SAF 部分文档、云盘），拿不到就不该否决；
+         * ③ 只有两轴都不可比时整体视为"可信"，等价于修复前的行为。
+         */
+        fun breakpointIntact(
+            storedSizeBytes: Long,
+            storedModifiedSec: Long,
+            sizeBytes: Long,
+            modifiedSec: Long,
+        ): Boolean {
+            val sizeComparable = storedSizeBytes > 0L && sizeBytes > 0L
+            val timeComparable = storedModifiedSec > 0L && modifiedSec > 0L
+            if (sizeComparable && storedSizeBytes != sizeBytes) return false
+            if (timeComparable && storedModifiedSec != modifiedSec) return false
+            return true
+        }
+
         /** `IN (:keys)` 的单批键数上限：SQLite 变量数限制（约 999）留足余量 */
         private const val DELETE_CHUNK = 400
+
+        /** 共享流在**最后一个收集者离开后**继续供值的时长（P1-6）：够跨过页面切换的空窗 */
+        private const val STOP_TIMEOUT_MS = 5_000L
     }
 }

@@ -19,6 +19,13 @@ data class MediaItem(
     val durationMs: Long = 0,
     /** 文件大小（字节），未知为 0 */
     val sizeBytes: Long = 0,
+    /**
+     * 文件最后修改时间（epoch **秒**，与 MediaStore `DATE_MODIFIED` 同单位），未知为 0。
+     *
+     * A1-3：断点失效校验的第二路指纹（`sizeBytes` 是第一路）。文件被替换/重录后
+     * 沿用旧断点，比"从头播"更糟——位置可能落在另一部片子的中间。
+     */
+    val lastModifiedSec: Long = 0,
     /** 加入媒体库的时间戳（epoch 毫秒） */
     val addedAtMs: Long = 0,
     /** 封面缩略图地址（本地缓存文件路径或 URL），可能为空 */

@@ -11,7 +11,7 @@ import androidx.compose.ui.platform.LocalView
 /**
  * None Player 触觉体系——语义到平台常量的唯一映射表。
  *
- * 规格《界面设计路线.md》§7.5 要的是**语义**（`Tap`/`Reject`），不是常量。
+ * 规格《设计文档.md》§7.5 要的是**语义**（`Tap`/`Reject`），不是常量。
  * 组件只说"这是一次拒绝"，由这里决定它落在哪个 `HapticFeedbackConstants` 上、
  * 以及老系统上有没有对应的震动效果。
  *

@@ -19,6 +19,25 @@ import kotlinx.coroutines.flow.map
  * 表现为相关界面彻底无法渲染。改为"损坏即重置为空偏好"，让应用能继续启动
  * （代价是损坏当次会丢失用户偏好，但远好于直接崩溃不可用）。
  */
+/**
+ * 当前唯一媒体来源的 id（A2-8）。
+ *
+ * per-media 记忆键是 `sourceId:mediaId`，而深链契约与路由条目常常没有 sourceId——
+ * 补前缀时必须有**一个**地方说清"默认算哪个来源"。这里就是那一个地方：
+ * 本地扫描器（`LocalMediaSource.sourceId`）、DataStore 旧键搬迁、读取侧的键推导
+ * 三处都引用它，不再各写一份字面量。
+ */
+const val LOCAL_MEDIA_SOURCE_ID = "local"
+
+/**
+ * 双击步长的默认值与档位（L14 自定义双击步长）。
+ *
+ * 文件级公开：`AppSettings` 的 companion 是 private（键不外泄），
+ * 而这两样是**跨模块契约**（设置页要列档位、播放页要取默认值）。
+ */
+const val DEFAULT_DOUBLE_TAP_STEP_MS = 10_000L
+val DOUBLE_TAP_STEP_OPTIONS_MS = listOf(5_000L, 10_000L, 15_000L, 30_000L)
+
 private val Context.dataStore: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> by preferencesDataStore(
     name = "none_player_settings",
     corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
@@ -59,20 +78,36 @@ class AppSettings(private val context: Context) {
         val KEY_KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         val KEY_GESTURES_ENABLED = booleanPreferencesKey("playback_gestures")
 
-        // E73（跟踪中，未在本批次改 key 格式）：playback_pos_<mediaId> / subtitle_<mediaId>
-        // 未按 sourceId 分命名空间。当前唯一数据源是本地扫描（LocalMediaSource 产出的
-        // id 形如 "ms-123"），风险是潜在的——一旦新增网络/其他 MediaSourceProvider 且
-        // id 格式重叠才会触发。此处暂不改 key 格式：那样做会让现有用户的断点续播/
-        // 字幕记忆在升级后直接读不到旧 key（静默丢数据），代价比潜在风险本身更大。
-        // 按《功能审核文档.md》§14.6 的建议，命名空间方案与 §8.3 的 :core:database
-        // 迁移一起定稿（彼时本就要做一次性数据搬迁，可以把前缀加好）。
-        fun subtitleKey(mediaId: String) = stringPreferencesKey("subtitle_$mediaId")
+        /**
+         * 播放页禁止截屏/录屏（FLAG_SECURE，C18）。
+         *
+         * A1-6：此前是播放页组合内的 `rememberSaveable`——每次进页都回到"允许"，
+         * 用户为隐私打开的开关在一次退页后被静默清掉。隐私类开关的语义是偏好，
+         * 不是本次播放的临时状态，故收进设置持久化（生效范围仍是播放页窗口）。
+         */
+        val KEY_SCREENSHOT_BLOCKED = booleanPreferencesKey("screenshot_blocked")
+
+        /** 双击画面左右侧的快进/快退步长（L14 自定义双击步长，毫秒） */
+        val KEY_DOUBLE_TAP_STEP_MS = longPreferencesKey("double_tap_step_ms")
+
+        /** 均衡器开关与各段归一增益（A2-11） */
+        val KEY_EQ_ENABLED = booleanPreferencesKey("eq_enabled")
+        // 各段归一增益编码成 "0.4,0.2,0,-0.1,-0.3" 字符串——preferences 没有列表键，
+        // 与画面记忆 `display_*` 同一手法（见 [displayKey]）
+        val KEY_EQ_LEVELS = stringPreferencesKey("eq_levels")
+
+        // E73 / A2-8（已落地）：per-media 键按 `sourceId:mediaId` 分命名空间——
+        // subtitle_ / display_ / audio_only_ 三族的键值现在都是 `<前缀><sourceId>:<id>`，
+        // 与 Room 的 media_key 同一条约定；旧格式由 migratePerMediaKeyNamespaceOnce()
+        // 一次性重排（按当前唯一来源 "local" 补前缀），同时清掉归属不明的空后缀孤儿键。
+        // 断点族（playback_pos_ / playback_at_）已在 E11 搬进 Room，不在此列。
+        fun subtitleKey(mediaKey: String) = stringPreferencesKey("subtitle_$mediaKey")
 
         /** 画面显示记忆（批次 3）："<比例模式>|<镜像0/1>|<旋转0/180>"，整体读写 */
-        fun displayKey(mediaId: String) = stringPreferencesKey("display_$mediaId")
+        fun displayKey(mediaKey: String) = stringPreferencesKey("display_$mediaKey")
 
         /** 仅听音频记忆（§5.1）：下次进同一文件直接进入音频形态 */
-        fun audioOnlyKey(mediaId: String) = booleanPreferencesKey("audio_only_$mediaId")
+        fun audioOnlyKey(mediaKey: String) = booleanPreferencesKey("audio_only_$mediaKey")
 
         /** 手动选择的弹幕文件（批次 6）：按视频 uri 记忆，渲染层优先于同名自动匹配 */
         fun danmakuManualKey(videoUri: String) = stringPreferencesKey("danmaku_manual_$videoUri")
@@ -82,6 +117,22 @@ class AppSettings(private val context: Context) {
 
         /** §8.3：历史迁移完成标记（E11：迁移后 DataStore 只留设置项） */
         val KEY_HISTORY_MIGRATED = booleanPreferencesKey("history_migrated")
+
+        /** A2-8：per-media 键已按 `sourceId:mediaId` 重排的一次性标记 */
+        val KEY_PER_MEDIA_KEY_MIGRATED = booleanPreferencesKey("per_media_key_migrated")
+
+        /** 旧键重排时补的命名空间前缀（唯一真相见文件级 [LOCAL_MEDIA_SOURCE_ID]） */
+        private const val LEGACY_SOURCE_ID = LOCAL_MEDIA_SOURCE_ID
+
+        /**
+         * A2-8 要重排的三族 per-media 键前缀。
+         *
+         * 为什么现在动：`id` 只在**来源内**唯一。今天只有本地一个来源所以没爆，
+         * 但接进网盘/DLNA 之后 `ms-68` 会跨源串记忆——同一把钥匙开别人的锁。
+         * Room 侧从第一天就是 `media_key = "<sourceId>:<mediaId>"`（E73 口径），
+         * DataStore 侧补齐后两处的约定才是一句话。
+         */
+        val PER_MEDIA_PREFIXES = listOf("subtitle_", "display_", "audio_only_")
 
         /** 最近搜索最多保留 5 条（设计稿 searchView 的 chips 一行放得下） */
         const val MAX_SEARCH_HISTORY = 5
@@ -222,6 +273,50 @@ class AppSettings(private val context: Context) {
         context.dataStore.edit { it[KEY_KEEP_SCREEN_ON] = enabled }
     }
 
+    /**
+     * 双击步长（L14）：默认 10s = 批次 2 的既有手感，改档只影响**双击**，
+     * 不动横滑 seek 与键盘 `←/→`（那是 §8.4 的固定 ±5s / ±30s 语义）。
+     */
+    val doubleTapStepMs: Flow<Long> = context.dataStore.data
+        .map { it[KEY_DOUBLE_TAP_STEP_MS] ?: DEFAULT_DOUBLE_TAP_STEP_MS }
+
+    suspend fun setDoubleTapStepMs(stepMs: Long) {
+        context.dataStore.edit { it[KEY_DOUBLE_TAP_STEP_MS] = stepMs.coerceIn(1_000L, 60_000L) }
+    }
+
+    // ---- 均衡器（A2-11）----
+    //
+    // 存的是**归一增益**（-1f..1f / 段），不是 mB 绝对值：真实量程各机型不同，
+    // 由引擎侧映射（见 `VideoPlayer.setEqualizerLevels`）。段数变化（换设备）时
+    // 多出来的段按 0f 平、少掉的段忽略，不做迁移。
+
+    val eqEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_EQ_ENABLED] ?: false }
+
+    suspend fun setEqEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[KEY_EQ_ENABLED] = enabled }
+    }
+
+    val eqLevels: Flow<List<Float>> = context.dataStore.data
+        .map { raw ->
+            raw[KEY_EQ_LEVELS]
+                ?.split(',')
+                ?.mapNotNull { it.toFloatOrNull() }
+                ?: emptyList()
+        }
+
+    suspend fun setEqLevels(levels: List<Float>) {
+        context.dataStore.edit { it[KEY_EQ_LEVELS] = levels.joinToString(",") }
+    }
+
+    /** 播放页禁止截屏/录屏（默认关 = 允许，与 C18 现状一致） */
+    val screenshotBlocked: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SCREENSHOT_BLOCKED] ?: false }
+
+    suspend fun setScreenshotBlocked(blocked: Boolean) {
+        context.dataStore.edit { it[KEY_SCREENSHOT_BLOCKED] = blocked }
+    }
+
     /** 启用音量/亮度滑动手势 */
     val gesturesEnabled: Flow<Boolean> = context.dataStore.data
         .map { it[KEY_GESTURES_ENABLED] ?: true }
@@ -298,6 +393,50 @@ class AppSettings(private val context: Context) {
         context.dataStore.edit { it[KEY_HISTORY_MIGRATED] = value }
     }
 
+    /**
+     * A2-8 一次性搬迁：给 per-media 键加 `sourceId:` 命名空间，并清掉空后缀孤儿键。
+     *
+     * 整段在**一次 edit 事务**里完成——中途不会出现"旧键已删、新键未写"的窗口；
+     * 置位后幂等短路。旧键一律按 [LEGACY_SOURCE_ID]（当前唯一来源"local"）补前缀，
+     * 与读取侧 `mediaMemoryKey` 在 sourceId 缺失时的同一推断对齐。
+     *
+     * 空后缀孤儿（`audio_only_` / `display_` / `subtitle_`）来自"深链没带 id"的历史
+     * 路径（E109 实测：那条脏值会把冷进误判成仅听音频态，还会被写回真键扩散）——
+     * 归属不明的键没有可信语义，删除比留着更安全。
+     */
+    suspend fun migratePerMediaKeyNamespaceOnce() {
+        context.dataStore.edit { prefs ->
+            if (prefs[KEY_PER_MEDIA_KEY_MIGRATED] == true) return@edit
+            val renames = mutableListOf<Pair<String, Any>>()
+            val drops = mutableListOf<androidx.datastore.preferences.core.Preferences.Key<*>>()
+            val legacyPrefix = "$LEGACY_SOURCE_ID:"
+            prefs.asMap().forEach { (key, value) ->
+                val name = key.name
+                val fam = PER_MEDIA_PREFIXES.firstOrNull { name.startsWith(it) } ?: return@forEach
+                val tail = name.removePrefix(fam)
+                when {
+                    tail.isEmpty() -> drops += key
+                    tail.startsWith(legacyPrefix) -> Unit
+                    else -> {
+                        renames += "$fam$legacyPrefix$tail" to value
+                        drops += key
+                    }
+                }
+            }
+            renames.forEach { (newName, value) ->
+                when (value) {
+                    is String -> prefs[stringPreferencesKey(newName)] = value
+                    is Boolean -> prefs[booleanPreferencesKey(newName)] = value
+                    is Int -> prefs[intPreferencesKey(newName)] = value
+                    is Long -> prefs[longPreferencesKey(newName)] = value
+                    else -> drops += stringPreferencesKey(newName)
+                }
+            }
+            drops.forEach { prefs.remove(it) }
+            prefs[KEY_PER_MEDIA_KEY_MIGRATED] = true
+        }
+    }
+
     /** 清除全部播放记忆（断点续播进度 + 最近播放时间），用于设置页「清除播放缓存」。 */
     suspend fun clearPlaybackMemory() {
         context.dataStore.edit { prefs ->
@@ -316,31 +455,31 @@ class AppSettings(private val context: Context) {
     }
 
     /** 某媒体挂载的外挂字幕地址（跨会话记忆），未挂载为 null */
-    fun subtitleUri(mediaId: String): Flow<String?> = context.dataStore.data
-        .map { it[subtitleKey(mediaId)] }
+    fun subtitleUri(mediaKey: String): Flow<String?> = context.dataStore.data
+        .map { it[subtitleKey(mediaKey)] }
 
-    suspend fun setSubtitleUri(mediaId: String, uri: String?) {
+    suspend fun setSubtitleUri(mediaKey: String, uri: String?) {
         context.dataStore.edit { prefs ->
-            if (uri == null) prefs.remove(subtitleKey(mediaId)) else prefs[subtitleKey(mediaId)] = uri
+            if (uri == null) prefs.remove(subtitleKey(mediaKey)) else prefs[subtitleKey(mediaKey)] = uri
         }
     }
 
     /** 某媒体的画面显示记忆（比例|镜像|旋转），未设置过为 null */
-    fun displaySettings(mediaId: String): Flow<String?> = context.dataStore.data
-        .map { it[displayKey(mediaId)] }
+    fun displaySettings(mediaKey: String): Flow<String?> = context.dataStore.data
+        .map { it[displayKey(mediaKey)] }
 
-    suspend fun setDisplaySettings(mediaId: String, value: String?) {
+    suspend fun setDisplaySettings(mediaKey: String, value: String?) {
         context.dataStore.edit { prefs ->
-            if (value == null) prefs.remove(displayKey(mediaId)) else prefs[displayKey(mediaId)] = value
+            if (value == null) prefs.remove(displayKey(mediaKey)) else prefs[displayKey(mediaKey)] = value
         }
     }
 
     /** 某媒体的仅听音频记忆（§5.1），默认 false */
-    fun audioOnlyPreferred(mediaId: String): Flow<Boolean> = context.dataStore.data
-        .map { it[audioOnlyKey(mediaId)] ?: false }
+    fun audioOnlyPreferred(mediaKey: String): Flow<Boolean> = context.dataStore.data
+        .map { it[audioOnlyKey(mediaKey)] ?: false }
 
-    suspend fun setAudioOnlyPreferred(mediaId: String, value: Boolean) {
-        context.dataStore.edit { it[audioOnlyKey(mediaId)] = value }
+    suspend fun setAudioOnlyPreferred(mediaKey: String, value: Boolean) {
+        context.dataStore.edit { it[audioOnlyKey(mediaKey)] = value }
     }
 
     // ---- 弹幕（批次 6，plugin-danmaku）----

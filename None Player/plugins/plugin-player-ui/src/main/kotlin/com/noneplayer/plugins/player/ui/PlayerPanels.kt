@@ -34,6 +34,10 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import com.noneplayer.core.ui.NpMonoSmall
+import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.NpChip
+import com.noneplayer.core.ui.NpSpace
+import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.kernel.api.NpChapter
@@ -318,6 +322,131 @@ fun ChaptersPanel(
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+
+/** 均衡器预设（A2-11）：只定义**形状**，段数由设备能力决定 */
+enum class EqPreset { FLAT, BASS, VOCAL, TREBLE }
+
+/**
+ * 预设的第 [index] 段归一增益。`t` = 段序在整条谱上的位置（0 = 最低频段）。
+ *
+ * 用形状函数而不是写死数组：设备报 3 段、5 段、8 段都要能画出同一种"味道"，
+ * 写死五档数组在别的段数上只能截断或补零，预设就变形了。
+ */
+internal fun eqPresetLevel(preset: EqPreset, index: Int, bands: Int): Float {
+    if (bands <= 0) return 0f
+    val t = if (bands == 1) 0.5f else index.toFloat() / (bands - 1)
+    return when (preset) {
+        EqPreset.FLAT -> 0f
+        EqPreset.BASS -> 0.8f * (1f - t) - 0.15f * t
+        EqPreset.VOCAL -> 0.7f * (1f - (2f * t - 0.8f) * (2f * t - 0.8f)).coerceAtLeast(0f) - 0.2f
+        EqPreset.TREBLE -> 0.8f * t - 0.15f * (1f - t)
+    }.coerceIn(-1f, 1f)
+}
+
+/**
+ * 均衡器面板（A2-11 / 设计文档 §15.4）：总开关 + 每段滑杆 + 预设。
+ *
+ * 三条来自引擎现实的约束：
+ * ① **段数与量程不写死**——framework `Equalizer` 各机型不同（5 段 ±1500 只是常见的
+ *    一档），能力由服务侧实测经 `SessionExtras` 回传；拿不到能力时如实说"没有"，
+ *    不画一排拨了没反应的滑杆（同「睡眠定时」那格的立场）。
+ * ② 滑杆是**归一值 -1..1**，映射到 mB 在引擎侧做（客户端不知道量程）。
+ * ③ 预设按形状函数生成，段数变了味道不变。
+ */
+@Composable
+fun EqualizerPanel(
+    capabilities: com.noneplayer.kernel.api.EqualizerCapabilities?,
+    enabled: Boolean,
+    levels: List<Float>,
+    onEnabled: (Boolean) -> Unit,
+    onLevels: (List<Float>) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ink = LocalNpInk.current
+    val bands = capabilities?.bands ?: 0
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = NpSpace.sm),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(NpSpace.md),
+        ) {
+            Text(
+                text = if (capabilities == null) "正在读取设备能力…" else "启用均衡器",
+                style = NpTypography.bodyMedium,
+                color = ink.fg,
+                modifier = Modifier.weight(1f),
+            )
+            Switch(checked = enabled && capabilities != null, onCheckedChange = onEnabled)
+        }
+        if (capabilities == null) {
+            Text(
+                text = "本引擎未回传均衡器能力（设备无系统均衡器时即为此态）。",
+                style = NpTypography.bodySmall,
+                color = ink.muted,
+                modifier = Modifier.padding(top = NpSpace.xs),
+            )
+            return@Column
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = NpSpace.sm),
+            horizontalArrangement = Arrangement.spacedBy(NpSpace.sm),
+        ) {
+            EqPreset.entries.forEach { preset ->
+                NpChip(
+                    text = when (preset) {
+                        EqPreset.FLAT -> "平坦"
+                        EqPreset.BASS -> "低音"
+                        EqPreset.VOCAL -> "人声"
+                        EqPreset.TREBLE -> "明亮"
+                    },
+                    selected = false,
+                    onClick = {
+                        onLevels((0 until bands).map { eqPresetLevel(preset, it, bands) })
+                    },
+                )
+            }
+        }
+        Text(
+            text = "${capabilities.bands} 段 · 量程 ${capabilities.minLevelMb}…${capabilities.maxLevelMb} mB（设备实测）",
+            style = com.noneplayer.core.ui.NpMonoSmall,
+            color = ink.muted,
+            modifier = Modifier.padding(bottom = NpSpace.sm),
+        )
+        repeat(bands) { index ->
+            val value = levels.getOrElse(index) { 0f }.coerceIn(-1f, 1f)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(NpSpace.sm),
+            ) {
+                Text(
+                    text = "段 ${index + 1}",
+                    style = com.noneplayer.core.ui.NpMonoSmall,
+                    color = ink.muted,
+                    modifier = Modifier.width(52.dp),
+                )
+                androidx.compose.material3.Slider(
+                    value = value,
+                    onValueChange = { next ->
+                        onLevels((0 until bands).map { i ->
+                            if (i == index) next else levels.getOrElse(i) { 0f }
+                        })
+                    },
+                    valueRange = -1f..1f,
+                    enabled = enabled,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "%+.2f".format(value),
+                    style = com.noneplayer.core.ui.NpMonoSmall,
+                    color = if (enabled) ink.accent else ink.muted,
+                    modifier = Modifier.width(46.dp),
+                )
             }
         }
     }

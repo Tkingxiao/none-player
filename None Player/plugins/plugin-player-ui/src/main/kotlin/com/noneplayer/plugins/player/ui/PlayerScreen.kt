@@ -143,6 +143,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.data.DEFAULT_DOUBLE_TAP_STEP_MS
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
@@ -220,6 +221,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -229,7 +231,22 @@ import kotlin.math.roundToLong
 import kotlin.math.roundToInt
 
 /** 倍速预设（设计稿 `.speeds` 的档位与顺序：0.5x → 2.0x） */
+/**
+ * 倍速档位（L14 扩展）。
+ *
+ * 分两套是**版式**决定的，不是随意的：横向选择条（竖屏播放页 / 仅听页）一行只放得下
+ * 六档（再多就把进度条挤没），而全屏的纵向下拉菜单能容纳完整档位表。
+ * 两套共用同一份 `speedLabel` 与同一个 `pickSpeed` 落点，不会出现"两处档位不一样"。
+ */
 internal val SPEED_PRESETS = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f)
+
+/** 完整档位表（全屏纵向菜单用）：0.25 起、2x 以上补 2.5/3.0 */
+internal val SPEED_PRESETS_ALL =
+    listOf(0.25f, 0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f)
+
+/** 微调步进与合法区间（L14：0.05 一档；上限 4x 与长按 boost 的 3x 留余量） */
+internal const val SPEED_FINE_STEP = 0.05f
+internal val SPEED_FINE_RANGE = 0.25f..4.0f
 
 /** 拖动预览 seek 的最小间隔：更密会在本地大文件上反复解码，更疏则画面不跟手 */
 private const val SCRUB_PREVIEW_INTERVAL_MS = 200L
@@ -570,7 +587,7 @@ fun PlayerScreen(
             // （不同媒体 / 新会话，那条分支照旧 play）。此前"进页一律 play()"与类 PC
             // 右栏的被动语义正好相反，来回按 F/⛶ 会读成"暂停只在浏览侧有效"。
             autoPlay = fromStart,
-            onSubtitleMatched = { hit -> scope.launch { settings.setSubtitleUri(mediaId, hit) } },
+            onSubtitleMatched = { key, hit -> scope.launch { settings.setSubtitleUri(key, hit) } },
         )
         // 只有真的从断点起播才提示（从头播放/会话本来就在播同一媒体都不会走到这里）
         if (started.resumedFromMs > 0L) resumeNoticeMs = started.resumedFromMs
@@ -608,6 +625,19 @@ fun PlayerScreen(
     // 选集切换或底栏 ⏭ 之后，标题与容器必须立刻换成新一集，
     // 而不是停在进页时那一条（路由 uri 不会因子会话内切集而改变）。
     val currentItem = queue.getOrNull(queueIndex)
+    /**
+     * per-media 记忆的键（A2-8）：`sourceId:mediaId`，与 Room 的 `media_key` 同一约定。
+     *
+     * 优先用会话已落定的权威条目（带真 sourceId）；只有路由 id 时按当前唯一来源补前缀
+     * （与 [AppSettings.migratePerMediaKeyNamespaceOnce] 对旧键的推断一致）。
+     * 两者都拿不到 → 空串，**空键一律不读不写**：E109 实测读空键会命中历史遗留的
+     * 孤儿桶（脏值还会被写回真键扩散）。
+     */
+    val mediaKey = currentItem
+        ?.takeIf { it.uri == uri && it.id.isNotEmpty() }
+        ?.let { mediaMemoryKey(it.sourceId, it.id) }
+        ?: mediaId.takeIf { it.isNotEmpty() }?.let { mediaMemoryKey("", it) }
+            .orEmpty()
     val headerTitle = currentItem?.cardTitle?.takeIf { it.isNotBlank() } ?: displayTitle
     val headerMimeType = currentItem?.mimeType?.takeIf { it.isNotBlank() } ?: mimeType
     // 容器名三级取值（越靠前越可信）：
@@ -841,7 +871,7 @@ fun PlayerScreen(
     var lastPreviewSeekAtMs by remember { mutableLongStateOf(0L) }
     // B2 修复：倍速以会话实际值为准（后台会话保持的倍速在重进后仍正确显示）
     val speed by player.speed.collectAsStateWithLifecycle()
-    val savedSubtitle by settings.subtitleUri(mediaId).collectAsStateWithLifecycle(initialValue = null)
+    val savedSubtitle by settings.subtitleUri(mediaKey).collectAsStateWithLifecycle(initialValue = null)
     val subtitleLoaded = savedSubtitle != null
 
     val subtitlePicker = rememberLauncherForActivityResult(
@@ -858,7 +888,7 @@ fun PlayerScreen(
                 // sourceMissing 只对"记忆里的地址"有意义）
                 player.setSubtitle(prepareSubtitleUri(context, uriResult).uri)
                 // 记忆原始地址：缓存目录可能被清理，恢复时重新转码
-                settings.setSubtitleUri(mediaId, uriResult.toString())
+                settings.setSubtitleUri(mediaKey, uriResult.toString())
             }
             controlsVisible = true
         }
@@ -997,6 +1027,9 @@ fun PlayerScreen(
     val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
     val loopMode by session.loopMode.collectAsStateWithLifecycle()
     var speedPickerVisible by remember { mutableStateOf(false) }
+    // 双击步长（L14）：设置页可改，默认 10s（批次 2 的既有手感）
+    val doubleTapStepMs by settings.doubleTapStepMs
+        .collectAsStateWithLifecycle(initialValue = DEFAULT_DOUBLE_TAP_STEP_MS)
     var subtitleSheetVisible by remember { mutableStateOf(false) }
     var moreSheetVisible by remember { mutableStateOf(false) }
 
@@ -1008,11 +1041,24 @@ fun PlayerScreen(
         speedPickerVisible = false
     }
 
+    /** 0.05 微调（L14）：按 0.05 网格取整，避免连点后漂出 1.0000001 这种值 */
+    fun nudgeSpeed(delta: Float) {
+        val stepped = ((speed + delta) * 20f).roundToInt() / 20f
+        pickSpeed(stepped.coerceIn(SPEED_FINE_RANGE))
+    }
+
     // C18：文件信息卡（标题/大小/分辨率/编码/文件夹/时长 的真实值）
     var fileInfoVisible by remember { mutableStateOf(false) }
     // C18：允许屏幕截图（FLAG_SECURE 取反）。默认关闭 = 允许截图，
-    // 打开"禁止"时窗口不可被截图/录屏（与设计稿 check-row 同一语义）
-    var screenshotBlocked by rememberSaveable { mutableStateOf(false) }
+    // 打开"禁止"时窗口不可被截图/录屏（与设计稿 check-row 同一语义）。
+    // A1-6：值改**持久**（此前是页内 `rememberSaveable`，退页即复原成"允许"——
+    // 隐私开关被静默清掉比"默认允许"更糟）。生效范围不变：仍只挂播放页窗口。
+    val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
+    fun setScreenshotBlocked(blocked: Boolean) {
+        scope.launch { settings.setScreenshotBlocked(blocked) }
+        // toast 报的是**目标值**：状态要等 DataStore 回流才更新，读它会慢一拍说反话
+        toast.show(if (blocked) "已禁止屏幕截图" else "已允许屏幕截图")
+    }
     DisposableEffect(activityWindow, screenshotBlocked) {
         if (screenshotBlocked) {
             activityWindow?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
@@ -1034,9 +1080,24 @@ fun PlayerScreen(
             toast.show(if (now) "已加入收藏" else "已取消收藏")
         }
     }
-    // 长按 2.0x 快进（设计稿 .gest-hint）：进入时记住原速，松手恢复
+    // 长按 3× 快进（设计稿 .gest-hint）：进入时记住原速，松手恢复
     var boostHintVisible by remember { mutableStateOf(false) }
     var boostPreviousSpeed by remember { mutableStateOf(1f) }
+    /** 长按临时提速的倍率（§4.3 手势表：3×） */
+    val boostSpeed = 3f
+    /**
+     * 结束临时提速。
+     *
+     * A1-5：**只在倍速仍是 boost 设进去的那一档时才回滚**。boost 期间用户从倍速面板
+     * 或快捷键改过倍速的话，那份新选择才是他的意图——无条件写回起手时的旧快照，
+     * 等于把他的操作吞掉（此前正是这样：面板刚选的 1.5x 一松手变回 1.0x）。
+     */
+    fun endSpeedBoost(withHaptic: Boolean) {
+        if (!boostHintVisible) return
+        if (speed == boostSpeed) player.setSpeed(boostPreviousSpeed)
+        boostHintVisible = false
+        if (withHaptic) haptics.performHaptic(NpHaptic.Long)
+    }
     // 亮度（window attr 0.01..1 映射为 1..100）/ 音量（AudioManager STREAM_MUSIC）
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager }
     val maxVolume = remember { audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC) }
@@ -1117,11 +1178,15 @@ fun PlayerScreen(
     val seekWave = remember { Animatable(0f) }
     var seekWaveFromRight by remember { mutableStateOf(false) }
 
-    /** 双击分区（§4.3）：左右 1/3 = 快退/快进 10 秒；**中心 = 播放/暂停**。 */
+    /**
+     * 双击分区（§4.3）：左右 1/3 = 快退/快进、**中心 = 播放/暂停**。
+     * 步长可配（L14，设置页「手势 → 双击动作」，默认 10s）；横滑 seek 与键盘
+     * `←/→` 不受它影响——那是 §8.4 钉死的 ±5s / ±30s 语义。
+     */
     fun onStageDoubleTap(zone: StageTapZone) {
         when (zone) {
-            StageTapZone.Back -> seekByGesture(false)
-            StageTapZone.Forward -> seekByGesture(true)
+            StageTapZone.Back -> seekByGesture(false, doubleTapStepMs)
+            StageTapZone.Forward -> seekByGesture(true, doubleTapStepMs)
             StageTapZone.Center -> togglePlay()
         }
         if (zone != StageTapZone.Center && seekWaveOn) {
@@ -1142,10 +1207,7 @@ fun PlayerScreen(
     var seekGestureEdgeTicked by remember { mutableStateOf(false) }
     fun onSeekGestureStart() {
         // 与长按 3x 的竞争收口：拖动一开始就恢复原速——"3x 快进 + seek"叠加没有任何合理语义
-        if (boostHintVisible) {
-            player.setSpeed(boostPreviousSpeed)
-            boostHintVisible = false
-        }
+        endSpeedBoost(withHaptic = false)
         controlsVisible = true
         seekGestureTargetMs = positionState.value.toFloat()
         seekGestureEdgeTicked = false
@@ -1188,10 +1250,7 @@ fun PlayerScreen(
         }
     }
     fun onVerticalGestureStart(mode: StageVerticalMode) {
-        if (boostHintVisible) {
-            player.setSpeed(boostPreviousSpeed)
-            boostHintVisible = false
-        }
+        endSpeedBoost(withHaptic = false)
         verticalGesture = mode
         verticalEdgeRejected = false
         restartVerticalGestureHold()
@@ -1271,19 +1330,13 @@ fun PlayerScreen(
             onDoubleTap = ::onStageDoubleTap,
             onLongPressStart = {
                 boostPreviousSpeed = speed
-                player.setSpeed(3f)
+                player.setSpeed(boostSpeed)
                 boostHintVisible = true
                 // M9（§7.5 `Long`）：生效与松开各一次——按住那一下只说明"要提速"，
                 // 松手恢复原速同样要回执，否则用户不知道 3x 有没有退掉。
                 haptics.performHaptic(NpHaptic.Long)
             },
-            onLongPressEnd = {
-                if (boostHintVisible) {
-                    player.setSpeed(boostPreviousSpeed)
-                    boostHintVisible = false
-                    haptics.performHaptic(NpHaptic.Long)
-                }
-            },
+            onLongPressEnd = { endSpeedBoost(withHaptic = true) },
             onSeekStart = ::onSeekGestureStart,
             onSeekDelta = ::onSeekGestureDelta,
             onSeekEnd = ::onSeekGestureEnd,
@@ -1308,8 +1361,8 @@ fun PlayerScreen(
     var scaleMode by remember(mediaId) { mutableStateOf(VideoScaleMode.FIT) }
     var mirrored by remember(mediaId) { mutableStateOf(false) }
     var rotation by remember(mediaId) { mutableIntStateOf(0) }
-    LaunchedEffect(mediaId) {
-        val (mode, mirror, rot) = parseDisplaySettings(settings.displaySettings(mediaId).first())
+    LaunchedEffect(mediaKey) {
+        val (mode, mirror, rot) = parseDisplaySettings(settings.displaySettings(mediaKey).first())
         scaleMode = mode
         mirrored = mirror
         rotation = rot
@@ -1322,7 +1375,7 @@ fun PlayerScreen(
         scaleMode = mode
         mirrored = mirror
         rotation = rot
-        scope.launch { settings.setDisplaySettings(mediaId, serializeDisplaySettings(mode, mirror, rot)) }
+        scope.launch { settings.setDisplaySettings(mediaKey, serializeDisplaySettings(mode, mirror, rot)) }
     }
     // 裁剪是引擎侧缩放模式（np.crop 命令）；比例走布局，镜像/旋转走画面 View 变换
     LaunchedEffect(scaleMode) { player.setVideoCrop(scaleMode == VideoScaleMode.CROP) }
@@ -1337,6 +1390,39 @@ fun PlayerScreen(
     // 面板开关
     var audioTrackSheetVisible by remember { mutableStateOf(false) }
     var pictureSheetVisible by remember { mutableStateOf(false) }
+
+    // ---- 均衡器（A2-11 / 设计文档 §15.4：仅听页入口 + 段滑杆 + 预设）----
+    //
+    // 值存**归一增益**（-1..1 / 段），量程映射在引擎侧；能力（段数/量程）由服务侧
+    // 实测经 SessionExtras 回传，UI 打开面板时探测一次。
+    var equalizerSheetVisible by remember { mutableStateOf(false) }
+    val eqEnabled by settings.eqEnabled.collectAsStateWithLifecycle(initialValue = false)
+    val eqSavedLevels by settings.eqLevels.collectAsStateWithLifecycle(initialValue = emptyList())
+    val eqCapabilities by player.equalizerCapabilities.collectAsStateWithLifecycle(initialValue = null)
+
+    fun openEqualizerSheet() {
+        equalizerSheetVisible = true
+        player.probeEqualizer()
+    }
+
+    fun applyEqualizer(levels: List<Float>, enabled: Boolean) {
+        player.setEqualizerLevels(levels)
+        player.setEqualizerEnabled(enabled)
+        scope.launch {
+            settings.setEqLevels(levels)
+            settings.setEqEnabled(enabled)
+        }
+    }
+
+    // 记忆恢复：进程重启后设置里是"开着"，但引擎侧的效果实例是新建的（默认关），
+    // 不补发就会出现"开关显示开着、声音没变"的假状态。
+    LaunchedEffect(eqEnabled, eqSavedLevels) {
+        if (eqEnabled) {
+            player.probeEqualizer()
+            player.setEqualizerLevels(eqSavedLevels)
+            player.setEqualizerEnabled(true)
+        }
+    }
     var chaptersPanelVisible by remember { mutableStateOf(false) }
 
     // 睡眠定时：绝对到期时间（epoch ms），0 = 关。到期暂停播放。
@@ -1449,16 +1535,24 @@ fun PlayerScreen(
         }
     }
 
-    // 仅听音频 per-media 记忆（§5.1）：进同一文件直接进入音频形态
-    val savedAudioOnly by settings.audioOnlyPreferred(mediaId).collectAsStateWithLifecycle(initialValue = false)
-    LaunchedEffect(mediaId, savedAudioOnly) {
+    // 仅听音频 per-media 记忆（§5.1）：进同一文件直接进入音频形态。
+    // 读键与写键同源（A1-1/A1-2/A2-8）：两边都是 [mediaKey]（`sourceId:mediaId`），
+    // 由会话已落定的权威条目算出——路由 id 可能为空或没有来源前缀，两处各算必然漂。
+    //
+    // **空键一律不读**：装载尚未完成时键还为空，此时去读会命中历史遗留的孤儿空键桶
+    // （`audio_only_`，实测值 true）→ 冷进任何文件都被判成音频形态，且那次误判还会被
+    // 写回真正的条目键上，把脏数据扩散出去（模拟器实测）。空桶由一次性搬迁清理。
+    val savedAudioOnly by (
+        if (mediaKey.isEmpty()) flowOf(false) else settings.audioOnlyPreferred(mediaKey)
+        )
+        .collectAsStateWithLifecycle(initialValue = false)
+    LaunchedEffect(mediaKey, savedAudioOnly) {
         if (savedAudioOnly && !session.audioOnly.value) session.setAudioOnly(true)
     }
     fun toggleAudioOnlyWithMemory() {
-        val target = !session.audioOnly.value
-        session.setAudioOnly(target)
-        scope.launch { settings.setAudioOnlyPreferred(mediaId, target) }
-        toast.show(if (target) "已进入仅听音频模式" else "已切回视频播放")
+        // 记忆由会话写（唯一写路径，迷你条与页内两处共用同一条），页面只给反馈
+        session.toggleAudioOnly()
+        toast.show(if (session.audioOnly.value) "已进入仅听音频模式" else "已切回视频播放")
     }
 
     // ================= 形态分派（E48 余项 / §13.4）=================
@@ -1591,6 +1685,7 @@ fun PlayerScreen(
                 speedPickerVisible = speedPickerVisible,
                 onPickSpeed = ::pickSpeed,
                 onOpenEpisodes = { episodePanelVisible = true },
+                onOpenEqualizer = { openEqualizerSheet() },
                 speedText = speedText,
             )
         } else {
@@ -1805,6 +1900,9 @@ fun PlayerScreen(
                             }
                         },
                         onToggleFullscreen = ::toggleFullscreen,
+                        // 横向全屏是"单一全屏形态"，竖屏那条快捷排不在这里——
+                        // 入口必须在这一排里给一个，否则横过来就切不到只听模式
+                        onToggleAudioOnly = { toggleAudioOnlyWithMemory() },
                         // 全屏形态恒处于全屏：按钮恒为「退出全屏」态（类 PC 点它 = 回浏览）
                         fullscreenActive = true,
                         onSpeedAnchor = { speedAnchor = it },
@@ -1863,6 +1961,7 @@ fun PlayerScreen(
                                             dismiss()
                                             pickSpeed(it)
                                         },
+                                        onNudge = ::nudgeSpeed,
                                         onBack = back,
                                     )
 
@@ -1876,7 +1975,7 @@ fun PlayerScreen(
                                         offsetMs = subtitleOffsetMs,
                                         onOff = {
                                             player.setSubtitle(null)
-                                            scope.launch { settings.setSubtitleUri(mediaId, null) }
+                                            scope.launch { settings.setSubtitleUri(mediaKey, null) }
                                             toast.show("字幕：关闭")
                                             dismiss()
                                         },
@@ -2382,7 +2481,7 @@ fun PlayerScreen(
                     selected = !subtitleOn,
                     onClick = {
                         player.setSubtitle(null)
-                        scope.launch { settings.setSubtitleUri(mediaId, null) }
+                        scope.launch { settings.setSubtitleUri(mediaKey, null) }
                         toast.show("字幕：关闭")
                         subtitleSheetVisible = false
                     },
@@ -2532,6 +2631,21 @@ fun PlayerScreen(
                 )
             }
         }
+        if (equalizerSheetVisible) {
+            NpSheet(
+                onDismiss = { equalizerSheetVisible = false },
+                title = "均衡器",
+            ) {
+                EqualizerPanel(
+                    capabilities = eqCapabilities,
+                    enabled = eqEnabled,
+                    levels = eqSavedLevels,
+                    onEnabled = { applyEqualizer(eqSavedLevels, it) },
+                    onLevels = { applyEqualizer(it, eqEnabled) },
+                )
+            }
+        }
+
         if (moreSheetVisible) {
             NpSheet(
                 onDismiss = { moreSheetVisible = false },
@@ -2753,10 +2867,7 @@ fun PlayerScreen(
                         .fillMaxWidth()
                         .padding(top = 12.dp)
                         .clip(RoundedCornerShape(NpRadius.tile))
-                        .clickable {
-                            screenshotBlocked = !screenshotBlocked
-                            toast.show(if (screenshotBlocked) "已禁止屏幕截图" else "已允许屏幕截图")
-                        }
+                        .clickable { setScreenshotBlocked(!screenshotBlocked) }
                         .padding(horizontal = 4.dp, vertical = 14.dp),
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -2769,8 +2880,9 @@ fun PlayerScreen(
                         tint = ink0.muted,
                         modifier = Modifier.size(18.dp),
                     )
-                    // L17：这个开关是**会话级**（`rememberSaveable`，退页即复原成"允许"），
-                    // 副题如实标注生效范围，避免用户以为它像设置页开关一样持久
+                    // L17 → A1-6 收口：值已改持久（`AppSettings.screenshotBlocked`），
+                    // 生效范围仍是播放页窗口（FLAG_SECURE 挂在本 activity 的窗口上）。
+                    // 副题因此从"仅本次播放有效"改成如实标注持久。
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             text = "允许屏幕截图",
@@ -2778,17 +2890,14 @@ fun PlayerScreen(
                             color = ink0.fg,
                         )
                         Text(
-                            text = "仅本次播放有效",
+                            text = "持久生效 · 限播放页",
                             style = NpTypography.bodySmall,
                             color = ink0.muted,
                         )
                     }
                     NpSwitch(
                         checked = !screenshotBlocked,
-                        onCheckedChange = { allow ->
-                            screenshotBlocked = !allow
-                            toast.show(if (screenshotBlocked) "已禁止屏幕截图" else "已允许屏幕截图")
-                        },
+                        onCheckedChange = { allow -> setScreenshotBlocked(!allow) },
                     )
                 }
             }
@@ -3346,6 +3455,12 @@ private fun PlayerBottomControls(
     onNext: () -> Unit,
     onPickSubtitle: () -> Unit,
     onToggleFullscreen: () -> Unit,
+    /**
+     * 🎧「仅听音频」钮。**只有横向全屏形态传**（竖屏形态的入口在下方信息区的快捷排，
+     * 同一能力不排两处）。此前横屏/平板根本没有入口——单一全屏形态里迷你条不在，
+     * 用户横过来就再也切不到只听模式（任务文档 A1-1 的入口缺口）。
+     */
+    onToggleAudioOnly: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     /** 内联倍速选择条（竖屏/仅听音频用）；全屏形态改下拉菜单后传 false */
     inlineSpeedRow: Boolean = true,
@@ -3498,6 +3613,13 @@ private fun PlayerBottomControls(
                             style = NpMono,
                             color = idleColor,
                         )
+                        if (onToggleAudioOnly != null) {
+                            BarCtlButton(
+                                icon = NpIcon.Headphones,
+                                contentDescription = "仅听音频",
+                                onClick = onToggleAudioOnly,
+                            )
+                        }
                         BarCtlButton(
                             icon = NpIcon.Expand,
                             contentDescription = "全屏切换",
@@ -3542,7 +3664,12 @@ private fun PlayerBottomControls(
                     size = scrimHeight,
                     fromTop = false,
                     startAlpha = 0.86f,
-                    stops = 0.45f,
+                    // 中段抬到 0.62、过渡位从 0.45 推到 0.68：让"平台"盖住传输键那一行。
+                    // 此前 0.45/0.30× 的曲线把控件落在渐变最弱处——纯白画面上实测
+                    // 底栏局部只有 (189,188,189)、白图标 **1.89:1**（§14 #9 红线 4.5:1），
+                    // 顶栏同一行却有 5.10:1。差在几何：顶栏贴画面上沿、底栏的键在带子中段。
+                    stops = 0.68f,
+                    floorAlpha = 0.62f,
                 )
                 content()
             }
@@ -4476,7 +4603,12 @@ internal suspend fun resolveFolderQueue(
     // 该假条目会一路污染到引擎的起播探测（expectedMime），让音频文件被当成
     // "缺视频轨的视频"拦成失败。改为返回空队列：上游 ensureSessionPlaying 拿到
     // 空队列会让 `session.open` 用路由条目本身走单项队列（mime 是路由带来的真值）。
-    if (mediaId.isEmpty()) return emptyList()
+    //
+    // A1-2 放宽：只有 id 与 uri **都**为空才放弃。只带 uri 的深链（外部应用、
+    // 修复前的通知）下面会按 uri 命中来源里的真条目——于是连播回来了，
+    // 权威 id 也回来了（per-media 记忆不再挤进空键桶，见 `audio_only_` 孤儿键）。
+    // 返回的是来源真条目，不是 E88 那个假 mime 条目，所以那条修复不受影响。
+    if (mediaId.isEmpty() && uri.isEmpty()) return emptyList()
     return withContext(Dispatchers.IO) {
         runCatching {
             val sources = registry.query<MediaSourceProvider>()
@@ -4495,10 +4627,12 @@ internal suspend fun resolveFolderQueue(
                 // 于是这个缺陷很难被发现。uri 是播放真正依赖的东西，它不变。
                 val all = withTimeoutOrNull(SOURCE_WAIT_MS) {
                     source.observeMedia().first { list ->
-                        list.any { it.id == mediaId || it.uri == uri }
+                        list.any {
+                            (mediaId.isNotEmpty() && it.id == mediaId) || it.uri == uri
+                        }
                     }
                 } ?: source.observeMedia().first()
-                val self = all.firstOrNull { it.id == mediaId }
+                val self = all.firstOrNull { mediaId.isNotEmpty() && it.id == mediaId }
                     ?: all.firstOrNull { it.uri == uri }
                     ?: continue
                 val folder = self.folder ?: return@withContext listOf(self)

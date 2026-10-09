@@ -50,6 +50,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import com.noneplayer.kernel.api.EqualizerCapabilities
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -63,6 +65,10 @@ import kotlin.math.abs
  * 播放器实例驻留服务进程侧：UI 销毁不影响播放（后台播放 + 媒体通知）。
  * [awaitReady] 阻塞到会话建立；字幕/倍速/进度记忆都作用于会话侧播放器。
  */
+/** 均衡器探测后的有界重读次数与间隔（A2-11）：`SessionExtras` 没有变化回调，只能拉取 */
+private const val EQ_PROBE_READS = 3
+private const val EQ_PROBE_READ_INTERVAL_MS = 200L
+
 class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private val appContext = context.applicationContext
@@ -206,6 +212,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                         return@addListener
                     }
                     controller = c
+                    // 均衡器能力（A2-11）：连上先读一次会话侧已回传的 extras，
+                    // 之后由 [eqExtrasListener] 跟进变化（探测帧发出后服务侧才写）。
+                    refreshEqCapabilities(c)
                     c.addListener(object : Player.Listener {
                         override fun onPlaybackStateChanged(playbackState: Int) {
                             if (terminalFailure) return
@@ -561,12 +570,16 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         }
     }
 
-    /** 队列项 → media3 MediaItem（标题/封面/字幕/`.cue` 裁剪窗口一并带上） */
+    /** 队列项 → media3 MediaItem（id、标题、封面、字幕与 `.cue` 裁剪窗口一并带上） */
     @OptIn(UnstableApi::class)
     private fun com.noneplayer.core.media.MediaItem.toMediaItem(): MediaItem =
         MediaItem.Builder()
             .setUri(uri)
             .setMimeType(mimeType)
+            // A1-2：把权威 id 烘进 media3 条目——通知/锁屏的点击落点由 PlaybackService
+            // 从当前条目重建深链，此前那里只能取到 uri，回跳后路由 id 为空，
+            // 全部 per-media 记忆（断点/字幕/画面/仅音频）静默退化到空键桶。
+            .setMediaId(id)
             .apply {
                 // `.cue` 分轨（§12.4/G4，批次 8）：窗口圈定后 position 从窗口起点计
                 // （seek/断点都是"轨内"语义）。WAV/FLAC 可 seek，无需 allowUnseekableMedia 特批（G4 ④）
@@ -765,6 +778,67 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun setSubtitleOffsetMs(offsetMs: Long) {
         subtitleOffsetMs = offsetMs
         controller?.let { recomputeCues(it.currentPosition.coerceAtLeast(0)) }
+    }
+
+    /**
+     * 均衡器能力（A2-11）：服务侧建好效果后经 `SessionExtras` 回传，这里翻成契约类型。
+     *
+     * `null` = 不支持**或还没探到**。UI 侧的判据因此是"探测发出后仍为 null 才收起入口"，
+     * 不是一上来就按不支持处理（那会把有 EQ 的设备也误收）。
+     */
+    private val eqCapabilities = MutableStateFlow<EqualizerCapabilities?>(null)
+    override val equalizerCapabilities: Flow<EqualizerCapabilities?> = eqCapabilities.asStateFlow()
+
+    /** 读一次会话侧回传的均衡器能力（controller 就绪时与 extras 变化时各调一次） */
+    private fun refreshEqCapabilities(c: androidx.media3.session.MediaController) {
+        val extras = runCatching { c.sessionExtras }.getOrNull()
+        if (extras == null || extras.getBoolean(EQ_EXTRA_UNSUPPORTED, false)) {
+            eqCapabilities.value = null
+            return
+        }
+        val bands = extras.getInt(EQ_EXTRA_BANDS, 0)
+        val minMb = extras.getInt(EQ_EXTRA_MIN_MB, 0)
+        val maxMb = extras.getInt(EQ_EXTRA_MAX_MB, 0)
+        eqCapabilities.value =
+            if (bands > 0 && maxMb > minMb) EqualizerCapabilities(bands, minMb, maxMb) else null
+    }
+
+    private fun sendEqCommand(levels: FloatArray?, enabled: Boolean?, probe: Boolean) {
+        controller?.sendCustomCommand(
+            SessionCommand(EQ_COMMAND, Bundle.EMPTY),
+            Bundle().apply {
+                if (levels != null) putFloatArray(EQ_ARG_LEVELS, levels)
+                if (enabled != null) putBoolean(EQ_ARG_ENABLED, enabled)
+                if (probe) putBoolean(EQ_ARG_PROBE, true)
+            },
+        )
+    }
+
+    override fun setEqualizerLevels(levels: List<Float>) {
+        sendEqCommand(levels.toFloatArray(), enabled = null, probe = false)
+    }
+
+    override fun setEqualizerEnabled(enabled: Boolean) {
+        sendEqCommand(levels = null, enabled = enabled, probe = false)
+    }
+
+    /**
+     * 只探能力，不带开关与增益 = 不动当前声音状态。
+     *
+     * 能力是服务侧建好效果后写进 `SessionExtras` 的，而 media3 1.11 的
+     * `MediaController.Listener` **没有 extras 变化回调**，所以这里发完探测帧后
+     * 做**有界重读**（拿到就停，最多 3 次）——不常驻轮询。
+     */
+    override fun probeEqualizer() {
+        sendEqCommand(levels = null, enabled = null, probe = true)
+        if (eqCapabilities.value != null) return
+        scope.launch {
+            repeat(EQ_PROBE_READS) {
+                delay(EQ_PROBE_READ_INTERVAL_MS)
+                controller?.let { refreshEqCapabilities(it) }
+                if (eqCapabilities.value != null) return@launch
+            }
+        }
     }
 
     /**

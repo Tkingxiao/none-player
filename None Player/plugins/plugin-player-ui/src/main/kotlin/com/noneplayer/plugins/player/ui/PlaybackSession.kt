@@ -2,6 +2,7 @@ package com.noneplayer.plugins.player.ui
 
 import android.content.Context
 import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.data.LOCAL_MEDIA_SOURCE_ID
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.cardTitle
@@ -103,20 +104,41 @@ class PlaybackSession(
      * 放会话而不是路由参数：迷你条的耳机钮在播放页**之外**，它要能把整个 App
      * 带进/带出该模式；路由参数方案会让"迷你条切仅听"变成一次压栈。
      * 进程级状态与播放会话同寿——退页后台播放时模式保持。
+     *
+     * **§5.1 的 per-media 记忆由这里一并写**（[toggleAudioOnly]/[setAudioOnly] 是唯一写路径）。
+     * 此前只有播放页那两处写：迷你条走无记忆的切换，于是"从迷你条进音频态 → 杀进程 →
+     * 重进同一文件"落回视频形态，落盘只剩旧键（A1-1）。写路径下沉后三个入口天然同源，
+     * 也杜绝了"页内两处各写一份、漂一份"的老问题。
      */
     private val _audioOnly = MutableStateFlow(false)
 
     /** 仅听音频模式状态（UI collectAsState 用） */
     val audioOnly: StateFlow<Boolean> = _audioOnly.asStateFlow()
 
-    /** 切换仅听音频（迷你条耳机钮 / 播放页 pactions / 音频页「切回视频」共用） */
+    /**
+     * 当前条目的**记忆键**（`sourceId:mediaId`，A2-8）；空 = 尚未装载或条目无 id。
+     *
+     * per-media 记忆的写键用它，而不是调用方手里的路由 id：深链/通知回跳的路由 id
+     * 可能为空（A1-2），而队列条目是 `session.open` 里经 E90「先 id 再 uri」选定的那一条。
+     */
+    val currentMediaKey: String
+        get() = _queue.value.getOrNull(_index.value)
+            ?.takeIf { it.id.isNotEmpty() }
+            ?.let { mediaMemoryKey(it.sourceId, it.id) }
+            .orEmpty()
+
+    /** 切换仅听音频并写 per-media 记忆（迷你条耳机钮 / 播放页 pactions / 音频页「切回视频」共用） */
     fun toggleAudioOnly() {
-        _audioOnly.value = !_audioOnly.value
+        setAudioOnly(!_audioOnly.value)
     }
 
-    /** 直接置位（§5.1 per-media 记忆恢复：进同一文件时直接进音频形态） */
+    /** 置位并写 per-media 记忆（§5.1 恢复路径重复写同值 = 幂等，不多一条语义） */
     fun setAudioOnly(value: Boolean) {
         _audioOnly.value = value
+        val key = currentMediaKey
+        if (key.isNotEmpty()) {
+            scope.launch { settings.setAudioOnlyPreferred(key, value) }
+        }
     }
 
     private val _queue = MutableStateFlow<List<MediaItem>>(emptyList())
@@ -357,6 +379,17 @@ class PlaybackSession(
         const val PERIODIC_PERSIST_MS = 5_000L
     }
 }
+
+/**
+ * per-media 记忆的 DataStore 键（A2-8）：`sourceId:mediaId`，与 Room 的 `media_key`
+ * （[com.noneplayer.core.database.HistoryEntry.keyOf]）同一条约定。
+ *
+ * 路由条目没有 sourceId（深链契约只带 id）时按当前唯一来源补前缀——
+ * 与 [com.noneplayer.core.data.AppSettings.migratePerMediaKeyNamespaceOnce]
+ * 对旧键的推断**必须是同一个**，否则搬完家反而读不到。
+ */
+internal fun mediaMemoryKey(sourceId: String, mediaId: String): String =
+    "${sourceId.ifEmpty { LOCAL_MEDIA_SOURCE_ID }}:$mediaId"
 
 /**
  * 队列定位（E18 提纯为普通函数以便单测）：**先 id 再 uri**——来源重扫后

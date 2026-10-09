@@ -14,6 +14,7 @@ import com.noneplayer.kernel.api.PluginIndex
 import com.noneplayer.kernel.api.ProcessLifecycle
 import com.noneplayer.kernel.api.ServiceLocator
 import com.noneplayer.kernel.api.VideoPlayerFactory
+import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.register
 import com.noneplayer.kernel.ui.api.KernelHost
 import com.noneplayer.kernel.ui.api.ScreenProvider
@@ -101,6 +102,22 @@ class Kernel private constructor(
 
     private suspend fun bootInternal() {
         try {
+            // A2-8：per-media 记忆键的一次性重排（`subtitle_ms-68` → `subtitle_local:ms-68`，
+            // 并清空后缀孤儿桶）。放这里而不是扫描回调里：深链冷进会在**首次扫描完成之前**
+            // 就读字幕/画面/仅音频记忆，搬迁必须早于任何一次读取。
+            // 失败不致命（标志位不置位，下次启动重试），但那次启动的 per-media 记忆读不到——
+            // 如实记日志，不静默。
+            runCatching {
+                services.get<AppSettings>().migratePerMediaKeyNamespaceOnce()
+            }.onFailure {
+                Log.w(TAG, "per-media 键命名空间搬迁失败，本次启动的记忆可能读不到旧值（下次启动重试）", it)
+            }
+            // P1-4（boot 首查审计）：Room 的建库与首条查询放在这里——本协程跑在
+            // Dispatchers.Default，正处启动画面期间。此前 `HistoryRepository` 的四个
+            // 急切 flow 属性会在**主线程同步段**构造时就执行 `Room.databaseBuilder().build()`
+            // （E107 把服务注册提前到同步段的代价），现在属性改 `by lazy`、预热挪到这里。
+            runCatching { services.get<HistoryRepository>().prime() }
+                .onFailure { Log.w(TAG, "历史库预热失败（UI 首次收集时会再试）", it) }
             val allPlugins = pluginIndexes.flatMap { it.plugins() }
             check(allPlugins.isNotEmpty()) {
                 "未收集到任何插件。请确认 :app 装配了至少一个 PluginIndex（kernel-ksp 生成）。"

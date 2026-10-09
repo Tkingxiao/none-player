@@ -1,6 +1,10 @@
 package com.noneplayer.kernel
 
 import android.media.MediaCodecList
+import com.noneplayer.core.data.DEFAULT_DOUBLE_TAP_STEP_MS
+import com.noneplayer.core.data.DOUBLE_TAP_STEP_OPTIONS_MS
+import com.noneplayer.core.ui.NpSpace
+import com.noneplayer.core.ui.NpChip
 import android.widget.Toast
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -11,6 +15,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -469,13 +474,31 @@ private fun GestureSettingsGroup(gutter: Dp) {
                 )
             },
         )
+        // L14 自定义双击步长：改的是**双击**，横滑 seek 与键盘 `←/→` 不受影响
+        val doubleTapStepMs by settings.doubleTapStepMs.collectAsStateWithLifecycle(
+            initialValue = DEFAULT_DOUBLE_TAP_STEP_MS,
+        )
         NpSettingRow(
             title = "双击动作",
-            subtitle = "播放页双击左右两侧",
+            subtitle = "播放页双击左右两侧：快退 / 快进",
             icon = NpIcon.Gear,
             showDivider = false,
-            trailing = { ValueReadonly(text = "快退 / 快进 10 秒") },
+            trailing = {
+                ValueReadonly(text = "${(doubleTapStepMs / 1000L).toInt()} 秒")
+            },
         )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = NpSpace.xs),
+            horizontalArrangement = Arrangement.spacedBy(NpSpace.sm),
+        ) {
+            DOUBLE_TAP_STEP_OPTIONS_MS.forEach { step ->
+                NpChip(
+                    text = "${step / 1000L}s",
+                    selected = step == doubleTapStepMs,
+                    onClick = { scope.launch { settings.setDoubleTapStepMs(step) } },
+                )
+            }
+        }
     }
 }
 

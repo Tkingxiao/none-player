@@ -103,6 +103,9 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.runtime.compose)
+    // A2-9（E51 余项）：androidx.window 提供折叠/铰链与窗口布局真值，
+    // 喂给形态判定层的 hasFoldingFeature（此前该形参零调用方喂值，折叠屏语义从未生效）
+    implementation(libs.androidx.window)
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)

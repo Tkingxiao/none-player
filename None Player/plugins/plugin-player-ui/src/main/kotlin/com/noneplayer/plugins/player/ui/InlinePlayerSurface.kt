@@ -142,7 +142,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 session = session,
                 item = media,
                 autoPlay = autoPlay,
-                onSubtitleMatched = { hit -> scope.launch { settings.setSubtitleUri(media.id, hit) } },
+                onSubtitleMatched = { key, hit -> scope.launch { settings.setSubtitleUri(key, hit) } },
             )
         }
 

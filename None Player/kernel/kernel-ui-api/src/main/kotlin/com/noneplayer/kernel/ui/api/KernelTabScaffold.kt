@@ -428,7 +428,7 @@ fun KernelTabScaffold(
 // ---- 条配方（投影无法表达的 alpha 常量，集中一处）----
 // 数值取自设计稿：--accent-soft = accent @ 16%。
 // （原来的 --edge / --border 两个常量已并入 core:ui 的 npGlassSurface 配方，
-//   见 界面设计路线.md §4.1–§4.2：条底与两根线只由 ink 令牌表达，不再各页自算 alpha。）
+//   见 设计文档.md §4.1–§4.2：条底与两根线只由 ink 令牌表达，不再各页自算 alpha。）
 private const val SHELL_ACCENT_SOFT_ALPHA = 0.16f
 
 /**

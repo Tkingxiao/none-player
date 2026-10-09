@@ -43,10 +43,12 @@
 
         <!-- configChanges：旋转/窗口尺寸变化由 Compose 直接响应，
              不重建 Activity——避免旋转黑闪、播放状态与页面栈重置（E5）；
-             layoutDirection 补入（E51 余项）：RTL 切换同样不重建 -->
+             layoutDirection 补入（E51 余项）：RTL 切换同样不重建；
+             locale 补入（A2-9）：切语言同样不重建 Activity——布局档位由 LocalNpWindowInfo
+             实时重算，重建反而会把播放会话与页面栈一起丢掉 -->
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale|layoutDirection"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|navigation|uiMode|density|fontScale|layoutDirection|locale"
             android:exported="true"
             android:launchMode="singleTask"
             android:resizeableActivity="true"

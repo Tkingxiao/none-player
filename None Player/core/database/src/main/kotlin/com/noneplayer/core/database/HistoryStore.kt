@@ -38,6 +38,14 @@ internal data class PlaybackHistoryEntity(
     // §8.3 草案 SQL 未含宽高；历史页卡片要出「1080P」档位，补两列（增量，不破坏草案语义）
     val width: Int,
     val height: Int,
+    /**
+     * A1-3 断点失效校验的第一路指纹：落盘那一刻的文件大小（字节），0 = 当时未知。
+     *
+     * 文件被替换/重录后仍沿用旧断点，位置会落在"另一部片子"的中间——比不恢复更糟。
+     */
+    @ColumnInfo(name = "size_bytes") val sizeBytes: Long = 0,
+    /** A1-3 第二路指纹：落盘那一刻的文件修改时间（epoch 秒），0 = 当时未知 */
+    @ColumnInfo(name = "last_modified") val lastModifiedSec: Long = 0,
 )
 
 /** 收藏行（§8.3 的 `favorites`）：只存键与时间，条目详情随媒体列表解析 */
@@ -67,6 +75,13 @@ internal interface HistoryDao {
 
     @Query("SELECT position_ms FROM playback_history WHERE media_key = :key LIMIT 1")
     suspend fun positionOf(key: String): Long?
+
+    /** A1-3：断点 + 当时的文件指纹，一次读齐（恢复前要比对） */
+    @Query(
+        "SELECT position_ms AS positionMs, size_bytes AS sizeBytes, last_modified AS lastModifiedSec " +
+            "FROM playback_history WHERE media_key = :key LIMIT 1",
+    )
+    suspend fun breakpointOf(key: String): Breakpoint?
 
     @Query("SELECT EXISTS(SELECT 1 FROM playback_history WHERE media_key = :key)")
     suspend fun exists(key: String): Boolean
@@ -157,9 +172,16 @@ internal interface HistoryDao {
     suspend fun isFavoriteNow(key: String): Boolean
 }
 
+/** 一行断点及其文件指纹快照（A1-3）；指纹列为 0 表示当时未知、不参与比对 */
+internal data class Breakpoint(
+    val positionMs: Long,
+    val sizeBytes: Long,
+    val lastModifiedSec: Long,
+)
+
 @Database(
     entities = [PlaybackHistoryEntity::class, FavoriteEntity::class],
-    version = 1,
+    version = 2,
     // §8.3：导出 schema JSON（`schemas/` 目录，由 room.schemaLocation 指定）。
     // 关掉导出后，任何一次实体变更都只能靠肉眼比对写迁移；导出后升级路径可被 diff 校验。
     exportSchema = true,
@@ -168,7 +190,22 @@ internal abstract class NonePlayerDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
 
     companion object {
+        /**
+         * v1 → v2（A1-3）：`playback_history` 补两列文件指纹。
+         *
+         * `ALTER TABLE ADD COLUMN` 带 DEFAULT，旧行自动填 0 = "当时未知"，
+         * 比对规则把 0 当"不参与"，所以**旧用户的续播不会被这次升级清掉**。
+         */
+        private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE playback_history ADD COLUMN size_bytes INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE playback_history ADD COLUMN last_modified INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun build(context: Context): NonePlayerDatabase =
-            Room.databaseBuilder(context, NonePlayerDatabase::class.java, "none_player.db").build()
+            Room.databaseBuilder(context, NonePlayerDatabase::class.java, "none_player.db")
+                .addMigrations(MIGRATION_1_2)
+                .build()
     }
 }

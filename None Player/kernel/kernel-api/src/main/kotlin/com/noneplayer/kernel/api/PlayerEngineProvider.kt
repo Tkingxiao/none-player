@@ -1,7 +1,9 @@
 package com.noneplayer.kernel.api
 
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
 
 /**
  * 循环模式（设计稿 fs-panel / more sheet 的四态）。
@@ -21,6 +23,21 @@ enum class NpLoopMode {
 
     /** 随机播放 */
     SHUFFLE,
+}
+
+/**
+ * 均衡器能力快照（A2-11）：段数 + 每段可用增益区间（mB，毫贝尔）。
+ *
+ * 由引擎侧从 framework `Equalizer` 实测得到，UI 只按它画滑杆与映射归一值，
+ * 不再猜机型——「5 段 ±1500」只是最常见的一档，不是普遍事实。
+ */
+data class EqualizerCapabilities(
+    val bands: Int,
+    val minLevelMb: Int,
+    val maxLevelMb: Int,
+) {
+    /** 量程跨度；<=0 表示设备报了个无效区间，UI 应按不支持处理 */
+    val spanMb: Int get() = maxLevelMb - minLevelMb
 }
 
 /**
@@ -196,6 +213,32 @@ interface VideoPlayer {
      * 逐 Cue 时刻，偏移只能由引擎侧缓冲窗口实现）。不支持时为空操作。
      */
     fun setSubtitleOffsetMs(offsetMs: Long) {}
+
+    /**
+     * 均衡器能力（A2-11）：段数与每段量程（**mB，毫贝尔**）。
+     *
+     * 必须由引擎**实测上报**——framework `Equalizer` 的 `numberOfBands` 与
+     * `bandLevelRange` 各机型不同（5 段 ±1500 只是最常见的一档，也有 ±600 与 3 段）。
+     * `null` = 本引擎没有均衡器，UI 据此**隐藏入口**，不做"滑杆拨了没反应"的假动作。
+     */
+    val equalizerCapabilities: Flow<EqualizerCapabilities?> get() = flowOf(null)
+
+    /**
+     * 设置均衡器各段增益（A2-11）。[levels] 按段序归一到 `-1f..1f`；
+     * **映射到真实量程在引擎侧做**——客户端不知道设备量程，跨进程传 mB 绝对值必然越界。
+     * 长度不足按 0f（平）补齐，超出部分忽略。
+     */
+    fun setEqualizerLevels(levels: List<Float>) {}
+
+    /** 均衡器总开关（false = 直通；不销毁效果实例，再开时保留上次增益） */
+    fun setEqualizerEnabled(enabled: Boolean) {}
+
+    /**
+     * 探测均衡器能力（A2-11）：UI 打开面板时发一发——服务侧据此建效果实例，
+     * 并把段数/量程经 `SessionExtras` 回传（能力只能实测得到，见 [equalizerCapabilities]）。
+     * **只探不改**：不带开关与增益参数时不得改动当前声音状态。
+     */
+    fun probeEqualizer() {}
 
     /**
      * 画面裁剪模式（§2.4「画面」）：true = 满窗裁剪（cover），

@@ -3,7 +3,6 @@ package com.noneplayer.plugins.player.ui
 import android.content.Context
 import androidx.core.net.toUri
 import com.noneplayer.core.data.AppSettings
-import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.kernel.api.ExtensionRegistry
@@ -40,7 +39,9 @@ internal data class SessionStart(
  *      按 per-media 记忆恢复断点、倍速、字幕（含同名自动挂载）。
  *
  * @param onSubtitleMatched 同名自动挂载命中时的记忆落盘钩子（调用方用自己的 scope 执行，
- *   不阻塞装载；播放页与内嵌播放器都只是转发给 AppSettings）
+ *   不阻塞装载；播放页与内嵌播放器都只是转发给 AppSettings）。
+ *   **键由这里算并回传**（A2-8）：装载链手上的 `keyedItem` 才是权威条目（带 sourceId），
+ *   调用方手里的路由 id 可能为空或没有来源前缀，两处各算一次必然漂。
  * @return [SessionStart]；`accepted = false` = uri 被 scheme 白名单拒绝，调用方自行兜底
  */
 internal suspend fun ensureSessionPlaying(
@@ -61,7 +62,7 @@ internal suspend fun ensureSessionPlaying(
      * 默认 true 保迷你条 / 详情页内嵌的既有语义不变。
      */
     autoPlay: Boolean = true,
-    onSubtitleMatched: ((String) -> Unit)? = null,
+    onSubtitleMatched: ((mediaKey: String, uri: String) -> Unit)? = null,
 ): SessionStart {
     if (!isPlayableUriScheme(item.uri)) return SessionStart(accepted = false)
     player.awaitReady()
@@ -77,8 +78,10 @@ internal suspend fun ensureSessionPlaying(
         // 而深链/通知重建的路由条目 sourceId 恒为空 → `keyOf` 得到 ":ms-x"，
         // 库里存的是 "local:ms-x"，冷启动续播因此静默从头播（模拟器实测）。
         val keyedItem = (authoritative ?: item).takeIf { it.id.isNotEmpty() } ?: item
+        // A1-3：读断点先比对**文件指纹**（大小 + 修改时间）。文件被替换/重录过，
+        // 旧位置可能落在另一部片子的中间——宁可从头顶也不接着错位置播。
         val saved =
-            if (keyedItem.id.isNotEmpty()) history.positionOf(HistoryEntry.keyOf(keyedItem)) ?: 0L else 0L
+            if (keyedItem.id.isNotEmpty()) history.positionOfIfIntact(keyedItem) ?: 0L else 0L
         // L5：断点已经看到底（≥「看完」线）时不恢复——否则播完落盘的片尾位置会在下次
         // 打开时被原样套用，用户看到"刚点进去就结束"。库里那行**不清空**：它同时是
         // 「已看 x% / 播放历史」的展示依据（见 HistoryRepository.isWatchedToEnd）。
@@ -94,12 +97,15 @@ internal suspend fun ensureSessionPlaying(
         )
         player.setSpeed(settings.playbackSpeed.first())
         var subtitleMissing = false
-        if (item.id.isNotEmpty()) {
-            val savedSubtitle = settings.subtitleUri(item.id).first()
+        // A2-8：字幕记忆的键与 Room 的 media_key 同约定（`sourceId:mediaId`），
+        // 由**权威条目**算出——路由条目没有 sourceId，两处各算会漂。
+        val keyedSubtitle = mediaMemoryKey(keyedItem.sourceId, keyedItem.id)
+        if (keyedItem.id.isNotEmpty()) {
+            val savedSubtitle = settings.subtitleUri(keyedSubtitle).first()
             // 同名字幕自动挂载（批次 3 §12.6）：无记忆时按 ASS > SSA > SRT > VTT
             // 找同目录同名文件；命中即记忆，之后与手动挂载走同一恢复链路
             val subtitle = savedSubtitle ?: resolveSiblingSubtitle(context, item.uri)?.also {
-                onSubtitleMatched?.invoke(it)
+                onSubtitleMatched?.invoke(keyedSubtitle, it)
             }
             subtitle?.let {
                 val prepared = prepareSubtitleUri(context, it.toUri())

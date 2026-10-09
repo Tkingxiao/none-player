@@ -22,9 +22,16 @@ class PlayerScreenProvider : ScreenProvider {
     // 深链带全量可选参数（都有 defaultValue，query 参数可省略）：
     // 只声明 uri 的话，外部传入的 id/title/mime 会被导航静默丢弃——
     // 批次 3 实测：同名挂载/断点续播这些 per-media 记忆在深链路径下全部失灵
+    //
+    // A1-2 补子集模板：导航的深链匹配按**模板逐项**比对查询参数，不是"能绑几个绑几个"。
+    // 只声明"全量"与"仅 uri"两条时，任何 `uri`+`id` 而缺 `title`/`mime` 的链接会落到
+    // "仅 uri"那条上，`id` 被静默丢掉 → 播放页拿到的 mediaId 为空，
+    // 全部 per-media 记忆挤进同一个空键桶（实测孤儿键 `audio_only_` / `display_`）。
+    // 通知/锁屏/PiP 回跳的深链正是这个形状（服务侧只带 uri 与 id）。
     override val deepLinks: List<String> =
         listOf(
             "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}",
+            "noneplayer://player?uri={uri}&id={id}",
             "noneplayer://player?uri={uri}",
         )
 
