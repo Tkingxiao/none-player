@@ -89,7 +89,7 @@ app       →  kernel, 所有 plugin-*（仅装配）
 
 ## 构建与测试
 
-要求 JDK 17、Android SDK（compileSdk 36 / minSdk 26 / targetSdk 35）。
+要求 JDK 17、Android SDK（compileSdk 36 / minSdk 26 / targetSdk 36）。
 
 ```bash
 ./gradlew assembleDebug   # 打 Debug 包
