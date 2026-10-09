@@ -31,6 +31,17 @@ object DanmakuParsers {
     /** ASS 覆盖标签 `{\...}`（E98：闭合花括号必须转义，ICU 正则不容忍裸 `}`） */
     private val OVERRIDE_TAG = Regex("\\{[^}]*\\}")
 
+    // 下面七条按**每条弹幕**执行（ASS 的覆盖标签解析在 cue 循环里、时间戳/颜色每条一次），
+    // 原先写成内联 `Regex(...)` 等于每 cue 重编译一次 Pattern——十万条的文件就是几十万次
+    // 编译。提到 object 常量，与 OVERRIDE_TAG 同构（E121）。
+    private val HEX_COLOR_6 = Regex("[0-9a-fA-F]{6}")
+    private val HEX_COLOR_3 = Regex("[0-9a-fA-F]{3}")
+    private val ASS_COLOR_TAG = Regex("\\\\1?c&H([0-9a-fA-F]{2,8})&")
+    private val ASS_FONT_SIZE_TAG = Regex("\\\\fs([0-9.]+)")
+    private val ASS_POS_TAG = Regex("\\\\pos\\(([0-9.-]+),([0-9.-]+)")
+    private val ASS_TIMESTAMP = Regex("(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)")
+    private val HTML_NUMERIC_ENTITY = Regex("&#(\\d+);")
+
     fun parse(content: String, format: DanmakuFormat): List<Danmaku> = when (format) {
         DanmakuFormat.BilibiliXml -> parseBilibiliXml(content)
         DanmakuFormat.ConverterJson -> parseConverterJson(content)
@@ -134,8 +145,8 @@ object DanmakuParsers {
     private fun parseColor(raw: String): Int? {
         val v = raw.removePrefix("#").trim()
         return when {
-            v.matches(Regex("[0-9a-fA-F]{6}")) -> v.toInt(16)
-            v.matches(Regex("[0-9a-fA-F]{3}")) -> v.map { c -> "$c$c" }.joinToString("").toInt(16)
+            v.matches(HEX_COLOR_6) -> v.toInt(16)
+            v.matches(HEX_COLOR_3) -> v.map { c -> "$c$c" }.joinToString("").toInt(16)
             else -> v.toLongOrNull()?.toInt()
         }
     }
@@ -194,11 +205,11 @@ object DanmakuParsers {
             .trim()
         if (text.isEmpty()) return null
 
-        val colorBgr = Regex("\\\\1?c&H([0-9a-fA-F]{2,8})&").find(overrides)?.groupValues?.get(1)
+        val colorBgr = ASS_COLOR_TAG.find(overrides)?.groupValues?.get(1)
         val color = colorBgr?.takeIf { it.length >= 6 }
             ?.let { bgrToRgb(Integer.parseInt(it.takeLast(6), 16)) }
             ?: 0xFFFFFF
-        val fontSize = Regex("\\\\fs([0-9.]+)").find(overrides)?.groupValues?.get(1)?.toFloatOrNull()
+        val fontSize = ASS_FONT_SIZE_TAG.find(overrides)?.groupValues?.get(1)?.toFloatOrNull()
 
         return Danmaku(
             timeMs = (startSec * 1000).roundToLong(),
@@ -221,7 +232,7 @@ object DanmakuParsers {
             s.contains("TOP") -> return DanmakuMode.Top
             s.contains("POP") || s.contains("BTM") || s.contains("BOT") -> return DanmakuMode.Bottom
         }
-        val pos = Regex("\\\\pos\\(([0-9.-]+),([0-9.-]+)").find(overrides)
+        val pos = ASS_POS_TAG.find(overrides)
         if (pos != null && playResY > 0) {
             return if (pos.groupValues[2].toFloat() < playResY / 2f) DanmakuMode.Top else DanmakuMode.Bottom
         }
@@ -230,7 +241,7 @@ object DanmakuParsers {
 
     /** `0:01:02.34` → 秒；非法返回 null */
     private fun assTimestamp(raw: String): Float? {
-        val m = Regex("(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)").find(raw.trim()) ?: return null
+        val m = ASS_TIMESTAMP.find(raw.trim()) ?: return null
         return m.groupValues[1].toFloat() * 3600f +
             m.groupValues[2].toFloat() * 60f +
             m.groupValues[3].toFloat()
@@ -245,7 +256,7 @@ object DanmakuParsers {
             .replace("&apos;", "'")
             .replace("&amp;", "&")
         // 数字实体（如 &#x1F600; / &#128512;）——放在 &amp; 之后处理避免二次还原
-        Regex("&#(\\d+);").findAll(s).forEach { m ->
+        HTML_NUMERIC_ENTITY.findAll(s).forEach { m ->
             m.groupValues[1].toIntOrNull()?.toChar()?.let { s = s.replace(m.value, it.toString()) }
         }
         return s

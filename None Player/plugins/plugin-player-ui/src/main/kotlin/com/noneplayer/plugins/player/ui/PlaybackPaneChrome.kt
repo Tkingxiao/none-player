@@ -61,7 +61,9 @@ class PlaybackPaneChrome : DetailPaneProvider {
     @Composable
     override fun isOccupied(): Boolean {
         val session = sessionOf()
-        val nowPlaying by session.nowPlaying.collectAsStateWithLifecycle()
+        // E120：这里只问"有没有在播"，却要订 nowPlaying——它每 250ms 随进度发新值，
+        // 于是整个类 PC 外壳（含媒体库那一栏）跟着进度 4/s 失效。改订位置无关的摘要。
+        val nowPlaying by session.nowPlayingSummary.collectAsStateWithLifecycle()
         val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
         // 仅听音频模式由整屏音频页承载，右栏没有画面可放——这一档仍交给底部迷你条
         return nowPlaying != null && !audioOnly
@@ -70,7 +72,7 @@ class PlaybackPaneChrome : DetailPaneProvider {
     @Composable
     override fun Render(navigator: Navigator, modifier: Modifier) {
         val session = sessionOf()
-        val snapshot = session.nowPlaying.collectAsStateWithLifecycle().value ?: return
+        val snapshot = session.nowPlayingSummary.collectAsStateWithLifecycle().value ?: return
         val ink = LocalNpInk.current
         Column(
             modifier = modifier

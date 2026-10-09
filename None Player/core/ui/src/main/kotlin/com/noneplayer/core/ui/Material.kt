@@ -16,6 +16,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
@@ -98,26 +99,33 @@ fun Modifier.npGlassSurface(
     )
     .then(
         if (topHighlight) {
-            Modifier.drawWithContent {
-                drawContent()
-                // 顶边高光只画中间一段并两端淡出（设计稿 `.npTopHairline` 等效物）
-                // ——四边等亮就没有玻璃味，中间亮两端无才是光从上方来的读法。
+            // 高光 brush 随尺寸缓存（E121）：这条线挂在顶栏/迷你条/Tab 栏上，
+            // 迷你条每 250ms 随进度重绘一次，原先每次都造一个渐变 brush + 一个
+            // arrayOf + 两个 Offset。CacheDrawScope 只在宽高或 ink 变化时重算。
+            Modifier.drawWithCache {
                 val inset = 16.dp.toPx()
-                if (size.width > inset * 2) {
-                    drawLine(
-                        brush = Brush.horizontalGradient(
-                            colorStops = arrayOf(
-                                0f to Color.Transparent,
-                                0.5f to ink.edge,
-                                1f to Color.Transparent,
-                            ),
-                            startX = inset,
-                            endX = size.width - inset,
+                val y = 0.6f.dp.toPx()
+                val stroke = 1.dp.toPx()
+                val brush = if (size.width > inset * 2) {
+                    Brush.horizontalGradient(
+                        colorStops = arrayOf(
+                            0f to Color.Transparent,
+                            0.5f to ink.edge,
+                            1f to Color.Transparent,
                         ),
-                        start = Offset(inset, 0.6f.dp.toPx()),
-                        end = Offset(size.width - inset, 0.6f.dp.toPx()),
-                        strokeWidth = 1.dp.toPx(),
+                        startX = inset,
+                        endX = size.width - inset,
                     )
+                } else {
+                    null
+                }
+                val from = Offset(inset, y)
+                val to = Offset(size.width - inset, y)
+                onDrawWithContent {
+                    drawContent()
+                    // 顶边高光只画中间一段并两端淡出（设计稿 `.npTopHairline` 等效物）
+                    // ——四边等亮就没有玻璃味，中间亮两端无才是光从上方来的读法。
+                    if (brush != null) drawLine(brush, from, to, strokeWidth = stroke)
                 }
             }
         } else {
@@ -315,39 +323,46 @@ fun Modifier.npMaskFadeEdges(
     startAlpha: Float = 0.9f,
     fadeStart: Boolean = true,
     fadeEnd: Boolean = true,
-): Modifier = drawWithContent {
-    drawContent()
+): Modifier = drawWithCache {
     val band = min(fadeSize.toPx(), size.width / 2f)
-    if (band <= 0f) return@drawWithContent
     val h = size.height
+    val w = size.width
     fun at(alpha: Float) = color.copy(alpha = alpha)
-    if (fadeStart) {
-        drawRect(
-            brush = Brush.horizontalGradient(
-                colorStops = arrayOf(
-                    0f to at(startAlpha),
-                    0.55f to at(startAlpha * 0.30f),
-                    1f to at(0f),
-                ),
-                startX = 0f,
-                endX = band,
+    // brush / Size / Offset 全部随尺寸缓存（E121）：原先写在 drawWithContent 里，
+    // 而本 modifier 挂在**五个横向列表**的 LazyRow 上——滚动期每帧要造 2 个渐变
+    // brush、2 个 arrayOf、6 个 Color、4 个几何值对象。CacheDrawScope 只在尺寸或
+    // color（lambda 实例）变化时重算，滚动帧里只剩两次 drawRect。
+    val startBrush = if (fadeStart && band > 0f) {
+        Brush.horizontalGradient(
+            colorStops = arrayOf(
+                0f to at(startAlpha),
+                0.55f to at(startAlpha * 0.30f),
+                1f to at(0f),
             ),
-            size = Size(band, h),
+            startX = 0f,
+            endX = band,
         )
+    } else {
+        null
     }
-    if (fadeEnd) {
-        drawRect(
-            brush = Brush.horizontalGradient(
-                colorStops = arrayOf(
-                    0f to at(0f),
-                    0.45f to at(startAlpha * 0.30f),
-                    1f to at(startAlpha),
-                ),
-                startX = size.width - band,
-                endX = size.width,
+    val endBrush = if (fadeEnd && band > 0f) {
+        Brush.horizontalGradient(
+            colorStops = arrayOf(
+                0f to at(0f),
+                0.45f to at(startAlpha * 0.30f),
+                1f to at(startAlpha),
             ),
-            topLeft = Offset(size.width - band, 0f),
-            size = Size(band, h),
+            startX = w - band,
+            endX = w,
         )
+    } else {
+        null
+    }
+    val bandSize = Size(band, h)
+    val endTopLeft = Offset(w - band, 0f)
+    onDrawWithContent {
+        drawContent()
+        if (startBrush != null) drawRect(brush = startBrush, size = bandSize)
+        if (endBrush != null) drawRect(brush = endBrush, topLeft = endTopLeft, size = bandSize)
     }
 }

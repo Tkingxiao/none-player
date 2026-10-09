@@ -72,6 +72,7 @@ import com.noneplayer.core.ui.npPressScale
 import com.noneplayer.core.ui.npQuality
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.PlaybackState
+import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.plugins.player.ui.controls.WaveformSeekBar
 
@@ -102,8 +103,11 @@ fun AudioOnlyScreen(
     speedText: String = "1.0x",
     modifier: Modifier = Modifier,
 ) {
-    val ink = LocalNpInk.current
-    val nowPlaying by session.nowPlaying.collectAsStateWithLifecycle()
+        val ink = LocalNpInk.current
+    // E120：订**位置无关**的摘要，不订 nowPlaying——后者每 250ms 随进度发一次新值，
+    // 在页面顶解包等于让整页跟着进度 4/s 重组（实测 39 次/12s：两个 radialGradient、
+    // 唱片、6 枚 chip 全部重跑）。进度只在下面的 ProgressBlock 叶子里订引擎的流。
+    val nowPlaying by session.nowPlayingSummary.collectAsStateWithLifecycle()
     val snapshot = nowPlaying ?: return
     val player = session.player ?: return
     val isPlaying = snapshot.isPlaying
@@ -120,7 +124,6 @@ fun AudioOnlyScreen(
     // 但比一根细线更像"这里有一段内容"。视频页仍用 §5.4 的实线条，
     // 波形放在画面上会误导"这是音频文件"。
     val quality = npQuality()
-    val bufferedMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
 
     Box(
         modifier = modifier
@@ -198,36 +201,10 @@ fun AudioOnlyScreen(
             }
         }
 
-        // 进度（§5.6）：装饰波形 + 两端时间码
-        @Composable
-        fun ProgressBlock(modifier: Modifier = Modifier) {
-            Column(modifier = modifier) {
-                WaveformSeekBar(
-                    mediaKey = HistoryEntry.keyOf(snapshot.item),
-                    durationMs = snapshot.durationMs,
-                    positionMs = snapshot.positionMs,
-                    bufferedFraction = if (snapshot.durationMs > 0)
-                        bufferedMs.toFloat() / snapshot.durationMs else 0f,
-                    barCount = quality.waveformBars,
-                    onSeek = { player.seekTo(it) },
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text(
-                        text = formatTimestamp(snapshot.positionMs),
-                        style = com.noneplayer.core.ui.NpMonoSmall,
-                        color = ink.muted,
-                    )
-                    Text(
-                        text = formatTimestamp(snapshot.durationMs),
-                        style = com.noneplayer.core.ui.NpMonoSmall,
-                        color = ink.muted,
-                    )
-                }
-            }
-        }
+        // 进度行（§5.6：装饰波形 + 两端时间码）见文件级 [AudioProgressRow]。
+        // 它**不能**写成这里的局部 @Composable：E120 实测，局部函数里解包
+        // `player.positionMs` 照样把整页拖进 4/s 重组（拔掉这两个订阅，
+        // 12s 内整页重组从 41 次掉到 0 次）。进度必须是独立重组域。
 
         // 控制排（设计稿 .audio-controls：循环(sm 44) / 上一首(56) / 播放主钮(56) /
         // 下一首(56) / 播放列表(sm 44)，gap 18）。此前只做了中间三钮，
@@ -433,7 +410,13 @@ fun AudioOnlyScreen(
                             verticalArrangement = Arrangement.spacedBy(NpSpace.lg, Alignment.CenterVertically),
                         ) {
                             InfoBlock(startAligned = true, modifier = Modifier.fillMaxWidth())
-                            ProgressBlock(modifier = Modifier.fillMaxWidth())
+                            AudioProgressRow(
+                                player = player,
+                                mediaKey = HistoryEntry.keyOf(snapshot.item),
+                                durationMs = snapshot.durationMs,
+                                barCount = quality.waveformBars,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
                             TransportRow(
                                 arrangement = Arrangement.spacedBy(NpSpace.md, Alignment.Start),
                                 modifier = Modifier.fillMaxWidth(),
@@ -483,7 +466,13 @@ fun AudioOnlyScreen(
                         .align(Alignment.CenterHorizontally)
                         .padding(vertical = 10.dp),
                 )
-                ProgressBlock(modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp))
+                AudioProgressRow(
+                    player = player,
+                    mediaKey = HistoryEntry.keyOf(snapshot.item),
+                    durationMs = snapshot.durationMs,
+                    barCount = quality.waveformBars,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp),
+                )
                 TransportRow(
                     arrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 18.dp),
@@ -790,5 +779,51 @@ private fun AudioPauseGlyph(tint: Color) {
                 .clip(RoundedCornerShape(2.dp))
                 .background(tint),
         )
+    }
+}
+
+/**
+ * 仅听页的进度行（§5.6）：装饰波形 + 两端时间码。
+ *
+ * 为什么是**文件级**而不是页面里的局部 @Composable（E120）：进度与缓冲两条流每
+ * 250ms 跳一次，**订阅点在哪，失效就打到哪**——写在局部函数里时整页仍按 4/s 重组
+ * （实测 41 次/12s，把这两个订阅拔掉就是 0 次）。独立签名 = 独立重组域，
+ * 进度只重算这四行，唱片/渐变/六枚 chip 一概不动。
+ */
+@Composable
+private fun AudioProgressRow(
+    player: VideoPlayer,
+    mediaKey: String,
+    durationMs: Long,
+    barCount: Int,
+    modifier: Modifier = Modifier,
+) {
+    val ink = LocalNpInk.current
+    val positionMs by player.positionMs.collectAsStateWithLifecycle()
+    val bufferedMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
+    Column(modifier = modifier) {
+        WaveformSeekBar(
+            mediaKey = mediaKey,
+            durationMs = durationMs,
+            positionMs = positionMs,
+            bufferedFraction = if (durationMs > 0) bufferedMs.toFloat() / durationMs else 0f,
+            barCount = barCount,
+            onSeek = { player.seekTo(it) },
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Text(
+                text = formatTimestamp(positionMs),
+                style = com.noneplayer.core.ui.NpMonoSmall,
+                color = ink.muted,
+            )
+            Text(
+                text = formatTimestamp(durationMs),
+                style = com.noneplayer.core.ui.NpMonoSmall,
+                color = ink.muted,
+            )
+        }
     }
 }

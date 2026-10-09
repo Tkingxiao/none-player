@@ -53,11 +53,16 @@ import kotlinx.coroutines.delay
  */
 
 /**
- * 设计稿 `.np-ico` 与整份 CSS 里出现过的全部缓动曲线，一一对应。
+ * 设计稿 `.np-ico` 与整份 CSS 里出现过的缓动曲线，按**用途**命名。
  *
  * 设计稿变量名与这里的常量名不同（`--ease-out` / `--ease-in-out` / `--ease-drawer`），
- * 因为这里的命名描述的是**用途**：同一根曲线在进场、退场、抽屉里各用一次，
- * 按用途命名才不会被"换个动画就不知道选哪条"困住。
+ * 因为同一根曲线在进场、退场、抽屉里各用一次，按用途命名才不会被"换个动画就不知道选哪条"困住。
+ *
+ * **E119 清了零调用点**（§14 #2 的口径）：设计稿另有 `--ease-drawer`(.32,.72,0,1)、
+ * `.switch i`(.34,1.3,.6,1)、`.tonearm`(.34,1.3,.5,1) 三根，施工期它们的天然消费方全部
+ * 改成了 spring——抽屉收尾用 `silkSpring(Motion.Drawer)`、开关用 `bouncySpring(Motion.Switch)`、
+ * 唱臂落针用 bouncy spring。三条曲线自落地起 0 调用点，故删除而不是"留着以后用"：
+ * 留着就会有人拿它凑数，而 spring 与贝塞尔的差别是手感级的，换回去是可感知的回归。
  */
 object NpEasing {
     /** 设计稿 `--ease-out: cubic-bezier(.23,1,.32,1)`——进场、可交互反馈的主力曲线。 */
@@ -66,17 +71,8 @@ object NpEasing {
     /** 设计稿 `--ease-in-out: cubic-bezier(.77,0,.175,1)`——双向切换（如折叠展开）。 */
     val SilkExit: Easing = CubicBezierEasing(0.77f, 0f, 0.175f, 1f)
 
-    /** 设计稿 `--ease-drawer: cubic-bezier(.32,.72,0,1)`——抽屉 / 面板侧向滑入。 */
-    val Drawer: Easing = CubicBezierEasing(0.32f, 0.72f, 0f, 1f)
-
-    /** 设计稿 `.switch i { cubic-bezier(.34,1.3,.6,1) }`——物理开关的轻微过冲。 */
-    val Overshoot: Easing = CubicBezierEasing(0.34f, 1.3f, 0.6f, 1f)
-
     /** 设计稿 `.sheet { cubic-bezier(.34,1.1,.5,1) }`——底部面板上滑。 */
     val Sheet: Easing = CubicBezierEasing(0.34f, 1.1f, 0.5f, 1f)
-
-    /** 设计稿 `.tonearm { cubic-bezier(.34,1.3,.5,1) }`——唱臂落针。 */
-    val Tonearm: Easing = CubicBezierEasing(0.34f, 1.3f, 0.5f, 1f)
 
     /** 强进场：只用于共享元素与主播放键。 */
     val Emphasized: Easing = CubicBezierEasing(0.16f, 1f, 0.3f, 1f)
@@ -158,16 +154,27 @@ fun silkStiffness(durationMs: Int): Float {
  * 返回 [FiniteAnimationSpec] 而非宽泛的 [AnimationSpec]：这样它可以直接喂给
  * `fadeIn` / `slideInVertically` / `AnimatedContent.transitionSpec` 等要求有限时长的
  * API——否则调用点会因类型上界不足而编译失败。
+ *
+ * **`internal` 是有意的**（E119）：它收的是**裸毫秒**，不吃 [npDuration] 的档位倍率、
+ * 也不看 Reduce Motion。此前 24 处组件写的是 `silkSpring(Motion.Hover)`——
+ * 令牌数字进了管道、却没经过管道，"降到轻量档 / 系统移除动画"对那 24 处完全无效。
+ * 现在跨模块只能走 [npMotion]（或 `silkFloat/silkDp/silkOffset/silkSize`），
+ * 由编译器而不是注释来保证"唯一入口"。模块内确需在**非组合上下文**（协程、
+ * 手势收尾）里造 spring 的，先 `npDuration()` 取值再喂进来——见 `NpSheet` 的拖拽收尾。
  */
 @Suppress("UNCHECKED_CAST")
-fun <T> silkSpring(durationMs: Int): FiniteAnimationSpec<T> =
+internal fun <T> silkSpring(durationMs: Int): FiniteAnimationSpec<T> =
     spring<T>(
         dampingRatio = Spring.DampingRatioNoBouncy,
         stiffness = silkStiffness(durationMs),
     )
 
-/** 轻微过冲 spring：仅用于开关 / 滑块 thumb，表达"物理开关"而非"电子开关"。 */
-fun <T> bouncySpring(durationMs: Int): FiniteAnimationSpec<T> =
+/**
+ * 轻微过冲 spring：仅用于开关 / 滑块 thumb，表达"物理开关"而非"电子开关"。
+ *
+ * 同样 `internal`，理由见 [silkSpring]。
+ */
+internal fun <T> bouncySpring(durationMs: Int): FiniteAnimationSpec<T> =
     spring<T>(
         dampingRatio = Spring.DampingRatioMediumBouncy,
         stiffness = silkStiffness(durationMs),

@@ -2,6 +2,7 @@ package com.noneplayer.core.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -95,6 +96,11 @@ fun NpSheet(
     // 手势用独立的 Animatable，才能把抬手速度直接交给回弹弹簧（§7.3 速度接棒）。
     var panelHeightPx by remember { mutableFloatStateOf(0f) }
     val dragOffset = remember { Animatable(0f) }
+    // 抬手收尾的 spec 读在组合期：`settle()` 是本函数里的局部函数，协程内调不到
+    // @Composable 的 [npMotion]，所以在这里造好再被它捕获。E119 之前这里写的是
+    // `silkSpring` + 裸令牌——进了弹簧、没进管道，三档倍率与 Reduce Motion
+    // 对这条收尾完全无效（而它是 §14 #14 验收过的那只手）。
+    val drawerSettleSpec: FiniteAnimationSpec<Float> = npMotion(Motion.Drawer)
     // §7.4 越界橡皮筋：原始拖拽量按 1:1 累加（负值 = 向上拉过头），呈现给动画的值
     // 只在负半轴过橡皮筋。分开的理由不是洁癖——硬夹紧时手指继续上划的那段位移会被
     // 整段丢掉，往回拖必须先补回丢掉的距离，读起来是"反向时先卡一下"。
@@ -152,12 +158,12 @@ fun NpSheet(
             // 半路的位移被清零，读起来就是"弹一下才走"。
             dismissDragged = true
             scope.launch {
-                dragOffset.animateTo(panelHeightPx, silkSpring(Motion.Drawer), initialVelocity = velocity)
+                dragOffset.animateTo(panelHeightPx, drawerSettleSpec, initialVelocity = velocity)
                 onDismiss()
             }
         } else {
             scope.launch {
-                dragOffset.animateTo(0f, silkSpring(Motion.Drawer), initialVelocity = velocity)
+                dragOffset.animateTo(0f, drawerSettleSpec, initialVelocity = velocity)
                 settling = false
             }
         }

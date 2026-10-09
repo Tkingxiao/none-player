@@ -39,6 +39,9 @@ internal object FilenameParser {
     )
     private val SEPARATORS = Regex("[._]+")
 
+    /** 折叠多余空白：每个条目的富化都要走两次，提到常量（E121） */
+    private val COLLAPSE_WS = Regex("\\s{2,}")
+
     /** 标题里要丢掉的"标签词"（分辨率/片源/编码/位深/语言标记/版本号） */
     private val TITLE_NOISE = Regex(
         "(?i)^(\\d{3,4}[pi]|4k|8k|hd|fhd|uhd|web-?dl|webrip|web|blu-?ray|bd(rip)?|hdtv|dvdrip|" +
@@ -53,7 +56,7 @@ internal object FilenameParser {
         // 拍平串：括号/分隔符 → 空格（组内文本保留，`[02]` 的编号才看得见）
         val flat = base.replace(ANY_BRACKET_OR_PAREN, " ")
             .replace(SEPARATORS, " ")
-            .replace(Regex("\\s{2,}"), " ")
+            .replace(COLLAPSE_WS, " ")
             .trim()
 
         // 编码先从原始串取（`[HEVC]` 就在方括号里）
@@ -128,7 +131,7 @@ internal object FilenameParser {
     private fun buildTitle(raw: String): String = raw
         .replace(ANY_BRACKET_OR_PAREN, " ")
         .replace(SEPARATORS, " ")
-        .replace(Regex("\\s{2,}"), " ")
+        .replace(COLLAPSE_WS, " ")
         .trim()
         .split(' ')
         .filter { it.isNotBlank() && !TITLE_NOISE.matches(it) }

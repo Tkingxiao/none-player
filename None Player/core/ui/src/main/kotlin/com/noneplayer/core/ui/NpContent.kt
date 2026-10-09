@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -190,7 +191,7 @@ fun NpTrackBar(
     val shown = if (dragging > 0f) draggedProgress else progress
     val knobSize by animateFloatAsState(
         targetValue = if (dragging > 0f) 18f else 12f,
-        animationSpec = silkSpring(Motion.Hover),
+        animationSpec = npMotion(Motion.Hover),
         label = "knobSize",
     )
 
@@ -358,15 +359,25 @@ fun NpCoverBox(
             .border(1.dp, ink.border, shape)
             .then(
                 if (tintRing != null) {
-                    Modifier.drawWithContent {
-                        drawContent()
-                        drawRoundRect(
-                            color = tintRing,
-                            style = Stroke(width = 1.dp.toPx()),
-                            cornerRadius = CornerRadius(NpRadius.card.toPx(), NpRadius.card.toPx()),
-                            topLeft = Offset(0.5.dp.toPx(), 0.5.dp.toPx()),
-                            size = Size(size.width - 1.dp.toPx(), size.height - 1.dp.toPx()),
-                        )
+                    // 几何值随尺寸缓存（E121）：这圈描边原先在 drawWithContent 里
+                    // 每次绘制都新建 Stroke/CornerRadius/Offset/Size 并做 5 次 dp→px，
+                    // 而封面卡是滚动列表里逐帧重绘的那一类。
+                    Modifier.drawWithCache {
+                        val strokeW = 1.dp.toPx()
+                        val style = Stroke(width = strokeW)
+                        val corner = CornerRadius(NpRadius.card.toPx(), NpRadius.card.toPx())
+                        val topLeft = Offset(0.5f.dp.toPx(), 0.5f.dp.toPx())
+                        val boxSize = Size(size.width - strokeW, size.height - strokeW)
+                        onDrawWithContent {
+                            drawContent()
+                            drawRoundRect(
+                                color = tintRing,
+                                style = style,
+                                cornerRadius = corner,
+                                topLeft = topLeft,
+                                size = boxSize,
+                            )
+                        }
                     }
                 } else {
                     Modifier
@@ -492,7 +503,7 @@ fun NpMediaCard(
     } else {
         val animated by animateColorAsState(
             targetValue = if (hovered) ink.accent else ink.fg,
-            animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
+            animationSpec = npMotion(Motion.Hover, easing = NpEasing.Silk),
             label = "npMediaCardTitle",
         )
         animated
@@ -576,7 +587,7 @@ fun NpListRow(
     } else {
         val animated by animateColorAsState(
             targetValue = if (hovered) ink.accent else ink.fg,
-            animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
+            animationSpec = npMotion(Motion.Hover, easing = NpEasing.Silk),
             label = "npListRowTitle",
         )
         animated
@@ -679,7 +690,7 @@ fun NpFolderCard(
     } else {
         val animated by animateFloatAsState(
             targetValue = if (hovered) 0.40f else 0.26f,
-            animationSpec = tween(Motion.Hover, easing = NpEasing.Silk),
+            animationSpec = npMotion(Motion.Hover, easing = NpEasing.Silk),
             label = "npFolderCardBorder",
         )
         animated

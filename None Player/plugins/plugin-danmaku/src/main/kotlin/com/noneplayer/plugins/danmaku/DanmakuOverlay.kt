@@ -184,10 +184,27 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
 
     Box(modifier = Modifier.fillMaxSize()) {
         if (enabled && hasContent) {
-            val textPaint = remember { Paint(Paint.ANTI_ALIAS_FLAG) }
+            // 阴影层只在 Paint 建立时设一次（E122）：`setShadowLayer` 会重建 paint 的
+            // shadow layer，原先逐帧调一次 = 每帧一次重建，而它是"可见条数无关"的常量。
+            // FontMetrics 同理复用——无参 `getFontMetrics()` 每次 new 一个对象，
+            // 而它按"可见条数 × 帧率"被叫。
+            val textPaint = remember {
+                Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    setShadowLayer(2f, 0f, 1f, android.graphics.Color.BLACK)
+                }
+            }
+            val fontMetrics = remember { android.graphics.Paint.FontMetrics() }
             // 逐帧 measureText 是纯排版热（CJK 每次都要走 shaping）；
             // 窗口内文字在字号不变时宽度恒定，按 (文字, 字号) 记忆
             val textWidth = remember { TextWidthCache(textPaint) }
+            // plan 的入参对象也提到组合期：Config 是纯数据、measure 是稳定函数引用，
+            // 每帧新建等于把 GC 压力挂在 60fps 上（E122）
+            val planConfig = remember(areaFraction, speed, fontScale, maxOnScreen) {
+                DanmakuPlanner.Config(areaFraction, speed, fontScale, maxOnScreen)
+            }
+            val measureText: (Danmaku, Float) -> Float = remember(textWidth) {
+                { d, px -> textWidth.width(d.text, px) }
+            }
             Canvas(modifier = Modifier.fillMaxSize()) {
                 frame.longValue // 读帧号：订阅 draw 阶段逐帧失效
                 val danmaku = when (val s = source) {
@@ -205,23 +222,23 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
                     displayPosMs = anchor.displayMs(playbackState, frame.longValue),
                     canvasWidth = size.width,
                     canvasHeight = size.height,
-                    config = DanmakuPlanner.Config(areaFraction, speed, fontScale, maxOnScreen),
+                    config = planConfig,
                     laneHeightPx = laneHeight,
-                    measure = { d, px -> textWidth.width(d.text, px) },
+                    measure = measureText,
                 )
                 drawIntoCanvas { canvas ->
                     val nc = canvas.nativeCanvas
                     // 整帧一致的常量属性提到循环外；alpha 例外——setColor 会把
                     // alpha 重置回色值自带的 FF，必须在各条 color 之后重设
                     val alphaInt = (alpha * 255).toInt().coerceIn(0, 255)
-                    textPaint.setShadowLayer(2f, 0f, 1f, android.graphics.Color.BLACK)
                     placed.forEach { p ->
                         textPaint.textSize = p.textPx
                         textPaint.color = p.danmaku.colorArgb
                         textPaint.alpha = alphaInt
                         val x = if (p.x >= 0f) p.x else (size.width - textWidth.width(p.danmaku.text, p.textPx)) / 2f
-                        val fm = textPaint.fontMetrics
-                        val baseline = p.y - (fm.ascent + fm.descent) / 2f
+                        // 复用同一个 FontMetrics 实例（E122）：无参版每次 new 一个
+                        textPaint.getFontMetrics(fontMetrics)
+                        val baseline = p.y - (fontMetrics.ascent + fontMetrics.descent) / 2f
                         nc.drawText(p.danmaku.text, x, baseline, textPaint)
                     }
                 }

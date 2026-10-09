@@ -141,8 +141,11 @@ fun KernelNavHost(
         popExitTransition = {
             // 返回时旧页往**左**退出（`-it/4`）：与 push 的入场方向成对，
             // 写成 `it / 4` 会让"返回"读成"又推进了一页"。
+            // E119：滑出时长原本错用了 navEnterMs(280)——alpha 在 navExitMs(180) 就归零了，
+            // 多出来的 100ms 是一帧都看不见的动画，还让退场比进场更慢（违反 §3.9 的
+            // "退场加速离开"）。两条 spec 同长才是"一次离开"，不是"淡出后再溜一段"。
             fadeOut(tween(navExitMs, easing = NpEasing.SilkExit)) +
-                slideOutHorizontally(tween(navEnterMs, easing = NpEasing.SilkExit)) { if (navSlideAllowed) -it / 4 else 0 }
+                slideOutHorizontally(tween(navExitMs, easing = NpEasing.SilkExit)) { if (navSlideAllowed) -it / 4 else 0 }
         },
         builder = graphBuilder,
     )

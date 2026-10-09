@@ -188,7 +188,6 @@ import com.noneplayer.core.ui.rememberReduceMotion
 import com.noneplayer.core.ui.npPressScale
 import com.noneplayer.core.ui.npTouchTarget
 import com.noneplayer.core.ui.rememberNpToastState
-import com.noneplayer.core.ui.silkSpring
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.MediaSourceProvider
@@ -510,8 +509,10 @@ fun PlayerScreen(
         // 等舞台量出目标矩形（首帧之内）再起飞；量不到就不飞（比飞错位置体面）
         while (stageRectInWindow == null) delay(16)
         coverFlight.animateTo(1f, tween(coverMorphMs, easing = NpEasing.Emphasized))
-        // 落位后短暂停留，再把封面淡出让位给已经出帧的视频（末段 15% 行程读作淡出）
-        coverFlight.animateTo(1.15f, tween(coverFadeMs))
+        // 落位后短暂停留，再把封面淡出让位给已经出帧的视频（末段 15% 行程读作淡出）。
+        // easing 不能省：不写就落 Compose 默认的 FastOutSlowIn，那是 §3.8 曲线集之外的
+        // 第 6 条（E119 普查订正：§14 #1 曾记"曲线绕过 0 处"，这一处是漏网的）。
+        coverFlight.animateTo(1.15f, tween(coverFadeMs, easing = NpEasing.SilkExit))
     }
     // 深链只带 uri（不带 mime/id）时，从 MediaStore 取真实 MIME_TYPE 供页头容器名显示。
     // 路由 mime 默认值是 video/mp4，直接用它会把一个 .avi 显示成「MP4」（§7.4）；
@@ -605,7 +606,7 @@ fun PlayerScreen(
         }
     }
 
-    val state by player.state.collectAsStateWithLifecycle()
+        val state by player.state.collectAsStateWithLifecycle()
     // §9.2（审核文档 §11 反例①）：位置**不在本页顶层解包**。
     // `val positionMs by …` 会让每次进度上报（约 250ms 一跳）都重组整个 PlayerScreen，
     // 连带视频舞台、信息区、弹层全部重算。这里只保留 [State] 对象，
@@ -3398,8 +3399,11 @@ private fun ResumePositionNotice(
     LaunchedEffect(resumeMs) { if (resumeMs != null) lastMs = resumeMs }
     AnimatedVisibility(
         visible = resumeMs != null,
-        enter = fadeIn(animationSpec = npMotion(Motion.Field)),
-        exit = fadeOut(animationSpec = npMotion(Motion.Panel)),
+        // E119：原先 enter=Field(150) / exit=Panel(180) 把 §3.9 的"退场比进场更短"写反了
+        // （同族正例是 Overlay 280 / OverlayExit 220）。续看提示是"看一眼就走"的东西，
+        // 进得完整、走得干脆才对。
+        enter = fadeIn(animationSpec = npMotion(Motion.Panel)),
+        exit = fadeOut(animationSpec = npMotion(Motion.Field)),
         modifier = modifier,
     ) {
         Box(
@@ -3830,10 +3834,10 @@ internal fun CenterResumeButton(
         }
         AnimatedVisibility(
             visible = visible,
-            enter = fadeIn(animationSpec = silkSpring(Motion.Field)) +
-                scaleIn(initialScale = 0.86f, animationSpec = silkSpring(Motion.Field)),
-            exit = fadeOut(animationSpec = silkSpring(Motion.Field)) +
-                scaleOut(targetScale = 0.86f, animationSpec = silkSpring(Motion.Field)),
+            enter = fadeIn(animationSpec = npMotion(Motion.Field)) +
+                scaleIn(initialScale = 0.86f, animationSpec = npMotion(Motion.Field)),
+            exit = fadeOut(animationSpec = npMotion(Motion.Field)) +
+                scaleOut(targetScale = 0.86f, animationSpec = npMotion(Motion.Field)),
         ) {
             // 暗色玻璃 + 白图标（与锁定徽标/控制条同一套播放器覆盖层语言）。
             // 此前用 NpGlass 浅色玻璃 + 白 icon：浅色主题或浅色画面上是白底白图，

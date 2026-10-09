@@ -74,8 +74,8 @@ import com.noneplayer.core.ui.npDisplacementAllowed
 import com.noneplayer.core.ui.npDuration
 import com.noneplayer.core.ui.npGlassChrome
 import com.noneplayer.core.ui.npGlassSurface
+import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.rememberNpHaptics
-import com.noneplayer.core.ui.silkSpring
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
@@ -619,7 +619,7 @@ private fun NpRailItem(
 ) {
     val tint by animateColorAsState(
         targetValue = if (selected) accent else muted,
-        animationSpec = silkSpring(Motion.Press),
+        animationSpec = npMotion(Motion.Press),
         label = "railTint",
     )
     val background by animateColorAsState(
@@ -628,12 +628,12 @@ private fun NpRailItem(
         } else {
             Color.Transparent
         },
-        animationSpec = silkSpring(Motion.Press),
+        animationSpec = npMotion(Motion.Press),
         label = "railBg",
     )
     val scale = animateFloatAsState(
         targetValue = if (selected) 1f else 0.98f,
-        animationSpec = silkSpring(Motion.Press),
+        animationSpec = npMotion(Motion.Press),
         label = "railScale",
     )
     // 按压缩放（设计稿 `.rail-btn:active{transform:scale(.94)}`）
@@ -641,7 +641,7 @@ private fun NpRailItem(
     val pressed by interaction.collectIsPressedAsState()
     val pressScale = animateFloatAsState(
         targetValue = if (pressed) 0.94f else 1f,
-        animationSpec = silkSpring(Motion.Press),
+        animationSpec = npMotion(Motion.Press),
         label = "railPress",
     )
     // 「Filled, not outlined」：选中从描边变实心（设计稿 `.rail-btn.on .np-ico{fill:currentColor}`）
@@ -696,7 +696,7 @@ private fun NpTabItem(
 ) {
     val tint by animateColorAsState(
         targetValue = if (selected) accent else muted,
-        animationSpec = silkSpring(Motion.Press),
+        animationSpec = npMotion(Motion.Press),
         label = "tabTint",
     )
     // 按压缩放（设计稿 `:active` 语言的 tabbar 版本，取 chip 的 .96 档）
@@ -704,7 +704,7 @@ private fun NpTabItem(
     val pressed by interaction.collectIsPressedAsState()
     val pressScale = animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
-        animationSpec = silkSpring(Motion.Press),
+        animationSpec = npMotion(Motion.Press),
         label = "tabPress",
     )
     val shownIcon = if (selected) selectedIcon ?: icon else icon

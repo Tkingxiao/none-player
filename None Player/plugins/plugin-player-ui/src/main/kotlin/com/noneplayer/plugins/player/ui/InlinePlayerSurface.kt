@@ -107,7 +107,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         modifier: Modifier,
         autoPlay: Boolean,
     ) {
-        val kernel = LocalKernel.current
+                val kernel = LocalKernel.current
         val context = LocalContext.current
         val scope = rememberCoroutineScope()
         val settings = remember { kernel.services.get<AppSettings>() }
@@ -147,9 +147,6 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         }
 
         val state by player.state.collectAsStateWithLifecycle()
-        val positionMs by player.positionMs.collectAsStateWithLifecycle()
-        val durationMs by player.durationMs.collectAsStateWithLifecycle()
-        val bufferedPositionMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
         val videoAspectRatio by player.videoAspectRatio.collectAsStateWithLifecycle()
         val cues by player.cues.collectAsStateWithLifecycle()
         val overlays by remember { kernel.registry.observe<PlaybackOverlay>() }
@@ -212,6 +209,15 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                         ),
                     ),
             ) {
+                // E120：进度/时长/缓冲三项的订阅点收进控制层这个作用域。
+                // 原先它们和 state/cues 一起解包在 InlinePlayerView 顶部，于是整棵
+                // 内嵌子树每 250ms 重组一次（实测 43 次/12s）——AndroidView 虽被
+                // Compose 跳过、没有真的重挂表面（同窗口 attachSurfaceTo 计 0 次），
+                // 但控制层外的父作用域白跑，`Brush.verticalGradient` 与两条
+                // enter/exit spec 每 tick 重新分配。§9.2 的纪律就是为这个立的。
+                val positionMs by player.positionMs.collectAsStateWithLifecycle()
+                val durationMs by player.durationMs.collectAsStateWithLifecycle()
+                val bufferedPositionMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()

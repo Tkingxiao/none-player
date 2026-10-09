@@ -117,10 +117,12 @@ fun Modifier.npPressScale(
 ): Modifier {
     val source = interactionSource ?: remember { MutableInteractionSource() }
     val pressed by source.collectIsPressedAsState()
-    // reduced-motion：砍掉位移/缩放，点击路径保持不变
-    val reduceMotion = rememberReduceMotion()
+    // 位移/缩放门控：E119 前只读 `rememberReduceMotion()`，于是 §9.6 的
+    // `displacementAsFade`（轻量档把位移/缩放整体退化成 fade）**挡不住按压缩放**——
+    // 降到轻量档后按钮仍在缩放，而同一档位的滑入滑出已经变成淡入淡出了。
+    val displacementAllowed = npDisplacementAllowed()
     val scale = silkFloat(
-        target = if (pressed && enabled && !reduceMotion) pressedScale else 1f,
+        target = if (pressed && enabled && displacementAllowed) pressedScale else 1f,
         durationMs = Motion.Press,
         label = "npPressScale",
     )
@@ -192,11 +194,11 @@ fun Modifier.npHoverLift(
     // 无指针设备：hover 态永远不会成立。**直接短路**，不建动画状态——
     // 否则每张卡片都要背一个 Animatable 与随动协程，只为追一个恒为 0 的目标。
     if (!enabled) return this
-    val reduceMotion = rememberReduceMotion()
-    // 同 [npPressScale]：状态读在 graphicsLayer 的 lambda 里，悬停上浮只走绘制层，
-    // 不重组卡片。
+    // 同 [npPressScale]：E119 起门控读 npDisplacementAllowed()，轻量档也不上浮。
+    val displacementAllowed = npDisplacementAllowed()
+    // 状态读在 graphicsLayer 的 lambda 里，悬停上浮只走绘制层，不重组卡片。
     val lift = silkDp(
-        target = if (hovered && !reduceMotion) distance else 0.dp,
+        target = if (hovered && displacementAllowed) distance else 0.dp,
         durationMs = Motion.Panel,
         label = "npHoverLift",
     )
@@ -284,10 +286,10 @@ fun NpIconButton(
 ) {
     val ink = LocalNpInk.current
     val target = tint ?: if (selected) ink.accent else ink.muted
-    val color by animateColorAsState(target, silkSpring(Motion.Hover), label = "npIconTint")
+    val color by animateColorAsState(target, npMotion(Motion.Hover), label = "npIconTint")
     val background by animateColorAsState(
         if (selected) ink.accentSoft else Color.Transparent,
-        silkSpring(Motion.Hover),
+        npMotion(Motion.Hover),
         label = "npIconBg",
     )
     Box(
@@ -456,12 +458,12 @@ fun NpMoreLink(
     val pressed by interactionSource.collectIsPressedAsState()
     val color by animateColorAsState(
         if (pressed) ink.accent else ink.muted,
-        silkSpring(Motion.Field),
+        npMotion(Motion.Field),
         label = "moreColor",
     )
     val shift by animateFloatAsState(
         if (pressed) 2f else 0f,
-        silkSpring(Motion.Field),
+        npMotion(Motion.Field),
         label = "moreShift",
     )
     Row(
@@ -575,17 +577,17 @@ fun NpSwitch(
     val ink = LocalNpInk.current
     val track by animateColorAsState(
         if (checked) ink.accent else ink.border,
-        silkSpring(Motion.Panel),
+        npMotion(Motion.Panel),
         label = "switchTrack",
     )
     val thumb by animateColorAsState(
         if (checked) ink.bg else ink.fg,
-        silkSpring(Motion.Panel),
+        npMotion(Motion.Panel),
         label = "switchThumb",
     )
     val offset by animateFloatAsState(
         if (checked) 19f else 0f,
-        bouncySpring(Motion.Switch),
+        npMotion(Motion.Switch, bouncy = true),
         label = "switchOffset",
     )
     Box(

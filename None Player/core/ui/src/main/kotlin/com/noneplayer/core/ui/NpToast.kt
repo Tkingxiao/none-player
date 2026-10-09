@@ -1,7 +1,6 @@
 package com.noneplayer.core.ui
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
@@ -65,13 +64,21 @@ fun NpToastHost(
             state.clear()
         }
     }
+    // E119：Toast 的半格位移属"位移类"，Reduce Motion / 轻量档下收成纯淡入淡出（§9.3/§9.6）。
+    // 原先两条 spec 都是 `tween(npDuration(Toast))`——只缩放、不认 Reduce Motion，
+    // 系统「移除动画」下 Toast 仍会整段滑 240ms。走 npMotion 后由它统一覆盖成 ReduceFade。
+    val slideAllowed = npDisplacementAllowed()
     Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.BottomCenter) {
         AnimatedVisibility(
             visible = state.message != null,
-            enter = fadeIn(tween(npDuration(Motion.Toast), easing = NpEasing.Silk)) +
-                slideInVertically(tween(npDuration(Motion.Toast), easing = NpEasing.Silk)) { it / 2 },
-            exit = fadeOut(tween(npDuration(Motion.Toast), easing = NpEasing.SilkExit)) +
-                slideOutVertically(tween(npDuration(Motion.Toast), easing = NpEasing.SilkExit)) { it / 2 },
+            enter = fadeIn(npMotion(Motion.Toast, easing = NpEasing.Silk)) +
+                slideInVertically(npMotion(Motion.Toast, easing = NpEasing.Silk)) {
+                    if (slideAllowed) it / 2 else 0
+                },
+            exit = fadeOut(npMotion(Motion.Toast, easing = NpEasing.SilkExit)) +
+                slideOutVertically(npMotion(Motion.Toast, easing = NpEasing.SilkExit)) {
+                    if (slideAllowed) it / 2 else 0
+                },
         ) {
             val message = state.message.orEmpty()
             val shape = RoundedCornerShape(NpRadius.chip)

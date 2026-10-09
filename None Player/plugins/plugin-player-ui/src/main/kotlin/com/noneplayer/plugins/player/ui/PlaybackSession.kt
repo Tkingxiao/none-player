@@ -23,8 +23,10 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -212,6 +214,26 @@ class PlaybackSession(
                 hasPrevious = index > 0,
             )
         }.stateIn(scope, SharingStarted.Eagerly, null)
+
+    /**
+     * **位置无关**的会话摘要——只用来渲染"在播什么"，进度请自己订阅
+     * [VideoPlayer.positionMs]。
+     *
+     * 为什么要这份投影（E120）：[nowPlaying] 里含 `positionMs`，而引擎每 250ms 轮询
+     * 一次进度，于是它**每秒发 4 个新值**。页面只要 `by session.nowPlaying` 解包，
+     * 整页就跟着进度重组——仅听音频页实测 **39 次/12s**（两个 `radialGradient`、
+     * 唱片、6 枚 chip 全部重跑），类 PC 外壳的 `isOccupied` 同理会把失效广播到
+     * 整个骨架（含媒体库那一栏）。
+     *
+     * 实现是"把 positionMs 归零再 distinctUntilChanged"，所以
+     * **这份投影的 `progress` 恒为 0**——它不是"少更新一点的 nowPlaying"，
+     * 而是"只回答在播什么"的另一份真相。需要进度的叶子（迷你条、进度行）
+     * 继续用 [nowPlaying] 或直接订引擎。
+     */
+    val nowPlayingSummary: StateFlow<NowPlaying?> =
+        nowPlaying.map { snap -> snap?.copy(positionMs = 0L) }
+            .distinctUntilChanged()
+            .stateIn(scope, SharingStarted.WhileSubscribed(5_000), null)
 
     private data class EngineSnapshot(
         val isPlaying: Boolean = false,

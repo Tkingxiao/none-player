@@ -3,14 +3,21 @@ package com.noneplayer.core.ui
 /**
  * 播放时间戳：h:mm:ss / mm:ss（与 iOS 时长展示习惯一致）。
  * 未知时长显示 0:00。
+ *
+ * 手写补零而不是 `"%d:%02d".format(...)`（E121）：本函数在**每次列表行绑定**与
+ * **每次进度上报**上都会被叫到，而 `String.format` 每次都要新建一个 `Formatter`、
+ * 解析一遍格式串、再装箱三个参数——它是这条链上唯一"每 tick 必然分配"的东西。
+ * 行为与 `%02d` 逐字符等价（见 `TimeFormatTest`）。
  */
 fun formatTimestamp(ms: Long): String {
     val totalSeconds = (ms.coerceAtLeast(0)) / 1000
     val h = totalSeconds / 3600
     val m = (totalSeconds % 3600) / 60
     val s = totalSeconds % 60
-    return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
+    return if (h > 0) "$h:${pad2(m)}:${pad2(s)}" else "$m:${pad2(s)}"
 }
+
+private fun pad2(v: Long): String = if (v < 10) "0$v" else v.toString()
 
 /**
  * 文件大小展示：GB / MB / KB 自适应；未知（≤0）为空串。

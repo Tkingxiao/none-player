@@ -72,7 +72,7 @@ fun NpFilterSelect(
     var anchor by remember { mutableStateOf(Rect.Zero) }
     val chevron by animateFloatAsState(
         targetValue = if (open) 180f else 0f,
-        animationSpec = silkSpring(Motion.Panel),
+        animationSpec = npMotion(Motion.Panel),
         label = "fselChevron",
     )
 
