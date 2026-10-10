@@ -7,6 +7,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -23,6 +25,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -40,6 +43,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -54,10 +58,14 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.addPathNodes
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -76,9 +84,12 @@ import com.noneplayer.core.ui.npGlassChrome
 import com.noneplayer.core.ui.npGlassSurface
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.rememberNpHaptics
+import com.noneplayer.core.ui.silkFloat
+import com.noneplayer.core.ui.silkOffset
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
+import kotlin.math.roundToInt
 
 
 /**
@@ -200,12 +211,19 @@ fun KernelTabScaffold(
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<DetailPaneProvider>())
     val sortedPanes = remember(panes) { panes.sortedBy { it.order } }
 
+    // 切 Tab 的方向（M4 的"内容方向淡移 8dp"用它）：Tab 序里"从哪来 → 到哪去"的符号。
+    // 0 = 方向未知（冷启、内层压了二级页），那就只淡不挪。
+    // 必须在 `selectTab` 之前声明——它是被那个局部函数捕获的。
+    val tabShiftDirection = remember { mutableIntStateOf(0) }
     // 切 Tab：栈内永远只保留一个 Tab（E53），状态靠 saveState/restoreState 成对保留。
     val haptics = rememberNpHaptics()
     fun selectTab(route: String) {
         if (currentRoute == route) return
         // M4（§7.5 `Tick`）：真正换了目的地才响——点当前 Tab 没有状态变化。
         haptics.performHaptic(NpHaptic.Tick)
+        val from = sortedTabs.indexOfFirst { it.route == currentRoute }
+        val to = sortedTabs.indexOfFirst { it.route == route }
+        tabShiftDirection.intValue = if (from >= 0 && to >= 0) to.compareTo(from) else 0
         val topDestinationId = tabNavController.currentDestination?.id
         tabNavController.navigate(route) {
             if (topDestinationId != null) {
@@ -237,29 +255,42 @@ fun KernelTabScaffold(
     // §7.2：Tab 切换 = fade + scale 0.98→1，**不做**横向整页滑动（半路卡住的感觉）。
     // 0.98 是位移的一种，轻量档 / Reduce Motion 下并掉，只留淡入淡出。
     val tabScaleIn = if (npDisplacementAllowed()) 0.98f else 1f
+    // M4（§7 场景表）的第三件：内容**方向淡移 8dp**——往右切就从左边进来。
+    // 8dp 是"读得出方向的最小量"（与 LibraryScreen 的 stage 位移同一档），不是整页滑：
+    // 整页滑会在半路把两页各露一半，那正是 §7.2 禁掉的东西。
+    val tabShiftPx = if (npDisplacementAllowed()) with(LocalDensity.current) { 8.dp.roundToPx() } else 0
     val navHost: @Composable (Modifier) -> Unit = { modifier ->
         NavHost(
             navController = tabNavController,
             startDestination = sortedTabs.first().route,
             modifier = modifier,
-            // Tab 之间是**平级目的地**，不做方向性滑动，只做一次短交叉淡入。
+            // Tab 之间是**平级目的地**，不做方向性滑动，只做一次短交叉淡入 + 8dp 方向淡移。
             // 必须显式声明：NavHost 默认转场是 `tween(700)`，切一次标签要 0.7s
             // 才"到位"，是整壳里最慢的一处响应。
             enterTransition = {
+                val shift = tabShiftPx * tabShiftDirection.intValue
                 fadeIn(tween(tabSwapMs, easing = NpEasing.Silk)) +
-                    scaleIn(initialScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.Silk))
+                    scaleIn(initialScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.Silk)) +
+                    slideInHorizontally(tween(tabSwapMs, easing = NpEasing.Silk)) { shift }
             },
             exitTransition = {
+                // 退场走相反方向：进来的往右推，出去的就往左让
+                val shift = -tabShiftPx * tabShiftDirection.intValue
                 fadeOut(tween(tabSwapMs, easing = NpEasing.SilkExit)) +
-                    scaleOut(targetScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.SilkExit))
+                    scaleOut(targetScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.SilkExit)) +
+                    slideOutHorizontally(tween(tabSwapMs, easing = NpEasing.SilkExit)) { shift }
             },
             popEnterTransition = {
+                val shift = tabShiftPx * tabShiftDirection.intValue
                 fadeIn(tween(tabSwapMs, easing = NpEasing.Silk)) +
-                    scaleIn(initialScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.Silk))
+                    scaleIn(initialScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.Silk)) +
+                    slideInHorizontally(tween(tabSwapMs, easing = NpEasing.Silk)) { shift }
             },
             popExitTransition = {
+                val shift = -tabShiftPx * tabShiftDirection.intValue
                 fadeOut(tween(tabSwapMs, easing = NpEasing.SilkExit)) +
-                    scaleOut(targetScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.SilkExit))
+                    scaleOut(targetScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.SilkExit)) +
+                    slideOutHorizontally(tween(tabSwapMs, easing = NpEasing.SilkExit)) { shift }
             },
             builder = tabGraph,
         )
@@ -431,6 +462,97 @@ fun KernelTabScaffold(
 //   见 设计文档.md §4.1–§4.2：条底与两根线只由 ink 令牌表达，不再各页自算 alpha。）
 private const val SHELL_ACCENT_SOFT_ALPHA = 0.16f
 
+/** M4（§7 场景表）：Tab 图标未选中时的静止缩放，选中后回到 1.0 */
+private const val TAB_ICON_REST_SCALE = 0.9f
+
+/**
+ * 选中胶囊的落点账本（M4「选中胶囊 morph」）。
+ *
+ * 各 Tab 项在布局完成时把自己在**根坐标系**里的矩形报进来，条自己也报一份；胶囊只画
+ * "当前选中项那一格"，位置 = 项矩形 − 条原点。于是切换时它是**在项与项之间滑动**的一块
+ * 色片，而不是每项各自淡入淡出的底色——后者读起来是"闪烁"，前者才读得出"我把选中
+ * 挪过去了"。
+ *
+ * 为什么不用"下标 × 槽宽"算：Rail 的「设置」被一个 `weight(1f)` 推到底部，槽位**不等距**；
+ * 底部条今天等距，但加第五个 Tab 就会漂。量出来的位置不会说谎。
+ *
+ * 首帧顺序：`onGloballyPositioned` 先子后父，所以项先报、条后报——`setHost` 里补算一次
+ * 当前选中项，免得胶囊在第一帧跑到屏幕外去。
+ */
+private class TabSlotLedger {
+    private val rects = HashMap<String, IntRect>()
+    private var hostLeft = 0
+    private var hostTop = 0
+    private var selectedRoute = ""
+
+    /** 选中格在**条坐标系**里的矩形；`IntRect.Zero` = 还没量到（胶囊这帧不画） */
+    var target by mutableStateOf(IntRect.Zero)
+        private set
+
+    fun setHost(rect: IntRect) {
+        hostLeft = rect.left
+        hostTop = rect.top
+        rects[selectedRoute]?.let { target = toLocal(it) }
+    }
+
+    fun report(route: String, rect: IntRect) {
+        rects[route] = rect
+        if (route == selectedRoute) target = toLocal(rect)
+    }
+
+    fun select(route: String?) {
+        selectedRoute = route.orEmpty()
+        target = rects[selectedRoute]?.let { toLocal(it) } ?: IntRect.Zero
+    }
+
+    private fun toLocal(r: IntRect) = IntRect(
+        r.left - hostLeft,
+        r.top - hostTop,
+        r.right - hostLeft,
+        r.bottom - hostTop,
+    )
+}
+
+private fun androidx.compose.ui.geometry.Rect.toIntRect() = IntRect(
+    left.roundToInt(),
+    top.roundToInt(),
+    right.roundToInt(),
+    bottom.roundToInt(),
+)
+
+/**
+ * 选中胶囊本体：只画一格，位置跟着 [TabSlotLedger.target] 走。
+ *
+ * 位置用 `offset { }` 的 lambda 版——动画值落在测量相位，不拖父级重组（§9.2）；
+ * 时长经 `silkOffset` 走 `Motion.Tab` 令牌，轻量档自动缩时长、Reduce Motion 下直接
+ * 到位，都不必在这里再判一次档位。
+ */
+@Composable
+private fun NpTabCapsule(
+    ledger: TabSlotLedger,
+    corner: Dp,
+    modifier: Modifier = Modifier,
+) {
+    val target = ledger.target
+    if (target == IntRect.Zero) return
+    val accent = MaterialTheme.colorScheme.primary
+    val density = LocalDensity.current
+    val pos by silkOffset(IntOffset(target.left, target.top), Motion.Tab, label = "tabCapsule")
+    Box(
+        modifier = modifier
+            .offset { IntOffset(pos.x, pos.y) }
+            // 账本里的矩形是**像素**（onGloballyPositioned 给的就是 px），所以要经密度
+            // 换算成 Dp。写成 `target.width.dp` 会把 305px 当成 305dp 再乘一次密度——
+            // 实机 520dpi 下胶囊变成 991px 宽，一眼就"糊到右边去了"。
+            .size(
+                width = with(density) { target.width.toDp() },
+                height = with(density) { target.height.toDp() },
+            )
+            .clip(RoundedCornerShape(corner))
+            .background(accent.copy(alpha = SHELL_ACCENT_SOFT_ALPHA)),
+    )
+}
+
 /**
  * `.tabbar`：底部 Tab 栏（**不透明**）。
  *
@@ -451,6 +573,10 @@ private fun NpBottomTabBar(
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val ink = LocalNpInk.current
 
+    // M4：选中态是一枚**在四格之间滑动**的胶囊，不是四项各自淡入淡出的底色。
+    val ledger = remember { TabSlotLedger() }
+    LaunchedEffect(currentRoute) { ledger.select(currentRoute) }
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -458,8 +584,10 @@ private fun NpBottomTabBar(
             // + 顶发丝线（ink.border，即设计稿 `.tabbar{border-top}`）。
             // 此前这三行是就地手写的两份 background + gradient，与 core:ui 的配方各表；
             // 收编后顶栏 / 迷你条 / Tab 栏三处共用同一个 modifier。
-            .npGlassSurface(ink, topHighlight = true, topHairline = true),
+            .npGlassSurface(ink, topHighlight = true, topHairline = true)
+            .onGloballyPositioned { ledger.setHost(it.boundsInRoot().toIntRect()) },
     ) {
+        NpTabCapsule(ledger = ledger, corner = 12.dp)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -471,15 +599,15 @@ private fun NpBottomTabBar(
                 .padding(vertical = 6.dp),
         ) {
             tabs.forEach { tab ->
-                val selected = currentRoute == tab.route
                 NpTabItem(
                     label = tab.label,
                     icon = tab.icon as? ImageVector,
                     selectedIcon = tab.selectedIcon as? ImageVector,
-                    selected = selected,
+                    selected = currentRoute == tab.route,
                     onClick = { onSelect(tab.route) },
                     accent = accent,
                     muted = muted,
+                    onSlot = { rect -> ledger.report(tab.route, rect) },
                     modifier = Modifier.weight(1f),
                 )
             }
@@ -521,13 +649,25 @@ private fun NpNavRail(
                 ),
             ),
     ) {
-    Row(
+    // M4：Rail 的选中态也是一枚**滑动的胶囊**（竖向走位）。品牌块与「主题」钮不是目的地、
+    // 不上报槽位，所以胶囊永远不会停到它们身上。
+    val railLedger = remember { TabSlotLedger() }
+    LaunchedEffect(currentRoute) { railLedger.select(currentRoute) }
+    Box(
         modifier = Modifier
             .fillMaxHeight()
             .width(80.dp)
-            // L2 竖条：同一条底色的口径（§4.1）。Rail 是竖的，npGlassSurface 的
-            // 两根横线用不上，所以只取它的底——仍经同一个 modifier，不各写一份。
-            .npGlassChrome(ink),
+            // L2 竖条：同一条底色的口径（§4.1）。Rail 是竖的，npGlassSurface 的两根横线
+            // 用不上，所以只取它的底——仍经同一个 modifier，不各写一份。
+            // 底铺在**这一层**而不是里面的 Row：胶囊要画在玻璃底之上、各项之下。
+            .npGlassChrome(ink)
+            .onGloballyPositioned { railLedger.setHost(it.boundsInRoot().toIntRect()) },
+    ) {
+        NpTabCapsule(ledger = railLedger, corner = 14.dp)
+    Row(
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(80.dp),
     ) {
         Column(
             modifier = Modifier
@@ -566,6 +706,7 @@ private fun NpNavRail(
                     onClick = { onSelect(tab.route) },
                     accent = accent,
                     muted = muted,
+                    onSlot = { rect -> railLedger.report(tab.route, rect) },
                 )
             }
             // 推到底部的那一项（设置）
@@ -593,6 +734,7 @@ private fun NpNavRail(
                     onClick = { onSelect(tab.route) },
                     accent = accent,
                     muted = muted,
+                    onSlot = { rect -> railLedger.report(tab.route, rect) },
                 )
             }
         }
@@ -604,9 +746,16 @@ private fun NpNavRail(
         )
     }
     }
+    }
 }
 
-/** `.rail-btn`：64dp 宽 / 14dp 圆角 / 图标 + 11sp 文字；选中为 accent 字 + accent-soft 底 + 实心图标。 */
+/**
+ * `.rail-btn`：64dp 宽 / 14dp 圆角 / 图标 + 11sp 文字；选中为 accent 字 + 实心图标。
+ *
+ * 选中**底色不在这里画**——那是 [NpTabCapsule] 那枚竖向滑动的胶囊（M4）。各按钮只报一次
+ * 自己的槽位矩形（`onSlot`），品牌块与「主题」钮不是目的地、传 null，胶囊因此永远停不到
+ * 它们身上。图标 0.9→1.0 与底部条同一档、同一时长令牌。
+ */
 @Composable
 private fun NpRailItem(
     label: String,
@@ -616,26 +765,15 @@ private fun NpRailItem(
     onClick: () -> Unit,
     accent: Color,
     muted: Color,
+    onSlot: ((IntRect) -> Unit)? = null,
 ) {
     val tint by animateColorAsState(
         targetValue = if (selected) accent else muted,
         animationSpec = npMotion(Motion.Press),
         label = "railTint",
     )
-    val background by animateColorAsState(
-        targetValue = if (selected) {
-            accent.copy(alpha = SHELL_ACCENT_SOFT_ALPHA)
-        } else {
-            Color.Transparent
-        },
-        animationSpec = npMotion(Motion.Press),
-        label = "railBg",
-    )
-    val scale = animateFloatAsState(
-        targetValue = if (selected) 1f else 0.98f,
-        animationSpec = npMotion(Motion.Press),
-        label = "railScale",
-    )
+    val restScale = if (npDisplacementAllowed()) TAB_ICON_REST_SCALE else 1f
+    val scale by silkFloat(if (selected) 1f else restScale, Motion.Tab, label = "railScale")
     // 按压缩放（设计稿 `.rail-btn:active{transform:scale(.94)}`）
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -652,13 +790,19 @@ private fun NpRailItem(
         modifier = Modifier
             .width(64.dp)
             .clip(RoundedCornerShape(14.dp))
-            .background(background)
             .clickable(
                 interactionSource = interaction,
                 indication = null,
                 onClick = onClick,
             )
-            .padding(vertical = 8.dp),
+            .padding(vertical = 8.dp)
+            .then(
+                if (onSlot == null) {
+                    Modifier
+                } else {
+                    Modifier.onGloballyPositioned { onSlot(it.boundsInRoot().toIntRect()) }
+                },
+            ),
     ) {
         if (shownIcon != null) {
             Icon(
@@ -668,8 +812,8 @@ private fun NpRailItem(
                 modifier = Modifier
                     .size(24.dp)
                     .graphicsLayer {
-                        scaleX = scale.value * pressScale.value
-                        scaleY = scale.value * pressScale.value
+                        scaleX = scale * pressScale.value
+                        scaleY = scale * pressScale.value
                     },
             )
         }
@@ -682,7 +826,12 @@ private fun NpRailItem(
     }
 }
 
-/** `.tabbar button`：等分宽度 / 图标 20dp + 11sp 文字；选中 accent + 实心图标 + 按压缩放。 */
+/**
+ * `.tabbar button`：等分宽度 / 图标 20dp + 11sp 文字；选中 accent + 实心图标 + 按压缩放。
+ *
+ * M4 的图标那半：未选中 0.9 → 选中 1.0（`Motion.Tab` 220ms）。选中底色不在这里——
+ * 那是 [NpTabCapsule] 那枚滑动的胶囊，各按钮只负责自己的图标与文字。
+ */
 @Composable
 private fun NpTabItem(
     label: String,
@@ -692,6 +841,7 @@ private fun NpTabItem(
     onClick: () -> Unit,
     accent: Color,
     muted: Color,
+    onSlot: (IntRect) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val tint by animateColorAsState(
@@ -699,6 +849,9 @@ private fun NpTabItem(
         animationSpec = npMotion(Motion.Press),
         label = "tabTint",
     )
+    // 0.9→1 是位移，轻量档 / Reduce Motion 下并掉（§9.6），只留颜色与实心图标两个信号
+    val restScale = if (npDisplacementAllowed()) TAB_ICON_REST_SCALE else 1f
+    val iconScale by silkFloat(if (selected) 1f else restScale, Motion.Tab, label = "tabIconScale")
     // 按压缩放（设计稿 `:active` 语言的 tabbar 版本，取 chip 的 .96 档）
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -719,6 +872,7 @@ private fun NpTabItem(
                 onClick = onClick,
             )
             .padding(vertical = 4.dp)
+            .onGloballyPositioned { onSlot(it.boundsInRoot().toIntRect()) }
             .graphicsLayer {
                 scaleX = pressScale.value
                 scaleY = pressScale.value
@@ -729,7 +883,12 @@ private fun NpTabItem(
                 imageVector = shownIcon,
                 contentDescription = label,
                 tint = tint,
-                modifier = Modifier.size(20.dp),
+                modifier = Modifier
+                    .size(20.dp)
+                    .graphicsLayer {
+                        scaleX = iconScale
+                        scaleY = iconScale
+                    },
             )
         }
         Text(
