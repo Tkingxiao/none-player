@@ -10,7 +10,9 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 
 /**
  * E65 修复：此前未配置 corruptionHandler——偏好文件一旦因异常关机/存储故障等损坏，
@@ -328,6 +330,22 @@ class AppSettings(private val context: Context) {
     // ---- 扫描目录（SAF 授权的目录树列表，空列表 = 不扫描） ----
 
     /** 多目录列表（"\n" 连接存储）；旧版单目录键 [KEY_SCAN_FOLDER] 读取时自动迁移，首次写盘后清除 */
+    /**
+     * 扫描目录的进程级快照（E105「首帧同步」手法）。
+     *
+     * 存在理由：`LibraryScreen` 每次重进组合（切 Tab、从播放页返回）都要用这份值判
+     * "用户配过目录没有"，而 DataStore 的首读要等一帧。用 `emptyList()` 当收集初值
+     * 等于把"还没读到"当成"确实没配"，于是每次切页都闪一帧「选择要观看的文件夹」
+     * 空态（2026-10-11 用户实报，实机抓帧在案）。这里在首次收集后留一份无阻塞可读的
+     * 最新值，UI 侧拿它当初值即可。
+     *
+     * `null` = **本进程还没读过**（冷启的头一两帧），调用方必须把它和"空列表"区分开。
+     */
+    private val _scanFolderUrisSnapshot = MutableStateFlow<List<String>?>(null)
+
+    /** 无阻塞读；未落地时为 null（由 UI 出骨架，不出任何"未配置"结论） */
+    val scanFolderUrisSnapshot: List<String>? get() = _scanFolderUrisSnapshot.value
+
     val scanFolderUris: Flow<List<String>> = context.dataStore.data
         .map { prefs ->
             val stored = prefs[KEY_SCAN_FOLDERS]
@@ -336,7 +354,7 @@ class AppSettings(private val context: Context) {
             } else {
                 prefs[KEY_SCAN_FOLDER]?.let { listOf(it) } ?: emptyList()
             }
-        }
+        }.onEach { _scanFolderUrisSnapshot.value = it }
 
     suspend fun setScanFolders(uris: List<String>) {
         context.dataStore.edit { prefs ->

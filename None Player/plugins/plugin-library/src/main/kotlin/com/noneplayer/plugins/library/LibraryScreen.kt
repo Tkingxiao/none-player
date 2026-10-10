@@ -156,6 +156,7 @@ import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.NpTabChannel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -219,7 +220,14 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val sortMode by settings.sortMode.collectAsStateWithLifecycle(SortMode.ADDED)
     val sortAscending by settings.sortAscending.collectAsStateWithLifecycle(false)
     val gridColumns by settings.gridColumns.collectAsStateWithLifecycle(2)
-    val folderUris by settings.scanFolderUris.collectAsStateWithLifecycle(initialValue = emptyList())
+    // E78 的可空哨兵 + E105 的首帧同步：初值取进程级快照（本进程还没读过时为 null）。
+    // 旧写法初值直接给 emptyList()，把"还没读到"当成"确实没配"——而 AnimatedContent
+    // 在过渡期会继续渲染旧帧（见 LibraryStage 注释），于是每次切 Tab / 从播放页返回
+    // 都要闪一帧「选择要观看的文件夹」空态浮在正在淡出的页面上（2026-10-11 用户实报，
+    // 实机抓帧在案）。
+    val folderUris by settings.scanFolderUris
+        .map<List<String>, List<String>?> { it }
+        .collectAsStateWithLifecycle(initialValue = settings.scanFolderUrisSnapshot)
     // 设计稿 viewToggle 的 `state.view`：网格 / 列表，跨页面共用并持久化
     val listViewStyle by settings.listViewStyle.collectAsStateWithLifecycle("grid")
     val onViewStyle: (String) -> Unit = { scope.launch { settings.setListViewStyle(it) } }
@@ -544,16 +552,25 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                 Column(modifier = Modifier.fillMaxSize()) {
                         // 页内态：把上面这串条件**只写一遍**，分支按枚举分派——条件与动效同源，
                         // 不会出现"加了分支忘了动效"（M2 的"其余 fade"与 M13 的"骨架→内容 240"都在这里兑现）。
+                        // 有内容时的版式判定（聚合 / 文件夹 / 首页）。提成一份给两处用——
+                        // "目录首读未落地但内容已在手"那一臂也要走它，复制条件就会漂。
+                        val contentStage: LibraryStage = when {
+                            aggregate != null -> LibraryStage.Aggregate(aggregate!!)
+                            viewMode == LibraryView.FOLDERS -> LibraryStage.Folder
+                            else -> LibraryStage.Home
+                        }
+                        val folders = folderUris
                         val stage = when {
                             detailItem != null -> LibraryStage.Detail(detailItem!!)
                             sources.isEmpty() -> LibraryStage.NoSource
                             missingPermission -> LibraryStage.NoPermission
-                            folderUris.isEmpty() -> LibraryStage.NoFolder
+                            // 目录还没读到（冷启的头几帧）：内容已在手就直接出内容，否则给
+                            // 骨架。"未配置"是给用户看的**结论**，不许拿来填加载中间态。
+                            folders == null -> if (items.isNotEmpty()) contentStage else LibraryStage.Loading
+                            folders.isEmpty() -> LibraryStage.NoFolder
                             !mediaLoaded && items.isEmpty() -> LibraryStage.Loading
                             items.isEmpty() -> LibraryStage.Empty
-                            aggregate != null -> LibraryStage.Aggregate(aggregate!!)
-                            viewMode == LibraryView.FOLDERS -> LibraryStage.Folder
-                            else -> LibraryStage.Home
+                            else -> contentStage
                         }
                         val stageFadeMs = npDuration(Motion.NavFade)
                         val stageExitMs = npDuration(Motion.NavExit)
