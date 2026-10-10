@@ -27,7 +27,9 @@ import com.noneplayer.core.media.ProbeMemo
 import com.noneplayer.core.media.PlaybackFailure
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary
 import java.io.ByteArrayOutputStream
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.math.max
 
@@ -84,22 +86,57 @@ object FormatProbe {
      * 使结构化并发的取消信号失效：调用方 `prepareJob?.cancel()` 后，旧探测仍可能
      * "被取消"却跑完并返回正常结果，静默覆盖新一次 prepare() 的媒体。
      * 显式区分取消异常并继续向上抛出，是修复的关键一步。
+     *
+     * [sizeBytes]/[lastModifiedSec] 是调用方手里现成的文件指纹（E111 断点校验同一约定）：
+     * 给了才读写缓存，不给就照旧现场探。为什么要有这份缓存——E80 规定每条装载路径都必须
+     * 过探测，而一次探测实测 0.5–1.5s，全压在用户等的那段时间里（手机基线：选集切换
+     * 1255–1861ms 中 probe 占 507–953ms）。
      */
     suspend fun probe(
         context: Context,
         uriString: String,
         expectedMime: String? = null,
-    ): Result =
-        withContext(Dispatchers.IO) {
+        sizeBytes: Long = 0L,
+        lastModifiedSec: Long = 0L,
+        /** 预探测传 false：`ProbeMemo` 是"最近**起播**的那一条"的排障入口，不该被预热写脏 */
+        recordMemo: Boolean = true,
+    ): Result {
+        val cacheable = sizeBytes > 0L && uriString.isNotEmpty()
+        if (cacheable) {
+            resultCache.get(uriString)?.takeIf {
+                it.sizeBytes == sizeBytes && it.lastModifiedSec == lastModifiedSec
+            }?.let { hit ->
+                // 命中要留声：切集耗时里"probe 段变短"必须能区分是命中还是碰巧读得快
+                android.util.Log.d("FormatProbe", "命中缓存(${hit.result.javaClass.simpleName}) $uriString")
+                return hit.result
+            }
+        }
+        return withContext(Dispatchers.IO) {
             try {
                 probeLocal(context.applicationContext, uriString, expectedMime)
-                    .also { recordMemo(uriString, it) }
+                    .also { if (recordMemo) recordMemo(uriString, it) }
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (t: Throwable) {
                 Result.Unknown
             }
+        }.also {
+            // Unknown（远程流 / 读取异常 / 超预算）没有结论，不缓存——放行不等于验证过
+            if (cacheable && it != Result.Unknown) {
+                resultCache.put(uriString, Memoized(sizeBytes, lastModifiedSec, it))
+            }
         }
+    }
+
+    /** 探测结果缓存条目：结论 + 它成立时所依据的文件指纹 */
+    private data class Memoized(val sizeBytes: Long, val lastModifiedSec: Long, val result: Result)
+
+    /**
+     * uri → 结论。上限按"一个文件夹一季"量级给 64 条，结论本身是几个字符串，不心疼。
+     *
+     * `LruCache` 自身方法同步，够这里用（并发预探测最多几条，撞上了也就是多探一次）。
+     */
+    private val resultCache = android.util.LruCache<String, Memoized>(64)
 
     /**
      * 最近探测摘要（E39 余项 + §12.3 解码诊断，批次 8）：设置页「解码诊断」的
@@ -163,7 +200,12 @@ object FormatProbe {
     /** profile 判读只需头部字节；截留上限（VOS/VOL/GOV 头远小于此） */
     private const val HEAD_CAP = 4 * 1024
 
-    private fun probeLocal(context: Context, uriString: String, expectedMime: String?): Result {
+    /**
+     * suspend + 循环内 `ensureActive()`：探测跑在 IO 线程上、一读最多 400 轮，
+     * 不可取消的话，"已经被用户切集取代的那次预热探测"会把磁盘通道占到底——
+     * 平板实测撞上时同一次真探测从 589ms 涨到 1799ms。取消必须能在两轮读之间落地。
+     */
+    private suspend fun probeLocal(context: Context, uriString: String, expectedMime: String?): Result {
         // 预期类型决定"没有视频轨"怎么判读（批次 8，音频文件实播暴露）：
         //  - 音频文件（mime audio/*）：只有音频轨是**正常**，不是失败；
         //  - 视频文件：缺视频轨照旧拦截（E80——wmv2-clip.avi 的"音频播完无声失败"）；
@@ -185,6 +227,7 @@ object FormatProbe {
             var matched: Extractor? = null
             var sniffThrew = false
             for (extractor in extractors) {
+                coroutineContext.ensureActive()
                 val sniffed = try {
                     extractor.sniff(input)
                 } catch (_: Throwable) {
@@ -220,6 +263,7 @@ object FormatProbe {
             var reads = 0
             while (reads < MAX_READS) {
                 reads++
+                coroutineContext.ensureActive()
                 val result = try {
                     matched.read(input, holder)
                 } catch (_: Throwable) {

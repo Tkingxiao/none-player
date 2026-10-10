@@ -786,9 +786,12 @@ fun NpSkeleton(
     val shimmerEnabled = npQuality().shimmer
     // 关掉时**不建**无限动画：留着它即便零位移也每帧回调，而骨架屏正是和真正内容
     // 抢帧的那一方——轻量档要的是"别动"，不是"动得慢一点"。
-    val shift = if (shimmerEnabled) {
-        val transition = rememberInfiniteTransition(label = "sk")
-        transition.animateFloat(
+    //
+    // 取值挪到**绘制相位**（`background { }` 的 brush lambda 在 DrawScope 里求值）：
+    // 旧写法把 `.value` 解在组合期，于是每条骨架以 60fps 重组自己、每帧再造一条
+    // `linearGradient` 加两个 `Offset`——只该重绘的东西不该走重组。
+    val shiftAnim = if (shimmerEnabled) {
+        rememberInfiniteTransition(label = "sk").animateFloat(
             initialValue = -1f,
             targetValue = 1f,
             animationSpec = infiniteRepeatable(
@@ -796,20 +799,27 @@ fun NpSkeleton(
                 repeatMode = RepeatMode.Restart,
             ),
             label = "skShift",
-        ).value
-    } else {
-        0f
-    }
-    val bg: Brush = if (shimmerEnabled) {
-        Brush.linearGradient(
-            colors = listOf(ink.surface, ink.surface2, ink.surface),
-            start = Offset(shift * 400f - 400f, 0f),
-            end = Offset(shift * 400f + 400f, 0f),
         )
     } else {
-        SolidColor(ink.surface)
+        null
     }
-    Box(modifier = modifier.clip(shape).background(bg))
+    Box(
+        modifier = modifier.clip(shape).drawBehind {
+            // 取值与造刷子都在绘制相位：State 只失效 draw，不再失效组合
+            val shift = shiftAnim?.value
+            drawRect(
+                if (shift == null) {
+                    SolidColor(ink.surface)
+                } else {
+                    Brush.linearGradient(
+                        colors = listOf(ink.surface, ink.surface2, ink.surface),
+                        start = Offset(shift * 400f - 400f, 0f),
+                        end = Offset(shift * 400f + 400f, 0f),
+                    )
+                },
+            )
+        },
+    )
 }
 
 /**

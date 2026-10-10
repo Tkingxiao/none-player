@@ -5,6 +5,7 @@ import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.LOCAL_MEDIA_SOURCE_ID
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.NpDecoding
 import com.noneplayer.core.media.cardTitle
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
@@ -97,6 +98,15 @@ class PlaybackSession(
         scope.launch {
             combine(settings.autoplayNext, _player) { autoplay, player -> autoplay to player }
                 .collect { (autoplay, player) -> player?.setAutoplayNext(autoplay) }
+        }
+        // §9.4「播放中自动降一档」的输入。此前这条管道是**空转的**：主题层的
+        // `forPlayback()` 与 `autoMotionQuality(decodingVideo)` 都写好了，但 app 侧
+        // 拿不到会话，只能恒传 false，于是解码期的装饰动画从来没降过档。
+        // 判据是"视频正在播"：仅听音频态没有视频解码器在跑，不该拿它去削别的动画。
+        scope.launch {
+            combine(_player.flatMapLatest { it?.state ?: flowOf(PlaybackState.Idle) }, _audioOnly) { state, audioOnly ->
+                state == PlaybackState.Playing && !audioOnly
+            }.collect { NpDecoding.set(it) }
         }
     }
 

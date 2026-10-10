@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -151,24 +152,28 @@ fun Modifier.npCardSurface(
  * 顶边 1px 高光——任何表面上边缘内侧铺满的发丝亮线。
  * 用于 Sheet / 分组卡等"有实底"的面，与 [npGlassSurface] 的玻璃高光同源。
  */
-fun Modifier.npTopHairline(ink: InkTokens): Modifier = drawWithContent {
-    drawContent()
+fun Modifier.npTopHairline(ink: InkTokens): Modifier = drawWithCache {
+    // 与 npGlassSurface / npMaskFadeEdges 同一族（E121 立的规矩）：渐变刷子的成本
+    // 在"每次绘制都重造一条 Brush + 三个 colorStop + 两个 Offset"，而这条发丝线
+    // 挂在会拖动的 Sheet 顶边——拖一下就是每帧一笔。缓存只在尺寸或令牌变化时重建。
     val inset = 12.dp.toPx()
     val y = 0.6f.dp.toPx()
-    drawLine(
-        brush = Brush.horizontalGradient(
-            colorStops = arrayOf(
-                0f to Color.Transparent,
-                0.5f to ink.edge,
-                1f to Color.Transparent,
-            ),
-            startX = inset,
-            endX = size.width - inset,
+    val brush = Brush.horizontalGradient(
+        colorStops = arrayOf(
+            0f to Color.Transparent,
+            0.5f to ink.edge,
+            1f to Color.Transparent,
         ),
-        start = Offset(inset, y),
-        end = Offset(size.width - inset, y),
-        strokeWidth = 1.2f.dp.toPx(),
+        startX = inset,
+        endX = size.width - inset,
     )
+    val start = Offset(inset, y)
+    val end = Offset(size.width - inset, y)
+    val strokeWidth = 1.2f.dp.toPx()
+    onDrawWithContent {
+        drawContent()
+        drawLine(brush = brush, start = start, end = end, strokeWidth = strokeWidth)
+    }
 }
 
 /**
@@ -279,20 +284,24 @@ fun NpMaskFade(
     stops: Float = 0.55f,
     floorAlpha: Float = 0f,
 ) {
-    fun at(alpha: Float) = color.copy(alpha = alpha)
-    val midAlpha = maxOf(startAlpha * 0.30f, floorAlpha)
-    // 中段过渡位按渐变**起点**算：fromTop=false 时整条曲线镜像，
-    // 否则"从下往上渐隐"会变成"下面先淡掉"，读起来方向反了。
-    val gradientStops = if (fromTop) {
-        arrayOf(0f to at(startAlpha), stops to at(midAlpha), 1f to at(0f))
-    } else {
-        val mirrored = 1f - stops
-        arrayOf(0f to at(0f), mirrored to at(midAlpha), 1f to at(startAlpha))
-    }
-    val brush = if (vertical) {
-        Brush.verticalGradient(*gradientStops)
-    } else {
-        Brush.horizontalGradient(*gradientStops)
+    // 渐变只由这几个入参决定，却曾被放在组合期每次重造（三个 color.copy + arrayOf +
+    // 一条 Brush）。控制层所在的那一页重组频繁，这条就跟着白造。
+    val brush = remember(color, startAlpha, stops, floorAlpha, vertical, fromTop) {
+        fun at(alpha: Float) = color.copy(alpha = alpha)
+        val midAlpha = maxOf(startAlpha * 0.30f, floorAlpha)
+        // 中段过渡位按渐变**起点**算：fromTop=false 时整条曲线镜像，
+        // 否则"从下往上渐隐"会变成"下面先淡掉"，读起来方向反了。
+        val gradientStops = if (fromTop) {
+            arrayOf(0f to at(startAlpha), stops to at(midAlpha), 1f to at(0f))
+        } else {
+            val mirrored = 1f - stops
+            arrayOf(0f to at(0f), mirrored to at(midAlpha), 1f to at(startAlpha))
+        }
+        if (vertical) {
+            Brush.verticalGradient(*gradientStops)
+        } else {
+            Brush.horizontalGradient(*gradientStops)
+        }
     }
     Box(
         modifier = modifier

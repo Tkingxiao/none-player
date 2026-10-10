@@ -113,6 +113,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private val _decodeNotice = MutableStateFlow<String?>(null)
     override val decodeNotice: StateFlow<String?> = _decodeNotice.asStateFlow()
 
+    /** 邻域预探测的协程句柄：真实装载一开始就取消它（见 [prefetchProbeWindow]） */
+    private var prefetchJob: Job? = null
+
     // ---- 队列（§8.2）：写入 media3 会话后，通知 ⏮⏭ 与"播完自动下一集"由框架免费提供 ----
     private val _queue = MutableStateFlow<List<com.noneplayer.core.media.MediaItem>>(emptyList())
     override val queue: StateFlow<List<com.noneplayer.core.media.MediaItem>> = _queue.asStateFlow()
@@ -216,8 +219,16 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     // 之后由 [eqExtrasListener] 跟进变化（探测帧发出后服务侧才写）。
                     refreshEqCapabilities(c)
                     c.addListener(object : Player.Listener {
+                        // 首帧不在这里：media3 不把 onRenderedFirstFrame 转发给
+                        // MediaController，控制器侧只能看到 STATE_READY。出画时刻记在会话侧
+                        // （PlaybackService 的播放器监听），同一进程内时间戳可直接对齐。
                         override fun onPlaybackStateChanged(playbackState: Int) {
                             if (terminalFailure) return
+                            if (playbackState == Player.STATE_READY) {
+                                NpPerf.mark("READY")
+                                // 就绪才预热邻域探测：这一刻之前磁盘都在回填当前集的缓冲
+                                prefetchProbeWindow()
+                            }
                             _state.value = when (playbackState) {
                                 Player.STATE_BUFFERING -> PlaybackState.Buffering
                                 Player.STATE_READY -> PlaybackState.Ready
@@ -373,14 +384,25 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * ③ 世代号（E58 二次防御）：快速切换 A→B 时，A 的探测协程即便在极端调度下
      *    "取消晚了一步"跑完，落地前也会先核对世代号——不是最新一次就直接丢弃。
      */
-    private fun probeThenLoad(uri: String, expectedMime: String? = null, apply: () -> Unit) {
+    private fun probeThenLoad(
+        uri: String,
+        expectedMime: String? = null,
+        sizeBytes: Long = 0L,
+        lastModifiedSec: Long = 0L,
+        apply: () -> Unit,
+    ) {
         prepareJob?.cancel()
+        // 用户已经动手切了，就别再替他猜：预探测和这一次真探测走同一条磁盘通道，
+        // 平板实测撞上时单条探测从 589ms 涨到 1799ms——预热反倒拖慢了切换。
+        prefetchJob?.cancel()
         terminalFailure = false
         _state.value = PlaybackState.Buffering
         _decodeNotice.value = null
         val myGeneration = ++prepareGeneration
+        NpPerf.begin("probe uri=${uri.substringAfterLast('/')}")
         prepareJob = scope.launch {
-            val probe = FormatProbe.probe(appContext, uri, expectedMime)
+            val probe = FormatProbe.probe(appContext, uri, expectedMime, sizeBytes, lastModifiedSec)
+            NpPerf.mark("probe done (${probe.javaClass.simpleName})")
             if (myGeneration != prepareGeneration) return@launch // 已有更新的装载，丢弃
             when (probe) {
                 is FormatProbe.Result.Unplayable -> {
@@ -416,6 +438,55 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     _decodeNotice.value = null
                     apply()
                 }
+            }
+        }
+    }
+
+    /**
+     * 邻域预探测（§11.2 L2 的探测侧一半）。
+     *
+     * L2 已经把下一集的**数据**预缓冲好了，可 E80 的起播探测仍留在切集那一刻现场跑——
+     * 实测 0.5–1.5s 全落在用户等的那段时间里（手机基线：选集切换 1255–1861ms 中
+     * probe 占 507–953ms）。当前集进入 READY 后，把预载窗口内的邻域条目按同一文件指纹
+     * 先探一遍、写进 [FormatProbe] 的结果缓存：用户点过去时探测直接命中。
+     *
+     * 串行探，且每探一条前核对当前下标——切集之后邻域窗口已经变了，旧循环不该继续抢 I/O。
+     */
+    private fun prefetchProbeWindow() {
+        val items = _queue.value
+        val current = _currentIndex.value
+        if (items.isEmpty() || current !in items.indices) return
+        val window = ((current - PROBE_PREFETCH_BACK)..(current + PROBE_PREFETCH_FWD))
+            .filter { it in items.indices && it != current }
+        if (window.isEmpty()) return
+        prefetchJob?.cancel()
+        prefetchJob = scope.launch {
+            delay(PROBE_PREFETCH_START_DELAY_MS)
+            for (index in window) {
+                // 下标一动，剩下的邻域就不是"用户接下来最可能点的那几条"了，收手
+                if (_currentIndex.value != current) return@launch
+                // **不许和当前集的缓冲抢磁盘**：等当前项的缓冲前沿领先到准入线再探。
+                // 没有这道闸时预热会在起播刚就绪就去读另外两条 1GB 文件的头，
+                // 手机同条件 A/B 实测把同一次冷启的探测从 1.6s 拖到 2.4s。
+                // 等不到就放弃本轮（慢盘 / 一直缺缓冲），下一次 READY 再来——
+                // 预热是锦上添花，不许变成新的等待来源。
+                var waitedMs = 0L
+                while (_bufferedPositionMs.value - _positionMs.value < PROBE_PREFETCH_MIN_AHEAD_MS) {
+                    if (_currentIndex.value != current) return@launch
+                    if (waitedMs >= PROBE_PREFETCH_WAIT_BUDGET_MS) return@launch
+                    delay(PROBE_PREFETCH_WAIT_STEP_MS)
+                    waitedMs += PROBE_PREFETCH_WAIT_STEP_MS
+                }
+                val item = items[index]
+                FormatProbe.probe(
+                    appContext,
+                    item.uri,
+                    item.mimeType,
+                    item.sizeBytes,
+                    item.lastModifiedSec,
+                    // 排障面板只该看见"最近起播的那一条"，预热不写它
+                    recordMemo = false,
+                )
             }
         }
     }
@@ -472,10 +543,12 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // 播完 4 秒音频并显示"播放结束"，用户只看到**纯黑屏**，无从知道是编码不支持。
         //
         // 这里对**即将播放的那一项**做探测：不可解则不装载队列，直接落结构化失败态。
-        probeThenLoad(items[safeIndex].uri, items[safeIndex].mimeType) {
+        val target = items[safeIndex]
+        probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
             applyQueue(mediaItemsOf(items), safeIndex, startPositionMs)
         }
     }
+
 
     /** setQueue 成功路径的装载体（探测通过后调用），保持与探测前的行为一致 */
     @OptIn(UnstableApi::class)
@@ -506,10 +579,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         c.setMediaItems(items, safeIndex, startPositionMs.coerceAtLeast(0L))
         c.prepare()
         c.play()
+        NpPerf.mark("setMediaItems idx=$safeIndex applied")
     }
 
     private fun mediaItemsOf(items: List<com.noneplayer.core.media.MediaItem>): List<MediaItem> =
-        items.map { it.toMediaItem() }
+        items.map { it.toMediaItem() }.also { NpPerf.mark("built ${it.size} media items") }
 
     /**
      * 选集/自动切集的落点：**同样是一条装载路径**，因此与 setQueue 走同一条探测闸。
@@ -527,7 +601,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val items = _queue.value
         if (index !in items.indices) return
         _currentIndex.value = index
-        probeThenLoad(items[index].uri, items[index].mimeType) {
+        val target = items[index]
+        probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
             applyQueue(mediaItemsOf(items), index, 0L)
         }
     }
@@ -557,6 +632,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun playNext() {
         val c = controller ?: return
         if (c.hasNextMediaItem()) {
+            NpPerf.begin("nav next")
             c.seekToNextMediaItem()
             c.play()
         }
@@ -565,6 +641,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun playPrevious() {
         val c = controller ?: return
         if (c.hasPreviousMediaItem()) {
+            NpPerf.begin("nav previous")
             c.seekToPreviousMediaItem()
             c.play()
         }
@@ -940,6 +1017,23 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
         /** seek 落定判据：位置与挂起目标相差在此之内即视为 seek 已落实 */
         const val SEEK_SETTLE_MS = 1_500L
+
+        /** 预探测窗口：与 [PlaybackService] 的 L2 预载窗口同量级（后 3 前 1），多探无益 */
+        const val PROBE_PREFETCH_FWD = 3
+        const val PROBE_PREFETCH_BACK = 1
+
+        /**
+         * 起播就绪后缓 **3s** 再预热：这一刻当前集的缓冲池还在从 0 往 `minBufferMs` 爬，
+         * 磁盘是它的主场；3s 之后才轮到投机性的活。
+         */
+        const val PROBE_PREFETCH_START_DELAY_MS = 3_000L
+
+        /** 预热的准入线：当前项已缓冲领先在播位置 30s（`minBufferMs` 的两倍） */
+        const val PROBE_PREFETCH_MIN_AHEAD_MS = 30_000L
+
+        /** 等准入线的步长与预算：等满 12s 还不达标就放弃这一轮预热 */
+        const val PROBE_PREFETCH_WAIT_STEP_MS = 500L
+        const val PROBE_PREFETCH_WAIT_BUDGET_MS = 12_000L
     }
 
     override fun release() {

@@ -183,6 +183,9 @@ class PlaybackService : MediaSessionService() {
         // 通知/锁屏的点击落点跟随当前媒体：noneplayer://player?uri=…&id=… 经 E2 深链回播放页
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                NpPerf.sessionMark(
+                    "transition reason=$reason uri=${mediaItem?.localConfiguration?.uri?.lastPathSegment}",
+                )
                 val uri = mediaItem?.localConfiguration?.uri?.toString()
                 // A1-2：id 一起带上（media3 条目由 ExoVideoPlayer.toMediaItem 烘入权威 id）。
                 // 只带 uri 时回跳的路由 id 为空，per-media 记忆全部落进空键桶。
@@ -202,6 +205,14 @@ class PlaybackService : MediaSessionService() {
             /** 队列整体被替换（setMediaItems）时也要重新喂预载 */
             override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
                 runCatching { syncPreloadQueue(player) }
+            }
+
+            /**
+             * 用户眼里的"切完了"就是这一帧（解码出画才看得见画面，READY 时仍是上一帧或黑）。
+             * 只有会话侧播放器收得到这个回调，故切换耗时 A/B 的主指标记在这里。
+             */
+            override fun onRenderedFirstFrame() {
+                NpPerf.sessionMark("first frame rendered")
             }
         })
     }

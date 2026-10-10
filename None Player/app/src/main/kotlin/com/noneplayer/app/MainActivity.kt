@@ -197,6 +197,12 @@ class MainActivity : ComponentActivity() {
                 .themeMode.collectAsStateWithLifecycle(app.initialThemeMode)
             val motionLevel by (app.kernel.services.get<AppSettings>())
                 .motionLevel.collectAsStateWithLifecycle(1)
+            // §9.4「播放中自动降一档」的输入。会话在 `plugin-player-ui` 内部、app 够不着，
+            // 所以由会话把"视频正在解码"写进进程级快照 `NpDecoding`，这里读出来交给主题层。
+            // 只订这一个布尔值——订 `nowPlaying` 会连着进度每秒跳 4 次，
+            // 主题层一动就是全应用重组，那比降档想省的帧贵得多。
+            val decodingVideo by com.noneplayer.core.media.NpDecoding.decoding
+                .collectAsStateWithLifecycle(false)
             // E45/E52：形态判定层的**唯一注入点**（§13.2）——全应用一次判定，
             // 经 LocalNpWindowInfo 下发；各页面一律消费它，不得各自读 LocalConfiguration
             // 做档位分支（唯一例外是"窗口是否横向"，见 NpWindowInfo 文档注释）。
@@ -237,8 +243,8 @@ class MainActivity : ComponentActivity() {
                 },
                 // 性能模式（R13）：用户档位在这里进内核，`NonePlayerTheme` 负责与
                 // 设备自动档取低者、再叠加播放中降档后下发 LocalNpMotionQuality。
-                // §9.4 的 decodingVideo 待批次 5 后段接（会话在插件内部，app 够不着）。
                 motionQuality = com.noneplayer.core.ui.NpMotionQuality.fromLevel(motionLevel),
+                decodingVideo = decodingVideo,
                 isDesktopLike = windowInfo.isDesktopLike,
             ) {
                 val state by kernel.bootState.collectAsStateWithLifecycle()

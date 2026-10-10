@@ -216,7 +216,6 @@ import com.noneplayer.plugins.player.ui.gesture.StageVerticalMode
 import com.noneplayer.plugins.player.ui.gesture.VerticalAdjustIndicator
 import com.noneplayer.plugins.player.ui.gesture.npStageGestures
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
@@ -1118,17 +1117,28 @@ fun PlayerScreen(
     }
     var volumePercent by volumeState
     fun setBrightnessPercent(value: Int) {
-        brightnessPercent = value.coerceIn(1, 100)
-        activityWindow?.attributes = activityWindow?.attributes?.apply {
-            screenBrightness = brightnessPercent / 100f
-        }
+        val clamped = value.coerceIn(1, 100)
+        brightnessPercent = clamped
+        val window = activityWindow ?: return
+        val target = clamped / 100f
+        // 逐帧指针事件里"实际亮度没变"是常态，而 `attributes =` 是一次窗口属性更新
+        // （relayout + binder）。判据取**窗口上的现值**而不是记住的整数：进页时窗口
+        // 还是 BRIGHTNESS_OVERRIDE_NONE，拿整数比会把这一发漏掉。
+        if (window.attributes.screenBrightness == target) return
+        window.attributes = window.attributes.apply { screenBrightness = target }
     }
     fun setVolumePercent(value: Int) {
-        volumePercent = value.coerceIn(0, 100)
+        val clamped = value.coerceIn(0, 100)
+        val previousIndex = volumeIndexFor(maxVolume, volumePercent)
+        volumePercent = clamped
+        val index = volumeIndexFor(maxVolume, clamped)
+        // 同一档内继续滑不该再打 binder：`setStreamVolume` 每次还会拉起系统音量条，
+        // 逐帧发就是"自己跟自己的 HUD 抢屏"。读数照写，落盘才判档。
+        if (index == previousIndex) return
         audioManager.setStreamVolume(
             android.media.AudioManager.STREAM_MUSIC,
             // 与右栏兜底派发共用同一条换算（E101 观察②：截断会让 ±5% 步进偶发无效果）
-            volumeIndexFor(maxVolume, volumePercent),
+            index,
             0,
         )
     }
@@ -1241,14 +1251,23 @@ fun PlayerScreen(
     var verticalEdgeRejected by remember { mutableStateOf(false) }
     // 停留计时**不挂组合**：旧写法是 `LaunchedEffect(verticalGesture, verticalGestureTickMs)`，
     // 而那个 tick 每帧都写、又当 key 读——等于把整块舞台拖进每帧重组（§9.2 反例②）。
-    // 现在只由手势事件重启一个协程，时间戳本身不再进入组合期。
-    val verticalHoldJob = remember { mutableStateOf<Job?>(null) }
+    //
+    // 这里再收一步：上一版把"重启计时"做成每次指针事件 `cancel + launch` 一个协程，
+    // 一次竖滑就是 60 次/秒的协程创建，而它做的只是"把到期时刻往后挪"。改成
+    // **只写一个时间戳** + 一条自延后的循环：循环醒来时按最新时间戳重算剩余，
+    // 到期点仍然精确落在"最后一次触碰 + 900ms"。
+    val verticalLastTouchMs = remember { mutableLongStateOf(0L) }
     fun restartVerticalGestureHold() {
-        verticalHoldJob.value?.cancel()
-        verticalHoldJob.value = scope.launch {
-            delay(GESTURE_INDICATOR_HOLD_MS)
-            verticalGesture = null
+        verticalLastTouchMs.longValue = SystemClock.uptimeMillis()
+    }
+    LaunchedEffect(verticalGesture) {
+        if (verticalGesture == null) return@LaunchedEffect
+        while (true) {
+            val remaining = GESTURE_INDICATOR_HOLD_MS - (SystemClock.uptimeMillis() - verticalLastTouchMs.longValue)
+            if (remaining <= 0L) break
+            delay(remaining)
         }
+        verticalGesture = null
     }
     fun onVerticalGestureStart(mode: StageVerticalMode) {
         endSpeedBoost(withHaptic = false)
