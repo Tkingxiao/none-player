@@ -39,3 +39,7 @@ captures/
 /None Player/*.png
 /None Player/player-*.xml
 /None Player/tools/jank-*.txt
+
+# ---- 设备实测的工作目录（E130）----
+# 截图 / uiautomator dump / UI 驱动脚本都落在这里，属于验证中间产物，不入库。
+/.e108verify/

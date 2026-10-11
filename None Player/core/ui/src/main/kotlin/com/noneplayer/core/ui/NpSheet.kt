@@ -37,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -53,6 +54,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
@@ -234,10 +236,40 @@ fun NpSheet(
         onDismissRequest = { close() },
         properties = PopupProperties(focusable = true),
     ) {
-        BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+        // E130-D9（真机实测采出）：**补偿弹窗内容视图的屏幕偏移**。
+        //
+        // 真机取证（Pixel 10 Pro / 1280×2856 @480dpi / Android 17）：
+        //   · 弹窗窗口属性 = (0,0)(1281×2856)，窗口本身铺满屏幕；
+        //   · 但窗口内的 ComposeView 被平台按 fitSystemWindows 下移了一个状态栏高度：
+        //     实测 `view.getLocationOnScreen().y = 156`，而它自身高度仍是整窗高 2856，
+        //     于是内容底边落在屏幕 3012 —— **溢出屏幕 156px**；
+        //   · 面板 BottomCenter 对齐 → 底边正好被切掉这 156px。
+        // 实测两个面板都差这 156px：字幕面板四个偏移按钮只剩顶部一条（文字仅 7px 可见、
+        // 点不准也看不清），「播放选项」面板最后两行 bounds 全 0（整行不可见）。
+        //
+        // 为什么不用 `WindowInsets.statusBars`：**弹窗内它是 0**（实测），
+        // 拿它做补偿等于没补（这也是前两版改法"逐字节无变化"的原因）。
+        // 只有视图自身的屏幕 Y 是这段偏移的真值，所以直接量它、再平移面板本体。
+        // 平移走 graphicsLayer，不改布局坐标，因此不会引起测量/滚动位置变化。
+        val view = androidx.compose.ui.platform.LocalView.current
+        var viewOffsetPx by remember { mutableIntStateOf(0) }
+        BoxWithConstraints(
+            modifier = modifier
+                .fillMaxSize()
+                .onGloballyPositioned {
+                    val loc = IntArray(2)
+                    view.getLocationOnScreen(loc)
+                    if (loc[1] != viewOffsetPx) viewOffsetPx = loc[1]
+                },
+        ) {
             // 设计稿 .sheet{max-height:82vh}——在 BoxWithConstraints 作用域先固化，
             // 内层 lambda 里拿不到这个隐式接收器
             val sheetMaxHeight = maxHeight * 0.82f
+            // 滚动区的**具体高度上限**：内层 `verticalScroll` 只有在拿到有界最大高度时
+            // 才会真正滚动。只靠外层 `heightIn(max=)` 时，滚动体量到的是"内容想多高就多高"，
+            // 它会认为放得下 → 不滚动，超出部分被 `clip(shape)` 直接切掉。
+            // 减去把手块（8+4+6 = 18dp）后剩下的才是可滚视口。
+            val contentMaxHeight = (sheetMaxHeight - 54.dp).coerceAtLeast(120.dp)
             // 遮罩（设计稿 --scrim 62%，fade 跟随 sheet 进度，并随下滑同步变淡）
             Box(
                 modifier = Modifier
@@ -261,7 +293,10 @@ fun NpSheet(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .graphicsLayer { translationY = (1f - progress.value) * size.height + dragOffset.value },
+                    .graphicsLayer {
+                        translationY =
+                            (1f - progress.value) * size.height + dragOffset.value - viewOffsetPx
+                    },
             ) {
                 Column(
                     modifier = Modifier
@@ -307,6 +342,8 @@ fun NpSheet(
                         Column(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                // E130-D9：显式封顶，verticalScroll 才真正生效（见 contentMaxHeight 注释）
+                                .heightIn(max = contentMaxHeight)
                                 .verticalScroll(contentScroll)
                                 .padding(start = 20.dp, end = 20.dp, bottom = 26.dp),
                         ) {
