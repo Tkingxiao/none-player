@@ -19,12 +19,29 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.noneplayer.kernel.api.SubtitleCue
 import androidx.compose.material3.Text
+
+/**
+ * 字幕样式快照（E131）——「字幕设置」面板写入 `AppSettings`，渲染层只读它。
+ *
+ * 默认值 = 旧版写死的样式（白 / 1.0x / 非斜体 / 开启），因此不传等于行为不变。
+ */
+data class SubtitleStyle(
+    /** 「开启字幕」总开关：关掉后字幕（文本与位图）一律不渲染 */
+    val enabled: Boolean = true,
+    /** 字幕文字颜色（ARGB） */
+    val colorArgb: Long = 0xFFFFFFFFL,
+    /** 文字大小倍率（基准 20sp） */
+    val scale: Float = 1f,
+    /** 文字字幕用斜体 */
+    val italic: Boolean = false,
+)
 
 /**
  * 字幕浮层（E1）——渲染引擎输出的 Cue。
@@ -35,16 +52,23 @@ import androidx.compose.material3.Text
  * - 位图 Cue：按 Cue 的归一化摆放绘制在视频画面内。
  *
  * 挂载位置：视频 Box（aspectRatio 约束）之内，因此归一化坐标天然对应画面而非黑边。
- * 样式面板（字号/描边/位置）属批次 3，本层先按默认样式。
+ *
+ * E131：样式不再写死——由 [style] 传入（对齐参考示例的「字幕设置」面板）。
  */
 @Composable
 fun SubtitleLayer(
     cues: List<SubtitleCue>,
     modifier: Modifier = Modifier,
+    style: SubtitleStyle = SubtitleStyle(),
 ) {
-    if (cues.isEmpty()) return
+    if (cues.isEmpty() || !style.enabled) return
     val textCues = cues.filter { it.text != null }
     val bitmapCues = cues.filter { it.bitmap is Bitmap }
+    val textStyle = SubtitleTextStyle(
+        color = Color(style.colorArgb.toInt()),
+        scale = style.scale,
+        italic = style.italic,
+    )
 
     Box(modifier = modifier.fillMaxSize()) {
         // 文本字幕：多行合并为一个列，底部居中，给控制层留出空间
@@ -59,7 +83,7 @@ fun SubtitleLayer(
                 textCues.forEach { cue ->
                     Text(
                         text = cue.text.orEmpty(),
-                        style = SubtitleTextStyle,
+                        style = textStyle,
                         textAlign = TextAlign.Center,
                         modifier = Modifier.padding(top = 2.dp),
                     )
@@ -89,18 +113,27 @@ fun SubtitleLayer(
     }
 }
 
-/** 字幕默认样式：白字 + 阴影（批次 3 由样式面板接管） */
-private val SubtitleTextStyle = TextStyle(
-    color = Color.White,
-    fontSize = 20.sp,
-    lineHeight = 26.sp,
-    fontWeight = FontWeight.Medium,
-    shadow = Shadow(
-        color = Color.Black.copy(alpha = 0.9f),
-        offset = Offset(0f, 1.5f),
-        blurRadius = 5f,
-    ),
-)
+/**
+ * 字幕文本样式（E131：由「字幕设置」面板驱动）。
+ *
+ * 基准仍是设计稿的白字 + 阴影（暗背景可读），新增三项用户可调：
+ * 颜色 / 大小倍率 / 斜体。行高按同一倍率缩放，否则放大字号会挤成一行。
+ */
+private fun SubtitleTextStyle(color: Color, scale: Float, italic: Boolean): TextStyle {
+    val size = 20f * scale
+    return TextStyle(
+        color = color,
+        fontSize = size.sp,
+        lineHeight = (size * 1.3f).sp,
+        fontWeight = FontWeight.Medium,
+        fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
+        shadow = Shadow(
+            color = Color.Black.copy(alpha = 0.9f),
+            offset = Offset(0f, 1.5f),
+            blurRadius = 5f,
+        ),
+    )
+}
 
 /** 底部留白：控制层（进度条）之上，避免字幕被控件遮挡 */
 private val SUBTITLE_BOTTOM_PADDING = 56.dp

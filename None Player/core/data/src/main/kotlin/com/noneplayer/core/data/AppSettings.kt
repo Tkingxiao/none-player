@@ -40,6 +40,32 @@ const val LOCAL_MEDIA_SOURCE_ID = "local"
 const val DEFAULT_DOUBLE_TAP_STEP_MS = 10_000L
 val DOUBLE_TAP_STEP_OPTIONS_MS = listOf(5_000L, 10_000L, 15_000L, 30_000L)
 
+// ---- 字幕样式默认值与量程（E131，跨模块契约：播放页渲染与设置面板共用）----
+
+/** 默认字幕颜色：白（0xFFFFFFFF） */
+const val DEFAULT_SUBTITLE_COLOR_ARGB = 0xFFFFFFFFL
+
+/** 文字字幕大小倍率区间（对齐参考示例的 1.0 基准，可往两边调） */
+const val SUBTITLE_SCALE_MIN = 0.5f
+const val SUBTITLE_SCALE_MAX = 2.0f
+
+/**
+ * 可选字幕颜色（对齐参考示例的色板：白 / 红 / 黄 / 绿 / 青 / 品红）。
+ *
+ * 顺序与参考图一致；白为首选（默认选中）。数值是 ARGB，渲染侧直接 `Color(argb)`。
+ */
+val SUBTITLE_COLOR_OPTIONS = listOf(
+    0xFFFFFFFFL, // 白
+    0xFFFF3B30L, // 红
+    0xFFFFEB3BL, // 黄
+    0xFF34C759L, // 绿
+    0xFF32ADE6L, // 青
+    0xFFFF2D95L, // 品红
+)
+
+/** 字幕延时档位（毫秒；0 = 复位）。对齐参考示例的 −1.0s / −0.1s / 0 / +0.1s / +1.0s */
+val SUBTITLE_DELAY_STEPS_MS = listOf(-1_000L, -100L, 0L, 100L, 1_000L)
+
 private val Context.dataStore: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> by preferencesDataStore(
     name = "none_player_settings",
     corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
@@ -79,6 +105,14 @@ class AppSettings(private val context: Context) {
         val KEY_BACKGROUND_PLAY = booleanPreferencesKey("background_play")
         val KEY_KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         val KEY_GESTURES_ENABLED = booleanPreferencesKey("playback_gestures")
+
+        // ---- 字幕样式（E131：对齐参考示例的「字幕设置」面板）----
+        // 与 `subtitle_<mediaKey>` 那族**per-media** 记忆不同：样式是**全局偏好**
+        // （用户挑的字体颜色/大小不该每换一部片就重置），所以不带 mediaKey 后缀。
+        val KEY_SUBTITLE_ENABLED = booleanPreferencesKey("subtitle_enabled")
+        val KEY_SUBTITLE_COLOR = stringPreferencesKey("subtitle_color")
+        val KEY_SUBTITLE_SCALE = stringPreferencesKey("subtitle_scale")
+        val KEY_SUBTITLE_ITALIC = booleanPreferencesKey("subtitle_italic")
 
         /**
          * 播放页禁止截屏/录屏（FLAG_SECURE，C18）。
@@ -470,6 +504,42 @@ class AppSettings(private val context: Context) {
 
     suspend fun setPlaybackSpeed(speed: Float) {
         context.dataStore.edit { it[KEY_PLAYBACK_SPEED] = speed.toString() }
+    }
+
+    // ---- 字幕样式（E131）----
+
+    /** 字幕总开关（对齐参考示例的「开启字幕」）。关掉后文本字幕一律不渲染。 */
+    val subtitleEnabled: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SUBTITLE_ENABLED] ?: true }
+
+    suspend fun setSubtitleEnabled(enabled: Boolean) {
+        context.dataStore.edit { it[KEY_SUBTITLE_ENABLED] = enabled }
+    }
+
+    /** 字幕文字颜色（ARGB 十进制字符串；默认白）。存字符串是为了与既有偏好同风格。 */
+    val subtitleColorArgb: Flow<Long> = context.dataStore.data
+        .map { it[KEY_SUBTITLE_COLOR]?.toLongOrNull() ?: DEFAULT_SUBTITLE_COLOR_ARGB }
+
+    suspend fun setSubtitleColorArgb(argb: Long) {
+        context.dataStore.edit { it[KEY_SUBTITLE_COLOR] = argb.toString() }
+    }
+
+    /** 文字字幕大小倍率（0.5–2.0，默认 1.0） */
+    val subtitleScale: Flow<Float> = context.dataStore.data
+        .map { (it[KEY_SUBTITLE_SCALE]?.toFloatOrNull() ?: 1f).coerceIn(SUBTITLE_SCALE_MIN, SUBTITLE_SCALE_MAX) }
+
+    suspend fun setSubtitleScale(scale: Float) {
+        context.dataStore.edit {
+            it[KEY_SUBTITLE_SCALE] = scale.coerceIn(SUBTITLE_SCALE_MIN, SUBTITLE_SCALE_MAX).toString()
+        }
+    }
+
+    /** 文字字幕用斜体（对齐参考示例的「文字字幕用斜体」） */
+    val subtitleItalic: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SUBTITLE_ITALIC] ?: false }
+
+    suspend fun setSubtitleItalic(italic: Boolean) {
+        context.dataStore.edit { it[KEY_SUBTITLE_ITALIC] = italic }
     }
 
     /** 某媒体挂载的外挂字幕地址（跨会话记忆），未挂载为 null */

@@ -146,6 +146,11 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.DEFAULT_DOUBLE_TAP_STEP_MS
+import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
+import com.noneplayer.core.data.SUBTITLE_COLOR_OPTIONS
+import com.noneplayer.core.data.SUBTITLE_DELAY_STEPS_MS
+import com.noneplayer.core.data.SUBTITLE_SCALE_MAX
+import com.noneplayer.core.data.SUBTITLE_SCALE_MIN
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
@@ -1468,12 +1473,31 @@ fun PlayerScreen(
     // 裁剪是引擎侧缩放模式（np.crop 命令）；比例走布局，镜像/旋转走画面 View 变换
     LaunchedEffect(scaleMode) { player.setVideoCrop(scaleMode == VideoScaleMode.CROP) }
 
-    // 字幕偏移（E43）：±1000ms / 50ms 步进，正数 = 延后。会话级（不跨进程记忆）
+    // ---- 字幕样式（E131：对齐参考示例的「字幕设置」面板）----
+    // 全局偏好（跨媒体记忆），渲染层只读它；面板改动即落盘并立刻反映到画面。
+    // 偏移仍是会话级（不跨进程记忆），与既有 E43 口径一致。
+    // 声明必须在 setSubtitleOffset 之前——局部函数不能前向引用局部变量。
     var subtitleOffsetMs by remember { mutableLongStateOf(0L) }
-    fun adjustSubtitleOffset(deltaMs: Long) {
-        subtitleOffsetMs = (subtitleOffsetMs + deltaMs).coerceIn(-1_000L, 1_000L)
+
+    // 字幕偏移（E43）改由**绝对档位**设置（−1.0s / −0.1s / 0 / +0.1s / +1.0s）：
+    // 竖屏「字幕设置」面板与全屏下拉菜单共用这一条出口，两处语义一致。
+    // 旧实现是 ±50/±250ms 累加——档位语义下"点两次 −1.0s"会让人算不清当前值。
+    fun setSubtitleOffset(targetMs: Long) {
+        subtitleOffsetMs = targetMs.coerceIn(-1_000L, 1_000L)
         player.setSubtitleOffsetMs(subtitleOffsetMs)
     }
+
+    val subtitleEnabled by settings.subtitleEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val subtitleColorArgb by settings.subtitleColorArgb
+        .collectAsStateWithLifecycle(initialValue = DEFAULT_SUBTITLE_COLOR_ARGB)
+    val subtitleScale by settings.subtitleScale.collectAsStateWithLifecycle(initialValue = 1f)
+    val subtitleItalic by settings.subtitleItalic.collectAsStateWithLifecycle(initialValue = false)
+    val subtitleStyle = SubtitleStyle(
+        enabled = subtitleEnabled,
+        colorArgb = subtitleColorArgb,
+        scale = subtitleScale,
+        italic = subtitleItalic,
+    )
 
     // 面板开关（`audioTrackSheetVisible` / `pictureSheetVisible` /
     // `equalizerSheetVisible` / `chaptersPanelVisible` 已随其它弹层状态前置，
@@ -1830,6 +1854,7 @@ fun PlayerScreen(
                         state = state,
                         userDragging = userDragging,
                         controlsVisible = controlsVisible,
+                        subtitleStyle = subtitleStyle,
                         scaleMode = scaleMode,
                         mirrored = mirrored,
                         rotation = rotation,
@@ -2115,7 +2140,7 @@ fun PlayerScreen(
                                             dismiss()
                                             subtitlePicker.launch(arrayOf("*/*"))
                                         },
-                                        onOffset = ::adjustSubtitleOffset,
+                                        onOffset = ::setSubtitleOffset,
                                         onBack = back,
                                     )
 
@@ -2222,6 +2247,7 @@ fun PlayerScreen(
                                 state = state,
                                 userDragging = userDragging,
                                 controlsVisible = controlsVisible,
+                                subtitleStyle = subtitleStyle,
                                 scaleMode = scaleMode,
                                 mirrored = mirrored,
                                 rotation = rotation,
@@ -2611,129 +2637,50 @@ fun PlayerScreen(
             )
         }
 
-        // ---- 底部弹层（设计稿 .sheet 体系）：字幕 / 播放选项 ----
+        // ---- 底部弹层：字幕设置（E131，版式对齐用户给的参考示例）----
         // 倍速不在这里：它改成贴在倍速钮上方的选择条（SpeedChoiceRow）。
         if (subtitleSheetVisible) {
             NpSheet(
                 onDismiss = { subtitleSheetVisible = false },
-                title = "字幕",
+                title = "字幕设置",
             ) {
-                NpOptRow(
-                    text = "关闭字幕",
-                    selected = !subtitleOn,
-                    onClick = {
-                        player.setSubtitle(null)
-                        scope.launch { settings.setSubtitleUri(mediaKey, null) }
-                        toast.show("字幕：关闭")
+                val textTracks = tracks.filter { it.type == NpTrackType.TEXT }
+                SubtitleSettingsPanel(
+                    enabled = subtitleEnabled,
+                    onEnabled = { on ->
+                        scope.launch { settings.setSubtitleEnabled(on) }
+                        if (on) {
+                            // 重新开启：把此前记住的外挂字幕装回去（没有就保持内嵌轨现状）
+                            savedSubtitle?.let { player.setSubtitle(it) }
+                        } else {
+                            // 关闭：同时卸载引擎侧字幕，否则"开关关了但字幕还在"
+                            player.setSubtitle(null)
+                        }
+                    },
+                    colorArgb = subtitleColorArgb,
+                    onColor = { scope.launch { settings.setSubtitleColorArgb(it) } },
+                    scale = subtitleScale,
+                    onScale = { scope.launch { settings.setSubtitleScale(it) } },
+                    italic = subtitleItalic,
+                    onItalic = { scope.launch { settings.setSubtitleItalic(it) } },
+                    offsetMs = subtitleOffsetMs,
+                    onOffset = ::setSubtitleOffset,
+                    statusText = subtitleStatusText(
+                        subtitleLoaded = subtitleLoaded,
+                        savedSubtitle = savedSubtitle,
+                        embeddedLabel = textTracks.firstOrNull { it.selected }?.label,
+                    ),
+                    embeddedTracks = textTracks,
+                    onPickEmbedded = { track ->
+                        player.selectTrack(NpTrackType.TEXT, track.id)
                         subtitleSheetVisible = false
                     },
-                )
-                NpOptRow(
-                    text = "挂载外挂字幕（srt / vtt / ass）",
-                    selected = subtitleLoaded,
-                    onClick = {
+                    onPickExternal = {
                         subtitleSheetVisible = false
                         subtitlePicker.launch(arrayOf("*/*"))
                     },
+                    onEmbeddedUnavailable = { toast.show("此视频没有内嵌字幕轨") },
                 )
-                if (savedSubtitle != null) {
-                    Text(
-                        text = "已挂载：" + savedSubtitle!!.substringAfterLast('/').substringBeforeLast('.'),
-                        style = NpMonoSmall,
-                        color = ink0.muted,
-                        modifier = Modifier.padding(top = 8.dp, start = 12.dp),
-                    )
-                }
-                // 内嵌字幕轨（批次 3）：MKV 多轨选择，走 TrackSelectionParameters 不重建媒体项
-                val textTracks = tracks.filter { it.type == NpTrackType.TEXT }
-                Text(
-                    text = "内嵌字幕轨",
-                    style = NpTypography.titleSmall,
-                    color = ink0.fg,
-                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp, start = 12.dp),
-                )
-                if (textTracks.isEmpty()) {
-                    Text(
-                        text = "此视频没有内嵌字幕轨",
-                        style = NpMonoSmall,
-                        color = ink0.muted,
-                        modifier = Modifier.padding(start = 12.dp),
-                    )
-                } else {
-                    textTracks.forEach { track ->
-                        TrackOptionRow(
-                            label = track.label,
-                            detail = null,
-                            selected = track.selected,
-                            onClick = {
-                                player.selectTrack(NpTrackType.TEXT, track.id)
-                                subtitleSheetVisible = false
-                            },
-                        )
-                    }
-                }
-                // 字幕偏移（E43）：±1000ms / 50ms 步进；正数 = 字幕延后
-                Text(
-                    text = "字幕偏移",
-                    style = NpTypography.titleSmall,
-                    color = ink0.fg,
-                    modifier = Modifier.padding(top = 16.dp, bottom = 4.dp, start = 12.dp),
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = "提前",
-                        style = NpMonoSmall,
-                        color = ink0.muted,
-                        modifier = Modifier.padding(start = 12.dp),
-                    )
-                    Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                        Text(
-                            text = if (subtitleOffsetMs == 0L) "0ms" else
-                                (if (subtitleOffsetMs > 0) "+" else "") + "${subtitleOffsetMs}ms",
-                            style = NpMono,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    }
-                    Text(
-                        text = "延后",
-                        style = NpMonoSmall,
-                        color = ink0.muted,
-                        modifier = Modifier.padding(end = 12.dp),
-                    )
-                }
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(top = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    listOf(-50L to "−50ms", -250L to "−250ms", 250L to "+250ms", 50L to "+50ms").forEach { (delta, label) ->
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                // 审查批次 D2：命中高度补到 44dp 红线（§14 #13）。
-                                // 旧实现只有文字上下 10dp 内边距 ≈ 31dp，四枚横向均分后
-                                // 相邻项离得又近，单手/横屏很容易点偏——而它调的是字幕时间轴，
-                                // 点错一档用户要再点两下才回到原位。
-                                // 视觉尺寸/间距不变，长出来的只是透明命中区。
-                                .heightIn(min = NpDimens.touchTarget)
-                                .clip(RoundedCornerShape(NpRadius.chip))
-                                .background(ink0.fgSoft)
-                                .clickable { adjustSubtitleOffset(delta) }
-                                .padding(vertical = 10.dp),
-                            contentAlignment = Alignment.Center,
-                        ) {
-                            Text(
-                                text = label,
-                                style = NpMonoSmall,
-                                color = ink0.fg,
-                            )
-                        }
-                    }
-                }
             }
         }
         if (audioTrackSheetVisible) {
@@ -3091,6 +3038,243 @@ fun PlayerScreen(
  * 用居中卡片而不是 sheet：它是**只读查看**，不需要底部大面板的权重；
  * 点任意处关闭（scrim 即关闭手势）。
  */
+/**
+ * 字幕状态行（E131）：`[没有字幕]` / `已挂载：<名>` / `内嵌：<轨名>`。
+ *
+ * 与参考示例的 `[没有字幕]` 同义——面板里改的是"样式"，这一行回答的是
+ * "现在到底有没有字幕、来自哪儿"，避免用户调了半天颜色却发现根本没挂字幕。
+ */
+private fun subtitleStatusText(
+    subtitleLoaded: Boolean,
+    savedSubtitle: String?,
+    embeddedLabel: String?,
+): String = when {
+    subtitleLoaded && savedSubtitle != null ->
+        // SAF 文档 uri 的末段是**百分号编码**的 docId（`primary%3AMovies%2F…%2Fnp-long.srt`），
+        // 直接按 `/` 切会切不开、把整串编码当文件名显示。先解码再取末段——
+        // 顺带去掉扩展名（面板里显示的是"挂载了哪个字幕"，不是完整文件名）。
+        "已挂载：" + android.net.Uri.decode(savedSubtitle)
+            .substringAfterLast('/')
+            .substringBeforeLast('.')
+    embeddedLabel != null -> "内嵌：$embeddedLabel"
+    else -> "[没有字幕]"
+}
+
+/** 字幕延时档位的显示文案（−1.0s / −0.1s / 0.0 / +0.1s / +1.0s）；竖屏面板与全屏下拉共用 */
+internal fun subtitleDelayLabel(ms: Long): String = when {
+    ms == 0L -> "0.0"
+    else -> (if (ms > 0) "+" else "−") + "%.1f".format(kotlin.math.abs(ms) / 1000f) + "s"
+}
+
+/**
+ * 字幕设置面板（E131）——版式对齐用户给的参考示例：
+ * 开启字幕 / 字幕颜色 / 文字字幕大小 / 文字字幕用斜体 / 字幕延时 / 状态行 / 两个来源入口。
+ *
+ * 复用既有组件与令牌（`NpSwitch` / `NpDimens.touchTarget` / `NpRadius.chip` / Ink 令牌），
+ * 不新造控件：颜色板是"命中 44dp 的透明盒 + 26dp 色点"，延时档是"命中 44dp 的胶囊"。
+ */
+@Composable
+private fun SubtitleSettingsPanel(
+    enabled: Boolean,
+    onEnabled: (Boolean) -> Unit,
+    colorArgb: Long,
+    onColor: (Long) -> Unit,
+    scale: Float,
+    onScale: (Float) -> Unit,
+    italic: Boolean,
+    onItalic: (Boolean) -> Unit,
+    offsetMs: Long,
+    onOffset: (Long) -> Unit,
+    statusText: String,
+    embeddedTracks: List<NpTrack>,
+    onPickEmbedded: (NpTrack) -> Unit,
+    onPickExternal: () -> Unit,
+    onEmbeddedUnavailable: () -> Unit,
+) {
+    val ink = LocalNpInk.current
+    var showEmbedded by remember { mutableStateOf(false) }
+
+    SubtitleSettingRow(label = "开启字幕") {
+        NpSwitch(checked = enabled, onCheckedChange = onEnabled)
+    }
+
+    SubtitleSettingRow(label = "字幕颜色") {
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            SUBTITLE_COLOR_OPTIONS.forEach { argb ->
+                val selected = argb == colorArgb
+                Box(
+                    modifier = Modifier
+                        .size(NpDimens.touchTarget)
+                        .clip(CircleShape)
+                        .clickable { onColor(argb) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(26.dp)
+                            .clip(CircleShape)
+                            .background(Color(argb.toInt()))
+                            .then(
+                                if (selected) {
+                                    Modifier.border(2.dp, ink.fg, CircleShape)
+                                } else {
+                                    Modifier
+                                },
+                            ),
+                    )
+                }
+            }
+        }
+    }
+
+    SubtitleSettingRow(label = "文字字幕大小") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Slider(
+                value = scale,
+                onValueChange = onScale,
+                valueRange = SUBTITLE_SCALE_MIN..SUBTITLE_SCALE_MAX,
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = "%.1f".format(scale),
+                style = NpMono,
+                color = ink.muted,
+                modifier = Modifier.padding(start = 12.dp),
+            )
+        }
+    }
+
+    SubtitleSettingRow(label = "文字字幕用斜体") {
+        NpSwitch(checked = italic, onCheckedChange = onItalic)
+    }
+
+    SubtitleSettingRow(label = "字幕延时", value = subtitleDelayLabel(offsetMs)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            SUBTITLE_DELAY_STEPS_MS.forEach { step ->
+                val selected = step == offsetMs
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        // 44dp 命中红线（§14 #13）：与 D2 同一条判据
+                        .heightIn(min = NpDimens.touchTarget)
+                        .clip(RoundedCornerShape(NpRadius.chip))
+                        .background(if (selected) ink.accentSoft else ink.fgSoft)
+                        .clickable { onOffset(step) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = subtitleDelayLabel(step),
+                        style = NpMonoSmall,
+                        color = if (selected) ink.accent else ink.fg,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
+    }
+
+    Text(
+        text = statusText,
+        style = NpMonoSmall,
+        color = ink.muted,
+        modifier = Modifier.padding(top = 10.dp, bottom = 6.dp),
+    )
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        SubtitleSourceButton(
+            text = "选用视频内置字幕",
+            modifier = Modifier.weight(1f),
+            onClick = {
+                if (embeddedTracks.isEmpty()) onEmbeddedUnavailable() else showEmbedded = !showEmbedded
+            },
+        )
+        SubtitleSourceButton(
+            text = "选用外挂字幕文件",
+            modifier = Modifier.weight(1f),
+            onClick = onPickExternal,
+        )
+    }
+
+    if (showEmbedded && embeddedTracks.isNotEmpty()) {
+        Text(
+            text = "内嵌字幕轨",
+            style = NpTypography.titleSmall,
+            color = ink.fg,
+            modifier = Modifier.padding(top = 14.dp, bottom = 4.dp),
+        )
+        embeddedTracks.forEach { track ->
+            TrackOptionRow(
+                label = track.label,
+                detail = null,
+                selected = track.selected,
+                onClick = { onPickEmbedded(track) },
+            )
+        }
+    }
+}
+
+/** 设置行：左标签（+可选当前值），右控件。版式对齐参考示例的"标签—控件"两列。 */
+@Composable
+private fun SubtitleSettingRow(
+    label: String,
+    value: String? = null,
+    content: @Composable () -> Unit,
+) {
+    val ink = LocalNpInk.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = NpDimens.touchTarget)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            style = NpTypography.bodyMedium,
+            color = ink.fg,
+            maxLines = 1,
+        )
+        if (value != null) {
+            Text(
+                text = value,
+                style = NpMonoSmall,
+                color = ink.muted,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+        Spacer(modifier = Modifier.weight(1f))
+        content()
+    }
+}
+
+/** 字幕来源入口按钮（参考示例底部两枚等宽按钮） */
+@Composable
+private fun SubtitleSourceButton(
+    text: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ink = LocalNpInk.current
+    Box(
+        modifier = modifier
+            .heightIn(min = NpDimens.touchTarget)
+            .clip(RoundedCornerShape(NpRadius.button))
+            .background(ink.fgSoft)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            style = NpTypography.bodySmall,
+            color = ink.fg,
+            maxLines = 1,
+        )
+    }
+}
+
 @Composable
 private fun FileInfoCard(
     /** 进出场驱动（审查批次 C2）：false 时播退场，由外层 [PanelExitHost] 撑到播完 */
@@ -4449,6 +4633,8 @@ internal fun VideoStage(
     userDragging: Boolean,
     /** 控制层是否可见——下发给覆盖层，让弹幕 pill 这类开关与控制栏同显隐 */
     controlsVisible: Boolean = true,
+    /** E131：字幕样式（颜色/大小/斜体/总开关），来自「字幕设置」面板 */
+    subtitleStyle: SubtitleStyle = SubtitleStyle(),
     scaleMode: VideoScaleMode = VideoScaleMode.FIT,
     mirrored: Boolean = false,
     rotation: Int = 0,
@@ -4491,7 +4677,12 @@ internal fun VideoStage(
                 modifier = Modifier.fillMaxSize(),
             )
             // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
-            SubtitleLayer(cues = cues, modifier = Modifier.fillMaxSize())
+            // E131：样式由「字幕设置」面板驱动（颜色/大小/斜体/总开关）
+            SubtitleLayer(
+                cues = cues,
+                modifier = Modifier.fillMaxSize(),
+                style = subtitleStyle,
+            )
             // 覆盖层扩展点：弹幕等插件动态挂载（E23）。
             // 必须挂在**视频画面内框**（与字幕层同界）：挂到外层容器时弹幕会铺满
             // 整个窗格/整屏——类 PC 右栏里盖到顶栏与状态栏、宽片黑边上也飘字

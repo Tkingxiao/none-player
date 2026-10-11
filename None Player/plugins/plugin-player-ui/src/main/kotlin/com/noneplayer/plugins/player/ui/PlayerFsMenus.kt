@@ -62,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.noneplayer.core.data.SUBTITLE_DELAY_STEPS_MS
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
@@ -751,7 +752,7 @@ fun FsSubtitleMenuContent(
             )
         }
     }
-    FsMenuTitle("字幕偏移")
+    FsMenuTitle("字幕延时")
     Row(
         modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -768,21 +769,38 @@ fun FsSubtitleMenuContent(
             color = if (offsetMs == 0L) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.primary,
         )
     }
+    // E131：与竖屏「字幕设置」面板统一成**绝对档位**（−1.0s / −0.1s / 0 / +0.1s / +1.0s），
+    // 两处语义一致；旧的 ±50/±250ms 累加式会让人算不清当前值。选中档高亮。
     Row(
         modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        listOf(-250L to "−250ms", -50L to "−50ms", 50L to "+50ms", 250L to "+250ms").forEach { (delta, label) ->
+        SUBTITLE_DELAY_STEPS_MS.forEach { step ->
+            val selected = step == offsetMs
             Box(
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(9.dp))
-                    .background(Color.White.copy(alpha = 0.08f))
-                    .clickable { onOffset(delta) }
+                    .background(
+                        if (selected) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            Color.White.copy(alpha = 0.08f)
+                        },
+                    )
+                    .clickable { onOffset(step) }
                     .padding(vertical = 8.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(text = label, style = NpMonoSmall, color = Color.White)
+                Text(
+                    text = subtitleDelayLabel(step),
+                    style = NpMonoSmall,
+                    color = if (selected) {
+                        MaterialTheme.colorScheme.onPrimary
+                    } else {
+                        Color.White
+                    },
+                )
             }
         }
     }
