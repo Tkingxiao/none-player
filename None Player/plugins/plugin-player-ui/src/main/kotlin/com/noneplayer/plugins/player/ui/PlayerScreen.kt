@@ -2666,6 +2666,7 @@ fun PlayerScreen(
                     offsetMs = subtitleOffsetMs,
                     onOffset = ::setSubtitleOffset,
                     statusText = subtitleStatusText(
+                        enabled = subtitleEnabled,
                         subtitleLoaded = subtitleLoaded,
                         savedSubtitle = savedSubtitle,
                         embeddedLabel = textTracks.firstOrNull { it.selected }?.label,
@@ -3045,10 +3046,14 @@ fun PlayerScreen(
  * "现在到底有没有字幕、来自哪儿"，避免用户调了半天颜色却发现根本没挂字幕。
  */
 private fun subtitleStatusText(
+    enabled: Boolean,
     subtitleLoaded: Boolean,
     savedSubtitle: String?,
     embeddedLabel: String?,
 ): String = when {
+    // 总开关关掉时先说"已关闭"：此时引擎侧字幕已被卸载，再说"已挂载"是误导
+    // （挂载记录仍在，是为了重新开启时能装回去）。真机实测中发现的口径问题。
+    !enabled -> "[已关闭]"
     subtitleLoaded && savedSubtitle != null ->
         // SAF 文档 uri 的末段是**百分号编码**的 docId（`primary%3AMovies%2F…%2Fnp-long.srt`），
         // 直接按 `/` 切会切不开、把整串编码当文件名显示。先解码再取末段——
