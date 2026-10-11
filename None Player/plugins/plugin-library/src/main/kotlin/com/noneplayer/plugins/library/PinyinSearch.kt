@@ -83,4 +83,37 @@ internal object PinyinSearch {
         val targets = sequenceOf(item.title, item.cardTitle, item.folder.orEmpty()).distinct()
         return targets.any { target -> hitsQuery(target, toPinyin(target), q) }
     }
+
+    /**
+     * 查询词是否构成**一次真正的搜索**。
+     *
+     * 空白不是；**仅由点构成也不是**（`.`、`..`）。后者是审查批次 A1 的核心：
+     * 搜索框里打一个 `.`，旧实现会把整个媒体库列出来。两条路径都会漏：
+     *  ① 扩展名分支 `contains(q.removePrefix("."))` → 空串，`contains("")` 恒真；
+     *  ② 即使修掉 ①，标题域的 `title.contains(".")` 照样命中所有带扩展名的文件。
+     * 所以修法必须在**入口**判定"这是不是一个查询词"，而不是在某一分支里打补丁。
+     *
+     * 于是 `.` 与空串同样落到"还没开始搜"，UI 回到「最近搜索」而不是列出全库。
+     */
+    fun isSearchable(rawQuery: String): Boolean {
+        val q = rawQuery.trim()
+        return q.isNotEmpty() && q.any { it != '.' }
+    }
+
+    /**
+     * **完整**匹配域判定（标题 / 短标题 / 文件夹 / 扩展名 / 拼音），
+     * 搜索页与 `LocalSearchProvider` 的唯一共用入口。
+     *
+     * 同一份逻辑此前在两个调用点各写一遍（扩展名分支重复），只修一处必然漏另一处，
+     * 故收在这里；`isSearchable` 为 false 时一律不匹配。
+     */
+    fun matchesAll(item: MediaItem, rawQuery: String): Boolean {
+        if (!isSearchable(rawQuery)) return false
+        val q = rawQuery.trim()
+        if (matches(item, q)) return true
+        // 扩展名这一路：去掉前导点后非空才参与（判据同 [isSearchable]）
+        val extQuery = q.removePrefix(".")
+        if (!isSearchable(extQuery)) return false
+        return item.title.substringAfterLast('.', "").contains(extQuery, ignoreCase = true)
+    }
 }

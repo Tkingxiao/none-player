@@ -228,6 +228,17 @@ object NpIcon {
         stroke("NpExpand", "M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4")
     }
 
+    /**
+     * 退出全屏（§8.4）：[Expand] 的**反向**——折角由外向内。
+     *
+     * 存在的理由是"同一颗钮不能只有一个方向的形状"（E129 / 审查 #10）：全屏态若仍画
+     * 向外展开的折角，图标承诺的动作（展开）与实际结果（退出）相反。描边/圆角与
+     * [Expand] 逐段对齐，两枚在同一排里是同一套语言。
+     */
+    val Collapse: ImageVector by lazy {
+        stroke("NpCollapse", "M9 4v4a1 1 0 0 1-1 1H4M15 4v4a1 1 0 0 0 1 1h4M9 20v-4a1 1 0 0 0-1-1H4M15 20v-4a1 1 0 0 1 1-1h4")
+    }
+
     /** 循环：两条弧线 + 箭头 */
     val Rotate: ImageVector by lazy {
         stroke("NpRotate", "M4 12a8 8 0 0 1 13.7-5.6L20 8M20 12a8 8 0 0 1-13.7 5.6L4 16M20 4v4h-4M4 20v-4h4")

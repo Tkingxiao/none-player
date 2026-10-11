@@ -37,6 +37,8 @@ import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -70,6 +72,8 @@ import kotlin.math.roundToInt
  * - **点击定位**：整条 `seekTouchBand 26dp` 触控带（视觉仍是细线；原规格 32dp，
  *   竖屏小窗里触控带+按钮行占了视频区近三成，实报"底栏占小窗一半"后收窄），
  *   点哪儿定位到哪儿；
+ * - **取消 ≠ 提交**（E129 / 审查 #3）：手势被系统边缘返回或父节点打断时走
+ *   [onScrubCancel]，**不 seek**——一次被取消的手势不该被读成"确认跳到最后一帧的位置"；
  * - 拖动采用**绝对定位**（滑块跟手到触点），与 M3 Slider 行为一致，
  *   `onScrubChange` 的预览限流与松手精确定位仍由调用方（PlayerScreen）承担。
  *
@@ -85,7 +89,24 @@ internal fun NpSeekBar(
     onScrubStart: () -> Unit,
     onScrubChange: (positionMs: Float) -> Unit,
     onScrubEnd: () -> Unit,
+    /**
+     * 手势被**取消**（系统边缘返回 / 父节点拦截）时的出口（E129 / 审查 #3）。
+     *
+     * 与 [onScrubEnd] 分开是必须的：取消不是"确认跳到最后一帧拖到的位置"。
+     * 合成一条会让一次被系统打断的手势变成一次没人要求的跳播。取消方负责把
+     * scrubbing 状态清干净并让 `dragging` 落回 false（否则拖动守护会卡住不放手）。
+     */
+    onScrubCancel: () -> Unit,
     modifier: Modifier = Modifier,
+    /**
+     * 透明可交互槽的高度（§3.1 红线 44dp）。视觉轨仍是一条细线，长出来的只有上下留白。
+     *
+     * 默认取 [NpDimens.touchTarget]；**竖屏小窗**那条路显式传 [NpDimens.seekTouchBand]
+     * ——那里视频区只有 16:9 一条（~230dp），44dp 的槽会把控制层顶得过高
+     * （2026-10-05 真机实报"底栏占小窗一半"）。两档都在，是因为"拇指容错"与
+     * "别挡住画面"在竖窗里真的冲突，而在横窗/桌面上并不冲突。
+     */
+    touchBand: Dp = NpDimens.touchTarget,
 ) {
     val ink = LocalNpInk.current
     val maxPosition = durationMs.coerceAtLeast(1L).toFloat()
@@ -120,7 +141,7 @@ internal fun NpSeekBar(
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(NpDimens.seekTouchBand),
+            .height(touchBand),
         contentAlignment = Alignment.CenterStart,
     ) {
         val trackWidthPx = with(density) { maxWidth.toPx() }
@@ -132,6 +153,24 @@ internal fun NpSeekBar(
                 .semantics {
                     contentDescription = "播放进度"
                     progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+                    // E129（审查 #11）：光有百分比，读屏用户算不出"还剩多久"——
+                    // 时间读数与轨道上的胶囊同源，两处读数不会各说各话。
+                    stateDescription = if (durationMs > 0L) {
+                        "${formatTimestamp(displayPositionMs.toLong())} / ${formatTimestamp(durationMs)}"
+                    } else {
+                        formatTimestamp(displayPositionMs.toLong())
+                    }
+                    // E129（审查 #11）：自绘 Canvas 没有可调节动作——读屏能"听到"进度却改不了。
+                    // 复用与触摸**完全相同**的提交链（start → change → end），
+                    // 于是暂停恢复、预览限流、落点胶囊在无障碍路径上一样成立，
+                    // 不为无障碍另开一条只改 UI 的假 seek。
+                    setProgress { target ->
+                        val position = target.coerceIn(0f, 1f) * maxPosition
+                        onScrubStart()
+                        onScrubChange(position)
+                        onScrubEnd()
+                        true
+                    }
                 }
                 .pointerInput(maxPosition) {
                     detectTapGestures { offset ->
@@ -154,7 +193,10 @@ internal fun NpSeekBar(
                             haptics.performHaptic(NpHaptic.Tick)
                             onScrubEnd()
                         },
-                        onDragCancel = onScrubEnd,
+                        // E129（审查 #3）：取消走独立出口，**不提交 seek**。
+                        // 此前两者接的是同一个 `onScrubEnd`，于是被系统边缘返回打断的
+                        // 一次拖动会照样 seek 到最后落点并恢复播放——取消被读成了确认。
+                        onDragCancel = onScrubCancel,
                     ) { change, _ ->
                         change.consume()
                         onScrubChange(

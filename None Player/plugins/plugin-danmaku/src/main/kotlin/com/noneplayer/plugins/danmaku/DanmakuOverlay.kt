@@ -117,11 +117,27 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
     val textTracks = tracks.filter { it.type == com.noneplayer.kernel.api.NpTrackType.TEXT }
 
     // ---- 来源解析 ----
+    //
+    // 审查批次 B2：来源改成**显式单一状态机**——`embeddedPicked` 非空即"内嵌轨"。
+    // 旧实现的缺陷是切不回去：`embeddedPicked != null` 时文件加载 effect 直接 return，
+    // 而菜单里没有任何把 `embeddedPicked` 置回 null 的动作。于是用户先选了内嵌轨、
+    // 再选弹幕文件，URI 存进去了、界面却仍停在旧的内嵌来源上——菜单承诺与结果不符。
+    // 现在选文件或"恢复自动匹配"都会先清掉内嵌选择，文件 effect 也把它列为 key，
+    // 所以切源必然触发重载。
     var source by remember(context.media.uri) { mutableStateOf<DanmakuSource>(DanmakuSource.None) }
     var embeddedPicked by remember(context.media.uri) { mutableStateOf<String?>(null) }
+    // 内嵌通路累积的弹幕（切回文件来源时要清空，否则旧的内嵌弹幕会残留）
+    var spawned by remember(context.media.uri) { mutableStateOf<List<Danmaku>>(emptyList()) }
 
-    // 文件来源：手动 > 自动。manualUri / blocklist 变化都会触发重载。
-    LaunchedEffect(context.media.uri, manualUri, blocklist) {
+    /** 切到"自动/手动文件"来源：清掉内嵌轨选择，交由文件 effect 重载 */
+    fun useFileSource() {
+        embeddedPicked = null
+        spawned = emptyList()
+    }
+
+    // 文件来源：手动 > 自动。manualUri / blocklist / 内嵌选择变化都会触发重载
+    // （embeddedPicked 进 key，是"从内嵌切回文件也能生效"的关键）。
+    LaunchedEffect(context.media.uri, manualUri, blocklist, embeddedPicked) {
         if (embeddedPicked != null) return@LaunchedEffect
         withContext(Dispatchers.IO) {
             val loaded = loadFileSource(appContext, context.media, manualUri, blocklist)
@@ -136,7 +152,6 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
     }
 
     // ---- 内嵌通路：新 cue 出现 → 按当前位置 spawn 滚动弹幕 ----
-    var spawned by remember(context.media.uri) { mutableStateOf<List<Danmaku>>(emptyList()) }
     val anchor = remember { Anchor() }
     // 帧号状态先于锚定效果声明——暂停态的锚点修正要写它
     val frame = remember { mutableLongStateOf(0L) }
@@ -299,6 +314,9 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
                             text = { Text("选择弹幕文件…") },
                             onClick = {
                                 menuOpen = false
+                                // 审查批次 B2：先切回"文件来源"，否则内嵌轨选中时
+                                // 文件加载 effect 会 continue 跳过，选了文件也不生效
+                                useFileSource()
                                 filePicker.launch(arrayOf("*/*"))
                             },
                         )
@@ -307,7 +325,20 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
                                 text = { Text("清除手动选择") },
                                 onClick = {
                                     menuOpen = false
+                                    useFileSource()
                                     scope.launch { settings.setDanmakuManualUri(context.media.uri, null) }
+                                },
+                            )
+                        }
+                        // 审查批次 B2：内嵌轨选中后必须有**退出内嵌轨**的入口。
+                        // 没有它，用户切到内嵌轨之后就再也回不到自动/文件来源——
+                        // 这是"选了就出不来"的单向门。
+                        if (embeddedPicked != null) {
+                            DropdownMenuItem(
+                                text = { Text("退出内嵌轨（回到自动匹配）") },
+                                onClick = {
+                                    menuOpen = false
+                                    useFileSource()
                                 },
                             )
                         }

@@ -32,6 +32,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -241,6 +243,13 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             userDragging = false
                             if (scrubWasPlaying) player.play()
                         },
+                        // E129（审查 #3）：取消走独立出口，**不提交 seek**。
+                        // 这条内嵌控制层不做预览 seek（拖动只改本地 dragPositionMs），
+                        // 所以"回滚"只需清状态 + 恢复原播放态，无需把引擎放回起手位置。
+                        onScrubCancel = {
+                            userDragging = false
+                            if (scrubWasPlaying) player.play()
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     )
                     Row(
@@ -250,14 +259,19 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                     ) {
                         IconButton(
                             onClick = { if (playing) player.pause() else player.play() },
-                            modifier = Modifier.npTouchTarget(34.dp),
+                            modifier = Modifier
+                                .npTouchTarget(34.dp)
+                                // E129（审查 #4）：播放态画的是自绘 `PauseGlyph`，没有语义节点——
+                                // 名称必须挂在按钮上并按状态给，否则读屏只报"按钮"。
+                                .semantics { contentDescription = if (playing) "暂停" else "播放" },
                         ) {
                             if (playing) {
                                 PauseGlyph(tint = Color.White, barWidth = 4.dp, barHeight = 16.dp)
                             } else {
                                 Icon(
                                     imageVector = NpIcon.Play,
-                                    contentDescription = "播放",
+                                    // 名称已由按钮节点给出，图标不再重复报一次
+                                    contentDescription = null,
                                     tint = Color.White,
                                     modifier = Modifier.size(22.dp),
                                 )

@@ -31,3 +31,11 @@ captures/
 /*.wav
 /*.cue
 /ui.xml
+
+# ---- 性能取证产物（Perfetto / atrace / gfxinfo，本地测量用，不入库）----
+# E129：实机排查会产出几十 MB 的 .pftrace，落在模块目录里不会被上面的根级规则挡住；
+# `tools/jank-*.txt` 是复测器的输出，按本仓"证据留本地、源码入库"的约定一并排除。
+*.pftrace
+/None Player/*.png
+/None Player/player-*.xml
+/None Player/tools/jank-*.txt

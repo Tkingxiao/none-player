@@ -10,8 +10,11 @@ import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.PermissionProvider
-import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.PluginMarker
+import com.noneplayer.kernel.api.StartupTaskPlugin
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import com.noneplayer.kernel.api.ServiceLocator
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.register
@@ -26,7 +29,7 @@ import com.noneplayer.kernel.ui.api.SettingsProvider
  * - [SettingsProvider]：设置页"扫描目录 + 重新扫描"功能。
  */
 @PluginMarker
-class LocalScannerPlugin : Plugin {
+class LocalScannerPlugin : StartupTaskPlugin {
 
     override val id: String = "scanner.local"
     override val name: String = "本地媒体"
@@ -62,8 +65,18 @@ class LocalScannerPlugin : Plugin {
         registry.register(CacheProvider::class.java, source)
     }
 
-    override suspend fun onStart() {
+    /**
+     * 首扫走**有界启动预算**（内核侧 [com.noneplayer.kernel.api.StartupTaskPlugin] 契约）：
+     * 观察者先挂上（它必须早于任何一次扫描回调），扫描本体交给内核的启动任务通道——
+     * 扫得快就带着媒体列表进首页，扫得慢就先出骨架、内容随后补齐。
+     * 旧实现在 `onStart()` 里同步扫完才置 Running，用户要盯着启动画面等完整个扫描。
+     */
+    override fun startup(scope: CoroutineScope): Deferred<Unit> = scope.async {
         source.startObserving()
+        onStart()
+    }
+
+    override suspend fun onStart() {
         if (source.isAvailable()) {
             val result = source.scan()
             eventBus.publish(KernelEvent.MediaScanned(sourceId = result.sourceId, count = result.added))

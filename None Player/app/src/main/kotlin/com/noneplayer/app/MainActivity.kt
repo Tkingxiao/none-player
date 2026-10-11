@@ -361,6 +361,20 @@ private fun BootErrorScreen(cause: Throwable) {
  * 而折叠屏的语义是**铰链避让**、不是平板的分栏，故它的优先级排在平板之前。
  *
  * 非折叠设备上 `windowLayoutInfo` 只会发射空列表，代价是一次 Flow 订阅。
+ *
+ * ---
+ * **已确认的能力边界（E129 / 审查 #5，2026-10-12 定案）**：本函数**只做形态识别，
+ * 不承诺几何避让**。`FoldingFeature.bounds` / `orientation` / `occlusionType` /
+ * `isSeparating` 一律不往上传，[com.noneplayer.kernel.ui.api.NpWindowInfo] 里也没有
+ * 铰链矩形——因此布局层拿到的是一个**连续矩形**，折痕/铰链理论上可以横穿内容区
+ * （播放控件、列表行、详情页双栏）。
+ *
+ * 这是有意保留的取舍，不是遗漏：几何避让要求契约层新增 hinge bounds 并让每个消费方
+ * （播放页、媒体库、详情页右栏、迷你条）各自决定"跨栏还是分列"，属于产品规格级改动。
+ * 在规格定案之前，宁可不做半套避让（半套会让"部分控件避开、部分被压住"这种更难解释
+ * 的状态出现）。要落地时的入口就在这里：把 displayFeatures 的 bounds/orientation
+ * 一并算进 `NpWindowInfo`，而不是在页面里各读一份 `WindowInfoTracker`（那会破坏
+ * §13.2 的"一处判定、全局消费"）。
  */
 @Composable
 private fun rememberFoldingFeature(activity: Activity): Boolean {

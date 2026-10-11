@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
@@ -46,6 +47,9 @@ import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -273,24 +277,38 @@ fun NpMiniProgress(
     val ink = LocalNpInk.current
     // 设计稿 `.mini-prog i{transition:width .25s linear}`——线性而非弹性：
     // 进度线是"匀速走"的读法，spring 回弹会让它看起来在抖。
-    val animated by animateFloatAsState(
+    //
+    // E128：动画值**只在绘制相位解包**（`animated.value` 写在 drawBehind 里，不 `by` 到组合期）。
+    // 播放中这条 250ms 的线性补齐是一条接一条连续的，旧写法等于迷你条每帧重组一次自己；
+    // 而迷你条挂在**每个列表页**的底栏上——滚动 + 后台播放时这是一笔稳定的逐帧账。
+    // draw 里"方角左端 + 圆角右端"的写法与原 `fillMaxWidth(f) + topEnd/bottomEnd 2dp`
+    // 逐像素等价（左端圆角被先行画满的矩形盖住）。
+    val animated = animateFloatAsState(
         targetValue = progress.coerceIn(0f, 1f),
         animationSpec = tween(durationMillis = npDuration(Motion.MiniProgress), easing = LinearEasing),
         label = "npMiniProgress",
     )
+    val track = trackColor ?: ink.border
+    val fill = fillColor ?: ink.accent
     Box(
         modifier = modifier
             .fillMaxWidth()
             .height(NpDimens.miniProgress)
-            .background(trackColor ?: ink.border),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(animated)
-                .height(NpDimens.miniProgress)
-                .background(fillColor ?: ink.accent, RoundedCornerShape(topEnd = 2.dp, bottomEnd = 2.dp)),
-        )
-    }
+            .drawBehind {
+                drawRect(track)
+                val fraction = animated.value.coerceIn(0f, 1f)
+                if (fraction <= 0f) return@drawBehind
+                val w = size.width * fraction
+                val r = minOf(2.dp.toPx(), size.height / 2f)
+                drawRect(fill, size = Size((w - r).coerceAtLeast(0f), size.height))
+                drawRoundRect(
+                    color = fill,
+                    topLeft = Offset(w - 2f * r, 0f),
+                    size = Size(2f * r, size.height),
+                    cornerRadius = CornerRadius(r, r),
+                )
+            },
+    )
 }
 
 /**
@@ -510,6 +528,21 @@ fun NpMediaCard(
     }
     Column(
         modifier = modifier
+            // E128 语义合并：整张卡应当是**一个**可点节点（Material 卡片同款）。
+            // 不合并时一张卡在语义树里是 8+ 个节点（标题/元信息/角标/时长各占一个），
+            // 而滚动期每进来一张卡都要把这些节点加进无障碍树、离开再摘掉——
+            // 开了无障碍服务的设备上实测这条链路占滚动主线程时间的大头。
+            //
+            // **E129 修正挂载位置**：E128 把它写在 `npPressScale` 之后（clickable 内侧），
+            // 而 `mergeDescendants` 合并的是**它内侧**的后代、clickable 在它外侧，
+            // 于是卡片在无障碍树里依然是"1 个可点 View + 4 个 TextView + 1 个 Button"
+            // （实机 uiautomator 实测）——合并基本等于没做。现在挂到**最外层**，
+            // 并把 `role` 一并写进这个块（`npPressScale` 那边也把 role 交给了 clickable）。
+            // **实测口径**：改后每帧语义链成本 debug 侧 **2.12 → 1.75ms（−17%）**；
+            // 但卡片节点**没有**收敛成 1 个（仍是 1 个可点 View + 2 TextView + 1 Button，
+            // Compose 侧 `mergeDescendants` 与 `clickable` 的节点边界规则待查）——
+            // 如实记录，不要按"已合并成 1 个节点"理解。
+            .semantics(mergeDescendants = true) { role = Role.Button }
             .hoverable(interactionSource = interactionSource, enabled = hoverEnabled)
             .npHoverLift(hovered = hovered, enabled = hoverEnabled)
             .npPressScale(
@@ -596,6 +629,9 @@ fun NpListRow(
         modifier = modifier
             .fillMaxWidth()
             .npCardSurface(ink, RoundedCornerShape(NpRadius.card))
+            // E128：同 NpMediaCard——整行合并为一个语义节点（滚动期少一整族节点的增删）。
+            // E129：必须挂在**最外层**（clickable 之外），见 NpMediaCard 的说明。
+            .semantics(mergeDescendants = true) { role = Role.Button }
             .hoverable(interactionSource = interactionSource, enabled = hoverEnabled)
             .npPressScale(
                 onClick = onClick,
@@ -698,6 +734,9 @@ fun NpFolderCard(
     Column(
         modifier = modifier
             .fillMaxWidth()
+            // E128：同 NpMediaCard——整卡合并为一个语义节点。
+            // E129：必须挂在**最外层**（clickable 之外），见 NpMediaCard 的说明。
+            .semantics(mergeDescendants = true) { role = Role.Button }
             .hoverable(interactionSource = interactionSource, enabled = hoverEnabled)
             .npHoverLift(hovered = hovered, enabled = hoverEnabled)
             .clip(shape)

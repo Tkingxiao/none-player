@@ -61,6 +61,45 @@ class HistoryPolicyTest {
         assertEquals("local:ms-1", HistoryEntry.keyOf(item))
     }
 
+    /**
+     * 审查批次 A3：不同来源出现**同一个媒体 ID** 时，展示层若用裸 `mediaId`
+     * 建进度/时间 map，`associate` 会让后一条覆盖前一条，进度串到另一个来源去。
+     * 这条断言钉住"跨来源同 ID 必须落在不同键上"。
+     */
+    @Test
+    fun `跨来源同媒体 id 落在不同的进度键上`() {
+        val a = MediaItem(id = "ms-1", sourceId = "local", title = "本地.mp4", uri = "file:///a")
+        val b = MediaItem(id = "ms-1", sourceId = "saf", title = "网盘.mp4", uri = "content://b")
+        val keys = listOf(HistoryEntry.keyOf(a), HistoryEntry.keyOf(b)).toSet()
+        // 两个键都必须保留：若这里退化成裸 mediaId，集合只剩 1 个元素
+        assertEquals(2, keys.size)
+        assertEquals(setOf("local:ms-1", "saf:ms-1"), keys)
+    }
+
+    @Test
+    fun `mediaId 是 mediaKey 去命名空间后的剩余部分`() {
+        val entry = HistoryEntry(
+            mediaKey = "local:ms-1",
+            sourceId = "local",
+            mediaId = "local:ms-1".substringAfter(':'),
+            title = "t",
+            uri = "u",
+            mimeType = "video/mp4",
+            coverUri = null,
+            folder = null,
+            durationMs = 0,
+            positionMs = 0,
+            watchedRatio = 0f,
+            playCount = 1,
+            lastPlayedAt = 0,
+            width = 0,
+            height = 0,
+        )
+        assertEquals("ms-1", entry.mediaId)
+        // 建表要用完整 mediaKey，不是裸 mediaId
+        assertEquals(entry.mediaKey, "${entry.sourceId}:${entry.mediaId}")
+    }
+
     @Test
     fun `孤儿键是库里存在但扫描结果里没有的那些`() {
         // L16：重扫后只删"不在本次结果集"的行——存在的键一个都不能误删

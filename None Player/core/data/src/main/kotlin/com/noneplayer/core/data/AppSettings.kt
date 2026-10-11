@@ -492,9 +492,17 @@ class AppSettings(private val context: Context) {
         }
     }
 
-    /** 某媒体的仅听音频记忆（§5.1），默认 false */
-    fun audioOnlyPreferred(mediaKey: String): Flow<Boolean> = context.dataStore.data
-        .map { it[audioOnlyKey(mediaKey)] ?: false }
+    /**
+     * 某媒体的仅听音频记忆（§5.1）；**没记过为 null**（E129 / 审查 #1、#2）。
+     *
+     * 为什么是 `Boolean?` 而不是"缺省 false"：`false` 必须专指"用户明确选了视频形态"。
+     * 若把"从未选择过"也压成 `false`，播放页就无法按媒体类型给音频文件一个默认形态
+     * （音频默认仅听、视频默认带画面）——要么音频永远进不了仅听模式，要么把上一个
+     * 媒体的模式带进下一个媒体。同族的 [displaySettings] / [subtitleUri] 也是
+     * "没记过 = null" 这一条约定。
+     */
+    fun audioOnlyPreference(mediaKey: String): Flow<Boolean?> = context.dataStore.data
+        .map { it[audioOnlyKey(mediaKey)] }
 
     suspend fun setAudioOnlyPreferred(mediaKey: String, value: Boolean) {
         context.dataStore.edit { it[audioOnlyKey(mediaKey)] = value }

@@ -1,5 +1,8 @@
 package com.noneplayer.kernel.ui.api
 
+import androidx.compose.animation.AnimatedContentTransitionScope
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
@@ -8,7 +11,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -69,8 +74,12 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.navigation.NavDestination
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
+import androidx.navigation.NavBackStackEntry
+import androidx.navigation.Navigator as NavLibNavigator
+import androidx.navigation.compose.ComposeNavigator
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.currentBackStackEntryAsState
 import com.noneplayer.core.ui.LocalNpInk
@@ -183,6 +192,7 @@ fun KernelTabScaffold(
     tabNavController: NavHostController,
 ) {
     val kernel = LocalKernel.current
+    val windowInfo = LocalNpWindowInfo.current
     // E22：响应式收集——插件启用/停用后底栏随注册表更新，无需重启。
     val tabs by remember { kernel.registry.observe<TabProvider>() }
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<TabProvider>())
@@ -224,6 +234,28 @@ fun KernelTabScaffold(
         val from = sortedTabs.indexOfFirst { it.route == currentRoute }
         val to = sortedTabs.indexOfFirst { it.route == route }
         tabShiftDirection.intValue = if (from >= 0 && to >= 0) to.compareTo(from) else 0
+        // E128 关键一步：把**将要离场**的 Tab 条目标记为"过渡中"（ComposeNavigator 的
+        // 公开 API，本意给预测性返回用）。
+        //
+        // 为什么必须有它：`popUpTo(当前页, inclusive=true)` 与 navigate 在同一事务里执行，
+        // NavController 会把被弹出的条目直接标记成 DESTROYED（`popEntryFromBackStack`
+        // 的 `transitioning=false` 分支），它随即从 `visibleEntries` 消失；而
+        // navigation-compose 的 transitionSpec 有一条明确规则——**初态不在 visibleEntries
+        // 就整个跳过动画**（`EnterTransition.None togetherWith ExitTransition.None`）。
+        // 读值上就是：胶囊在飞、内容硬切——这正是 2026-10-11 用户实报的
+        // "不是界面的切换动画"（E127 只验了条上的三件，没验到这一层）。
+        // 先 `prepareForTransition` 后，弹出分支改走"保留 CREATED 形态等过渡收尾"，
+        // 条目留在 visibleEntries 里，内容过渡才真正播放；收尾由 NavHost 自己调
+        // `onTransitionComplete` 完成销毁，`saveState` 的存档语义不变（E53 不破）。
+        // 取当前 Tab 所在导航器：NavDestination 只公开 `navigatorName`，实例要经 provider
+        // 查（`ComposeNavigator.NAME` 是 internal，但这层查出来的就是它——Tab 目的地都由
+        // composable 导航器承载，`as?` 兜住理论上的其他承载者）。
+        val composeNavigator = tabNavController.currentDestination?.navigatorName
+            ?.let { tabNavController.navigatorProvider.getNavigator<NavLibNavigator<out NavDestination>>(it) }
+            as? ComposeNavigator
+        composeNavigator?.backStack?.value?.lastOrNull()?.let { outgoing ->
+            composeNavigator.prepareForTransition(outgoing)
+        }
         val topDestinationId = tabNavController.currentDestination?.id
         tabNavController.navigate(route) {
             if (topDestinationId != null) {
@@ -250,53 +282,69 @@ fun KernelTabScaffold(
         }
     }
 
+    // ---- 标签内容转场（E128 定稿；取代 E127 的"8dp 淡移"）----
+    //
+    // 四件套：交叉淡入（fade-through）+ 双向纵深缩放 + 方向视差位移 + 退场加速。
     // 时长读在组合期：下面的 lambda 跑在 TransitionScope，取不到 LocalNpMotionQuality。
-    val tabSwapMs = npDuration(Motion.Tab)
-    // §7.2：Tab 切换 = fade + scale 0.98→1，**不做**横向整页滑动（半路卡住的感觉）。
-    // 0.98 是位移的一种，轻量档 / Reduce Motion 下并掉，只留淡入淡出。
-    val tabScaleIn = if (npDisplacementAllowed()) 0.98f else 1f
-    // M4（§7 场景表）的第三件：内容**方向淡移 8dp**——往右切就从左边进来。
-    // 8dp 是"读得出方向的最小量"（与 LibraryScreen 的 stage 位移同一档），不是整页滑：
-    // 整页滑会在半路把两页各露一半，那正是 §7.2 禁掉的东西。
-    val tabShiftPx = if (npDisplacementAllowed()) with(LocalDensity.current) { 8.dp.roundToPx() } else 0
+    //
+    // 为什么不是"整页滑"（§7.2 的红线仍成立）：位移轴**跟随导航轴**、幅度 28–36dp——
+    // 紧凑档底栏是横向排列 → 水平轴；Rail 是纵向排列 → 垂直轴。整页滑会在半路把
+    // 两页各露一半，而这里的位移比页宽小一个量级，两页始终同向平移、读成"换页的那一下"。
+    //
+    // 时长走 Nav* 三兄弟而不是 `Tab`：内容转场在语义上就是一次路由转场（Tab 是内层
+    // NavHost 的平级目的地），`Tab`(220) 留给标签栏自己的三件（胶囊滑动 / 图标缩放 / 色变）。
+    // 280 的 Silk 前段极快（约 40% 时间走完 90% 进度），读起来接近 200ms 的响应；
+    // 退场用 SilkExit(180) 加速离开——"进慢出快"是 §3.9 的既定方向。
+    val tabEnterMs = npDuration(Motion.NavEnter)
+    val tabExitMs = npDuration(Motion.NavExit)
+    // 缩放是位移的一种，轻量档 / Reduce Motion 下并掉，只留淡入淡出。
+    val tabScale = if (npDisplacementAllowed()) TAB_CONTENT_SCALE else 1f
+    val tabAxisVertical = !windowInfo.isCompact
+    val tabShiftPx = if (npDisplacementAllowed()) {
+        with(LocalDensity.current) {
+            (if (tabAxisVertical) TAB_SHIFT_RAIL_DP else TAB_SHIFT_BAR_DP).dp.roundToPx()
+        }
+    } else {
+        0
+    }
+    // 进场：自导航来向的同侧滑入（沿底栏往右切 → 从右侧进来）、0.96→1 长大、淡入。
+    val tabEnter: AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition = {
+        val shift = tabShiftPx * tabShiftDirection.intValue
+        fadeIn(tween(tabEnterMs, easing = NpEasing.Silk)) +
+            scaleIn(initialScale = tabScale, animationSpec = tween(tabEnterMs, easing = NpEasing.Silk)) +
+            if (tabAxisVertical) {
+                slideInVertically(tween(tabEnterMs, easing = NpEasing.Silk)) { shift }
+            } else {
+                slideInHorizontally(tween(tabEnterMs, easing = NpEasing.Silk)) { shift }
+            }
+    }
+    // 退场：向同方向滑出（两页同向 = 一次"平移换页"而非互撞）、收向 0.96、并加速离开。
+    val tabExit: AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition = {
+        val shift = -tabShiftPx * tabShiftDirection.intValue
+        fadeOut(tween(tabExitMs, easing = NpEasing.SilkExit)) +
+            scaleOut(targetScale = tabScale, animationSpec = tween(tabExitMs, easing = NpEasing.SilkExit)) +
+            if (tabAxisVertical) {
+                slideOutVertically(tween(tabExitMs, easing = NpEasing.SilkExit)) { shift }
+            } else {
+                slideOutHorizontally(tween(tabExitMs, easing = NpEasing.SilkExit)) { shift }
+            }
+    }
     val navHost: @Composable (Modifier) -> Unit = { modifier ->
         NavHost(
             navController = tabNavController,
             startDestination = sortedTabs.first().route,
             modifier = modifier,
-            // Tab 之间是**平级目的地**，不做方向性滑动，只做一次短交叉淡入 + 8dp 方向淡移。
             // 必须显式声明：NavHost 默认转场是 `tween(700)`，切一次标签要 0.7s
-            // 才"到位"，是整壳里最慢的一处响应。
-            enterTransition = {
-                val shift = tabShiftPx * tabShiftDirection.intValue
-                fadeIn(tween(tabSwapMs, easing = NpEasing.Silk)) +
-                    scaleIn(initialScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.Silk)) +
-                    slideInHorizontally(tween(tabSwapMs, easing = NpEasing.Silk)) { shift }
-            },
-            exitTransition = {
-                // 退场走相反方向：进来的往右推，出去的就往左让
-                val shift = -tabShiftPx * tabShiftDirection.intValue
-                fadeOut(tween(tabSwapMs, easing = NpEasing.SilkExit)) +
-                    scaleOut(targetScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.SilkExit)) +
-                    slideOutHorizontally(tween(tabSwapMs, easing = NpEasing.SilkExit)) { shift }
-            },
-            popEnterTransition = {
-                val shift = tabShiftPx * tabShiftDirection.intValue
-                fadeIn(tween(tabSwapMs, easing = NpEasing.Silk)) +
-                    scaleIn(initialScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.Silk)) +
-                    slideInHorizontally(tween(tabSwapMs, easing = NpEasing.Silk)) { shift }
-            },
-            popExitTransition = {
-                val shift = -tabShiftPx * tabShiftDirection.intValue
-                fadeOut(tween(tabSwapMs, easing = NpEasing.SilkExit)) +
-                    scaleOut(targetScale = tabScaleIn, animationSpec = tween(tabSwapMs, easing = NpEasing.SilkExit)) +
-                    slideOutHorizontally(tween(tabSwapMs, easing = NpEasing.SilkExit)) { shift }
-            },
+            // 才"到位"，是整壳里最慢的一处响应。pop 两份与 push 同源——Tab 之间没有
+            // 前进/后退的层级语义，对称处理才不会"从二级页回来是另一种手感"。
+            enterTransition = tabEnter,
+            exitTransition = tabExit,
+            popEnterTransition = tabEnter,
+            popExitTransition = tabExit,
             builder = tabGraph,
         )
     }
 
-    val windowInfo = LocalNpWindowInfo.current
     // 底部条实测高度：内容层延伸到条之下后，各页靠它做最后一屏的 contentPadding
     var bottomBarPx by remember { mutableIntStateOf(0) }
     val bottomInset = with(LocalDensity.current) { bottomBarPx.toDp() }
@@ -464,6 +512,18 @@ private const val SHELL_ACCENT_SOFT_ALPHA = 0.16f
 
 /** M4（§7 场景表）：Tab 图标未选中时的静止缩放，选中后回到 1.0 */
 private const val TAB_ICON_REST_SCALE = 0.9f
+
+/** E128：内容转场的纵深缩放——进出都收向该值（轻量档 / Reduce Motion 下并掉，只留淡入淡出） */
+private const val TAB_CONTENT_SCALE = 0.96f
+
+/**
+ * E128：内容转场的方向视差幅度（dp）——紧凑档（横向底栏）36 / Rail（纵向）28。
+ *
+ * 不是随机定的：36dp 在 360dp 宽的手机上约占 10% 页宽（读得出方向），28dp 在
+ * 800dp 高的 Rail 窗里约占 3.5%。两者都远小于页宽/页高——§7.2"不做整页滑"仍成立。
+ */
+private const val TAB_SHIFT_BAR_DP = 36
+private const val TAB_SHIFT_RAIL_DP = 28
 
 /**
  * 选中胶囊的落点账本（M4「选中胶囊 morph」）。

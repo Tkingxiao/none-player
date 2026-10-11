@@ -8,6 +8,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,6 +19,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -88,10 +91,14 @@ class MiniPlayerChrome : BottomChromeProvider {
     override fun Render(navigator: Navigator) {
         val kernel = LocalKernel.current
         val session = SessionHolder.of(sessionFactoryOf(kernel.services))
-        val nowPlaying by session.nowPlaying.collectAsStateWithLifecycle()
+        // E128：根订阅**位置无关**的摘要（`positionMs` 归零 + distinctUntilChanged）。
+        // 旧写法根订 `nowPlaying`（含进度）——播放中它每 250ms 一跳，整条迷你条
+        // （含 5 枚按钮各自的颜色动画状态）就每 250ms 重组一轮，而这条挂在**每个列表页**
+        // 的底栏上。进度只留给两个叶子（时间文本 / 进度线）自己订。
+        val summary by session.nowPlayingSummary.collectAsStateWithLifecycle()
         val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
 
-        val miniVisible = nowPlaying != null
+        val miniVisible = summary != null
         val haptics = rememberNpHaptics()
         // M3（§7.5 `LightTap`）：出现与收起各回执一次，与 `Panel` 动画同帧起步。
         // 冷启动就带着会话时条是"一直在那"，不是刚出现——初值直接取当前状态把它滤掉。
@@ -104,7 +111,7 @@ class MiniPlayerChrome : BottomChromeProvider {
         }
 
         AnimatedVisibility(
-            visible = nowPlaying != null,
+            visible = summary != null,
             // M3：迷你条的显隐带"内容让位"（expand/shrink），两者共用 `Panel`(180) 的 spring。
             // 默认的 fadeIn()/expandVertically() 是 150ms linear-ish，和底栏其余部分的
             // 手感对不上；这里显式落到令牌上，档位与 Reduce Motion 才能一起生效。
@@ -113,8 +120,8 @@ class MiniPlayerChrome : BottomChromeProvider {
             exit = fadeOut(animationSpec = npMotion(Motion.Panel)) +
                 shrinkVertically(animationSpec = npMotion(Motion.Panel)),
         ) {
-            // nowPlaying 在退出动画期间会变 null，逐帧读取需要兜底快照
-            val snapshot = nowPlaying ?: return@AnimatedVisibility
+            // 摘要/完整流在退出动画期间会变 null，逐帧读取需要兜底快照
+            val snapshot = summary ?: return@AnimatedVisibility
             val ink = LocalNpInk.current
             Column(
                 modifier = Modifier
@@ -133,7 +140,9 @@ class MiniPlayerChrome : BottomChromeProvider {
                             .background(ink.accent),
                     )
                     MiniPlayerRow(
+                        session = session,
                         snapshot = snapshot,
+                        audioOnly = audioOnly,
                         modifier = Modifier
                             .align(Alignment.Center)
                             .fillMaxWidth()
@@ -151,24 +160,24 @@ class MiniPlayerChrome : BottomChromeProvider {
                         onNext = { session.next() },
                         onClose = { session.stop() },
                         onAudioToggle = {
-                            if (!audioOnly) {
-                                // 视频在播：进音频页（先切模式再导航，音频页按模式短路渲染）
-                                session.toggleAudioOnly()
+                            // E129（审查 #8）：两个方向**对称**——都先切模式，再保证用户看得到结果。
+                            // 旧写法只有"视频 → 仅听"会导航，"仅听 → 视频"只改状态：用户停在
+                            // 媒体库时点"切回视频"，画面在播放页里，屏幕上什么都不会发生。
+                            // 已经在播放页时靠 [PlayerPagePresence] 短路，原地换版式、不压栈。
+                            session.toggleAudioOnly()
+                            if (!PlayerPagePresence.active) {
                                 navigator.navigate(
                                     "player?uri=${encode(snapshot.item.uri)}" +
                                         "&title=${encode(snapshot.title)}" +
                                         "&mime=${encode(snapshot.item.mimeType)}" +
                                         "&id=${encode(snapshot.item.id)}",
                                 )
-                            } else {
-                                // 已在仅听模式：切回视频（若当前就在播放页则原地回视频版式）
-                                session.toggleAudioOnly()
                             }
                         },
                     )
                 }
                 // 细进度条：不占高度层级，只做"放到哪了"的弱提示（G1 的 56dp 内的纹理）
-                NpMiniProgress(progress = snapshot.progress)
+                MiniProgressLine(session)
             }
         }
     }
@@ -184,7 +193,7 @@ class MiniPlayerChrome : BottomChromeProvider {
 }
 
 /**
- * `.mini-in` 行：封面 40dp + 标题/时间 + 四个图标按钮。
+ * `.mini-in` 行：封面 40dp + 标题/时间 + 图标按钮。
  *
  * 图标按钮的排列与设计稿一致：播放/暂停 → 耳机（切换仅听音频）→ 下一集 → 关闭。
  * 设计稿把"关闭"放在最右而不是最左，是因为这一条的主要动作是"回到播放"；
@@ -193,10 +202,23 @@ class MiniPlayerChrome : BottomChromeProvider {
  * 按钮尺寸取 40dp（设计稿紧凑档 `.iconbtn{width:40px}`）而不是 44dp：
  * 4×44dp 会把 360dp 宽的手机上留给标题的空间压到不可用，而迷你条的按钮
  * 本身有一个 54dp 高的整行可点区兜底，误触成本很低。
+ *
+ * **窄窗（E129 / 审查 #12）**：上面这笔账只在 360dp 及以上成立。命中槽实际是
+ * `npTouchTarget(40)` = 44dp，加上封面与边距，固定开销约 256dp——320dp 窗口里标题
+ * 只剩 ~60dp、280dp 里只剩 ~20dp，等于读不出正在播什么。因此 `maxWidth < 360dp`
+ * 时把次要动作（仅听切换 / 下一集）收进一枚 ⋯ 溢出菜单，宽度让给标题。
  */
 @Composable
 private fun MiniPlayerRow(
+    session: PlaybackSession,
     snapshot: NowPlaying,
+    /**
+     * 当前是否处于**仅听模式**（会话状态）。
+     *
+     * 与"媒体本身是不是音频"是两件事（E129 / 审查 #8）：视频文件可以被切成仅听，
+     * 音频文件也可以被切回画面形态。角标与读屏名称一律看这个值，不看 `item.kind`。
+     */
+    audioOnly: Boolean,
     modifier: Modifier = Modifier,
     onOpen: () -> Unit,
     onToggle: () -> Unit,
@@ -205,88 +227,191 @@ private fun MiniPlayerRow(
     onAudioToggle: (() -> Unit)?,
 ) {
     val ink = LocalNpInk.current
-    val isAudio = snapshot.item.kind == MediaKind.AUDIO
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = modifier
-            .height(NpDimens.miniHeight)
-            .npClickable(onClick = onOpen)
-            .padding(start = NpSpace.md, end = NpSpace.sm),
-    ) {
-        MiniCover(snapshot)
-        Column(
+    BoxWithConstraints(modifier = modifier) {
+        // 窄档判据：360dp 是主流手机竖窗宽度，取"小于"以免改动常规形态
+        val compact = maxWidth < 360.dp
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
-                .weight(1f)
-                .padding(horizontal = 10.dp),
+                .fillMaxWidth()
+                .height(NpDimens.miniHeight)
+                .npClickable(onClick = onOpen)
+                .padding(start = NpSpace.md, end = NpSpace.sm),
         ) {
-            Text(
-                text = snapshot.title,
-                // 设计稿 `.mini .meta b`：13px/550
-                style = NpTypography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
-                color = ink.fg,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+            MiniCover(snapshot)
+            Column(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 10.dp),
+            ) {
+                Text(
+                    text = snapshot.title,
+                    // 设计稿 `.mini .meta b`：13px/550
+                    style = NpTypography.bodySmall.copy(fontWeight = FontWeight.SemiBold),
+                    color = ink.fg,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // E128：时间文本是**独立叶子**（自己订含进度的 `nowPlaying`）——
+                // 进度 250ms 一跳只重组这里，不再牵动整行（标题/5 枚按钮）。
+                MiniStatusTime(session)
+            }
+            // 播放/暂停在任何宽度下都直点：它是这一条上唯一的"立刻要做的事"
+            NpIconButton(
+                icon = if (snapshot.isPlaying) NpIcon.Pause else NpIcon.Play,
+                contentDescription = if (snapshot.isPlaying) "暂停" else "播放",
+                onClick = onToggle,
+                size = MINI_BUTTON,
+                iconSize = 21.dp,
             )
-            Text(
-                text = miniStatusText(snapshot),
-                style = NpMonoSmall,
-                color = ink.muted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        NpIconButton(
-            icon = if (snapshot.isPlaying) NpIcon.Pause else NpIcon.Play,
-            contentDescription = if (snapshot.isPlaying) "暂停" else "播放",
-            onClick = onToggle,
-            size = MINI_BUTTON,
-            iconSize = 21.dp,
-        )
-        // 耳机钮 = 仅听音频切换（设计稿 #miniAudio）；按钮下缘 9sp accent kind 角标。
-        // [onAudioToggle] 为 null（音频页未接线）时整钮隐藏，避免语义重复的假入口。
-        if (onAudioToggle != null) {
-            Box {
+            if (compact) {
+                // 窄档：耳机钮与下一集收进溢出菜单，宽度让给标题
+                MiniOverflowButton(
+                    hasNext = snapshot.hasNext,
+                    audioOnly = audioOnly,
+                    onNext = onNext,
+                    onAudioToggle = onAudioToggle,
+                )
+            } else {
+                // 耳机钮 = 仅听模式切换（设计稿 #miniAudio）；按钮下缘 9sp accent 角标。
+                // [onAudioToggle] 为 null（音频页未接线）时整钮隐藏，避免语义重复的假入口。
+                if (onAudioToggle != null) {
+                    AudioToggleButton(audioOnly = audioOnly, onClick = onAudioToggle)
+                }
                 NpIconButton(
-                    icon = NpIcon.Headphones,
-                    contentDescription = if (isAudio) "当前为音频 · 切回视频" else "当前为视频 · 仅听音频",
-                    onClick = onAudioToggle,
+                    icon = NpIcon.SkipNext,
+                    contentDescription = "下一集",
+                    onClick = onNext,
                     size = MINI_BUTTON,
                     iconSize = 21.dp,
-                )
-                Text(
-                    text = if (isAudio) "音频" else "视频",
-                    style = NpTypography.labelSmall.copy(
-                        fontSize = 9.sp,
-                        fontWeight = FontWeight.Bold,
-                        lineHeight = 9.sp,
-                    ),
-                    color = ink.accent,
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .offset(y = 3.dp),
+                    enabled = snapshot.hasNext,
                 )
             }
+            NpIconButton(
+                icon = NpIcon.Close,
+                contentDescription = "停止播放",
+                onClick = onClose,
+                size = MINI_BUTTON,
+                iconSize = 21.dp,
+            )
         }
+    }
+}
+
+/**
+ * 耳机钮（设计稿 `#miniAudio`）：按钮 + 下缘 9sp accent 角标。
+ *
+ * E129（审查 #8）：角标与读屏名称一律读**会话模式**（[audioOnly]），不读 `item.kind`。
+ * "媒体是音频"与"当前处于仅听形态"是两个概念——按媒体类型给标签会承诺一个当前
+ * 并不成立的状态（音频文件角标写着"音频"、点下去却是切到画面版式）。
+ */
+@Composable
+private fun AudioToggleButton(audioOnly: Boolean, onClick: () -> Unit) {
+    val ink = LocalNpInk.current
+    Box {
         NpIconButton(
-            icon = NpIcon.SkipNext,
-            contentDescription = "下一集",
-            onClick = onNext,
+            icon = NpIcon.Headphones,
+            contentDescription = if (audioOnly) {
+                "当前为仅听音频 · 切回视频画面"
+            } else {
+                "当前为视频画面 · 切到仅听音频"
+            },
+            onClick = onClick,
             size = MINI_BUTTON,
             iconSize = 21.dp,
-            enabled = snapshot.hasNext,
         )
+        Text(
+            text = if (audioOnly) "音频" else "视频",
+            style = NpTypography.labelSmall.copy(
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                lineHeight = 9.sp,
+            ),
+            color = ink.accent,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .offset(y = 3.dp),
+        )
+    }
+}
+
+/**
+ * 窄窗溢出菜单（E129 / 审查 #12）：把"仅听切换 / 下一集"从按钮排收进一枚 ⋯。
+ *
+ * 只在 `maxWidth < 360.dp` 时出现——常规手机竖窗（≥360dp）仍保留全部直点按钮，
+ * 溢出只服务自由窗口与分屏那种"标题已经读不出来"的宽度。
+ * 菜单用 Material3 `DropdownMenu`：`Popup` 独立窗口，不会被迷你条的高度裁掉。
+ */
+@Composable
+private fun MiniOverflowButton(
+    hasNext: Boolean,
+    audioOnly: Boolean,
+    onNext: () -> Unit,
+    onAudioToggle: (() -> Unit)?,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
         NpIconButton(
-            icon = NpIcon.Close,
-            contentDescription = "停止播放",
-            onClick = onClose,
+            icon = NpIcon.Dots,
+            contentDescription = "更多操作",
+            onClick = { open = true },
             size = MINI_BUTTON,
             iconSize = 21.dp,
         )
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (onAudioToggle != null) {
+                DropdownMenuItem(
+                    text = { Text(if (audioOnly) "切回视频画面" else "切到仅听音频") },
+                    onClick = {
+                        open = false
+                        onAudioToggle()
+                    },
+                )
+            }
+            DropdownMenuItem(
+                text = { Text("下一集") },
+                enabled = hasNext,
+                onClick = {
+                    open = false
+                    onNext()
+                },
+            )
+        }
     }
 }
 
 /** 迷你条图标按钮尺寸（设计稿紧凑档 `.iconbtn`）。 */
 private val MINI_BUTTON = 40.dp
+
+/**
+ * 时间文本叶子（E128）——自己订**含进度**的 [PlaybackSession.nowPlaying]。
+ *
+ * 位置无关的摘要（根订阅）里 `positionMs` 恒为 0，时间码必须从完整流来；
+ * 而完整流每 250ms 一跳——订阅点落在文件级 composable（独立重组域，§9.2 括号一）
+ * 上，逐跳只重组这一行文本，不再牵动标题与 5 枚按钮。
+ * 完整流在退出动画期间可能先变 null：那时整条内容都会让位（摘要同源变 null），
+ * 这里 `return` 即可，不产生残影。
+ */
+@Composable
+private fun MiniStatusTime(session: PlaybackSession) {
+    val nowPlaying by session.nowPlaying.collectAsStateWithLifecycle()
+    val snapshot = nowPlaying ?: return
+    Text(
+        text = miniStatusText(snapshot),
+        style = NpMonoSmall,
+        color = LocalNpInk.current.muted,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
+}
+
+/** 进度线叶子（E128）：同 [MiniStatusTime]——进度一跳只重组这一条 2dp 线。 */
+@Composable
+private fun MiniProgressLine(session: PlaybackSession) {
+    val nowPlaying by session.nowPlaying.collectAsStateWithLifecycle()
+    val snapshot = nowPlaying ?: return
+    NpMiniProgress(progress = snapshot.progress)
+}
 
 /**
  * "01:23 / 04:30" —— 当前进度 / 总时长（设计稿 `#miniTime` 的口径）；

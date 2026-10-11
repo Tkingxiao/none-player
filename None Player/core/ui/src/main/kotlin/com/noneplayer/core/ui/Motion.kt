@@ -489,8 +489,13 @@ private fun staggerWindowFor(key: Any?): Long = synchronized(staggerWindows) {
 @Composable
 fun Modifier.npStaggeredEntry(index: Int, window: Long = 0L): Modifier {
     val firstScreen = window == 0L || SystemClock.uptimeMillis() <= window
-    val delayMs = if (firstScreen) npStaggerDelay(index) else 0
-    var shown by remember { mutableStateOf(!firstScreen) }
+    // E128：首屏窗口过期后**直接短路**。此前这里仍会给每项建三个状态（`shown` 的
+    // remember、`animateFloatAsState`、`LaunchedEffect`）再得到一个恒为终态的结果——
+    // 列表滚动时每一项进入组合都要付这笔账，而按 §3.10 红线 4（错峰仅首屏），
+    // 滚动带进来的项本来就不该播入场动画。短路后：滚动帧里只有"普通内容"。
+    if (!firstScreen) return this
+    val delayMs = npStaggerDelay(index)
+    var shown by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         if (delayMs > 0) delay(delayMs.toLong())
         shown = true

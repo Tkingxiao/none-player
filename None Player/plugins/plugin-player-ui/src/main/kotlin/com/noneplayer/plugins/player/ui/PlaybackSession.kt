@@ -424,6 +424,30 @@ internal fun mediaMemoryKey(sourceId: String, mediaId: String): String =
     "${sourceId.ifEmpty { LOCAL_MEDIA_SOURCE_ID }}:$mediaId"
 
 /**
+ * 决定某个媒体此刻该处于哪种呈现模式（E129 / 审查 #1、#2）——纯函数，便于单测。
+ *
+ * 语义就一句：**有记忆用记忆，没记忆按媒体类型给默认**。
+ *
+ * ① **没记过**（[storedPreference] 为 null）→ 落**媒体类型默认值**：音频默认仅听，
+ *    不再以视频舞台 + 空画面出现（审查 #1）；
+ * ② **记过 `false`** → 就是 `false`。`false` 与"没记过"必须分开，否则"上一个媒体
+ *    停在仅听"会一路带进下一个媒体（审查 #2）——这正是旧实现只在 `true` 时置位的病根。
+ *
+ * **默认值不需要记忆键**：`storedPreference` 传 null 时这条同样给出类型默认，于是
+ * "深链没带 id"的入口（外部 ACTION_VIEW / 通知回跳）也能拿到正确形态——那一路没有键
+ * 可读（E109 的孤儿桶正是不该读它），但"音频不该露视频舞台"与"有没有键"无关。
+ * 是否落盘由 [PlaybackSession.setAudioOnly] 自己判空键，不在这里分叉。
+ *
+ * 之所以提成纯函数而不是留在 composable 里：这两条都是**分支取值**错误，
+ * 编译器与 UI 走查都抓不到，只有把决策从 Compose 里拆出来才钉得住
+ * （同 [resolveQueueStart] 的取舍）。
+ */
+internal fun resolveAudioOnlyMode(
+    storedPreference: Boolean?,
+    isAudioMedia: Boolean,
+): Boolean = storedPreference ?: isAudioMedia
+
+/**
  * 队列定位（E18 提纯为普通函数以便单测）：**先 id 再 uri**——来源重扫后
  * MediaStore._id 可能换号，只认 id 会让队列退化成单项且**静默**。
  * 两者都不命中（例如来源刚重扫过）时退化为单项队列、下标 0，而不是把

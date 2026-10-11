@@ -47,8 +47,10 @@ import com.noneplayer.kernel.ui.api.LocalKernel
  * 与迷你条点回播放页走的是同一条深链参数形态（uri/title/mime/id 齐全）。
  *
  * **顶部栏（2026-10-07 用户实报新增）**：返回主页/切页不关闭右栏是路径 A 的定案，
- * 但面板必须自带一个显式的退出点——顶部栏左键就是「关闭播放器」（停会话、
+ * 但面板必须自带一个显式的退出点——顶部栏左键就是「停止播放」（停会话、
  * 清队列，`nowPlaying` 变 null 后外壳收回该栏，迷你条一并消失）。
+ * 图标与描述按**实际动作**给（E129 / 审查 #13）：停止用 ✕ 与「停止播放」，
+ * 不再借用返回箭头的形状去表达一个破坏性动作。
  * 栏体走 `npGlassSurface` 完整配方（§4.1 横条一律不透明底 + 发丝线）。
  */
 class PlaybackPaneChrome : DetailPaneProvider {
@@ -89,8 +91,12 @@ class PlaybackPaneChrome : DetailPaneProvider {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 NpIconButton(
-                    icon = NpIcon.ArrowLeft,
-                    contentDescription = "关闭播放器",
+                    // E129（审查 #13）：这里此前画的是 `ArrowLeft`——**返回/收起**的视觉语言，
+                    // 点下去却是 `session.stop()`：停播、清队列、迷你条一并消失。图标承诺的
+                    // 是"退一层"，实际是"结束这件事"，两者不是一回事，队列越长越像误触。
+                    // 动作既然是停止，就给它停止的形状（与迷你条 ✕ 同一枚）与同一句描述。
+                    icon = NpIcon.Close,
+                    contentDescription = "停止播放",
                     onClick = {
                         // 关闭 = 停止会话（断点先落盘、队列清空）：
                         // nowPlaying → null 后 isOccupied 翻 false，外壳收回右栏，

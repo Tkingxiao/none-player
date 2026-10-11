@@ -133,7 +133,11 @@ internal fun VideoDetailScreen(
     val canResume = resumeMs > 5_000
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
-        val twoPane = maxWidth >= 720.dp
+        // 右栏只在**真有内容**时才占位（E129 / 审查 #9）：同文件夹兄弟项不足两条时
+        // [siblingRows] 直接 return，右栏就是一整片空白——主详情还被挤在左半边，
+        // 宽屏上等于白扔半屏。判据从"窗口够宽"改成"窗口够宽 **且** 有东西可放"，
+        // 无兄弟项时落回单栏，详情独占整幅宽度。
+        val twoPane = maxWidth >= 720.dp && siblings.size > 1
         val pad = PaddingValues(
             start = gutter,
             end = gutter,

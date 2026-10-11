@@ -126,12 +126,14 @@ private fun ProfileScreen(navigator: Navigator) {
     // §8.3：播放历史/收藏（进度与时间序都读 Room 仓库）
     val history = remember { kernel.services.get<HistoryRepository>() }
     val historyEntries by history.recent.collectAsStateWithLifecycle(initialValue = emptyList())
-    val positions = remember(historyEntries) { historyEntries.associate { it.mediaId to it.positionMs } }
-    val lastAt = remember(historyEntries) { historyEntries.associate { it.mediaId to it.lastPlayedAt } }
+    // 审查批次 A3：键用跨来源唯一键 `sourceId:mediaId`（= [HistoryEntry.keyOf]），
+    // 与媒体库页同口径。裸 mediaId 会让不同来源的同 ID 条目互相覆盖。
+    val positions = remember(historyEntries) { historyEntries.associate { it.mediaKey to it.positionMs } }
+    val lastAt = remember(historyEntries) { historyEntries.associate { it.mediaKey to it.lastPlayedAt } }
     val recent = remember(mediaState, positions, lastAt) {
         (mediaState ?: emptyList())
-            .filter { (positions[it.id] ?: 0L) > 0L }
-            .sortedByDescending { lastAt[it.id] ?: 0L }
+            .filter { (positions[HistoryEntry.keyOf(it)] ?: 0L) > 0L }
+            .sortedByDescending { lastAt[HistoryEntry.keyOf(it)] ?: 0L }
             .take(12)
     }
     val historyCount = remember(positions) { positions.count { it.value > 0L } }
@@ -465,7 +467,8 @@ private fun RecentCover(item: MediaItem, hue: Int) {
     if (model != null) {
         AsyncImage(
             model = model,
-            contentDescription = item.title,
+            // E128：同媒体库 MediaCover——卡片已语义合并，封面不再重复报标题
+            contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
@@ -488,7 +491,8 @@ private fun RecentCover(item: MediaItem, hue: Int) {
  */
 private fun fractionOf(item: MediaItem, positions: Map<String, Long>): Float {
     if (item.durationMs <= 0 || item.id.isEmpty()) return 0f
-    val saved = positions[item.id] ?: return 0f
+    // 与建表同键（审查批次 A3）
+    val saved = positions[HistoryEntry.keyOf(item)] ?: return 0f
     if (saved <= 0) return 0f
     return (saved.toFloat() / item.durationMs).coerceIn(0f, 1f)
 }

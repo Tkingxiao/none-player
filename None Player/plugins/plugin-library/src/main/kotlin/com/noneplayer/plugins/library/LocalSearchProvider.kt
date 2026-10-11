@@ -32,13 +32,10 @@ class LocalSearchProvider(private val registry: ExtensionRegistry) : SearchProvi
             .flatten()
         return items
             .filter { item ->
-                // 与搜索页同一匹配域（标题/短标题/文件夹/扩展名 + 批次 8 的拼音域）
-                item.title.contains(q, ignoreCase = true) ||
-                    item.cardTitle.contains(q, ignoreCase = true) ||
-                    (item.folder?.contains(q, ignoreCase = true) == true) ||
-                    item.title.substringAfterLast('.', "")
-                        .contains(q.removePrefix("."), ignoreCase = true) ||
-                    PinyinSearch.matches(item, q)
+                // 与搜索页同一匹配域（标题/短标题/文件夹/扩展名 + 拼音），
+                // 共用 `PinyinSearch.matchesAll`：扩展名分支不再各写一份
+                // （单个 "." 曾命中全库，见审查批次 A1）。
+                PinyinSearch.matchesAll(item, q)
             }
             .map { item ->
                 SearchResult(

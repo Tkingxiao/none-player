@@ -49,6 +49,8 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -242,7 +244,10 @@ fun AudioOnlyScreen(
                         .size(NpDimens.primaryPlay)
                         .clip(CircleShape)
                         .background(ink.accent)
-                        .npPressScale(onClick = { session.toggle() }, pressedScale = 0.93f),
+                        .npPressScale(onClick = { session.toggle() }, pressedScale = 0.93f)
+                        // E129（审查 #4）：播放态画的是自绘 `AudioPauseGlyph`，它没有语义节点
+                        // ——名称必须挂在**按钮**上并按状态给，否则读屏只报"按钮"。
+                        .semantics { contentDescription = if (isPlaying) "暂停" else "播放" },
                     contentAlignment = Alignment.Center,
                 ) {
                     if (isPlaying) {
@@ -250,7 +255,8 @@ fun AudioOnlyScreen(
                     } else {
                         Icon(
                             imageVector = NpIcon.Play,
-                            contentDescription = "播放",
+                            // 名称已由按钮节点给出，图标不再重复报一次
+                            contentDescription = null,
                             tint = ink.bg,
                             modifier = Modifier.size(30.dp),
                         )
@@ -376,6 +382,8 @@ fun AudioOnlyScreen(
             // 横窗（手机横置全屏 / 平板横屏 / 类 PC）：**黑胶在左、内容在右**，整页不滚。
             // 竖窗那一列约 800dp，压进 400dp 出头的横向窗口会把播放键顶出屏幕外，
             // 所以横窗的预算换着花：圆盘吃可用高度，右栏只放内容本身。
+            // E129（审查 #6）：**"整页不滚"现在由右栏自己兜底**——圆盘仍不滚（它本就
+            // 按可用高度定尺寸），右栏内容高过窗口时自行滚动，低高度窗口里工具不再够不到。
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -392,6 +400,11 @@ fun AudioOnlyScreen(
                         maxWidth * 0.42f,
                         if (windowInfo.isDesktopLike) 300.dp else 258.dp,
                     ).coerceAtLeast(120.dp)
+                    // 低高度横窗（手机横置 / 折叠分屏 / 自由窗口）的判据（E129 / 审查 #6）：
+                    // 右栏内容（标题 + 进度 + 五枚传输键 + 两列 chips，展开倍速还更多）
+                    // 本来就会高过窗口，而这一页此前**整页声明不滚**——底部工具因此永远够不到。
+                    // 够不到时收紧间距，先把内容压进窗口，压不进再由右栏自己滚。
+                    val tightHeight = maxHeight < 420.dp
                     Row(
                         modifier = Modifier.fillMaxSize(),
                         horizontalArrangement = Arrangement.spacedBy(NpSpace.xxl, Alignment.CenterHorizontally),
@@ -406,8 +419,19 @@ fun AudioOnlyScreen(
                         // 右栏 560dp 封顶：平板横屏 1280dp 宽时内容不横着摊满整窗。
                         // 间距由 Arrangement 给，块自己不再写纵向 padding。
                         Column(
-                            modifier = Modifier.weight(1f, fill = false).widthIn(max = 560.dp),
-                            verticalArrangement = Arrangement.spacedBy(NpSpace.lg, Alignment.CenterVertically),
+                            modifier = Modifier
+                                .weight(1f, fill = false)
+                                .widthIn(max = 560.dp)
+                                // E129（审查 #6）：**右栏自己可滚**——"整页不滚"在低高度横窗里
+                                // 等于把工具 chips 判了不可达。只让右栏滚：圆盘仍吃满可用高度、
+                                // 不跟着内容一起滚，横窗"黑胶在左、内容在右"的版式意图不变。
+                                // 内容装得下时高度仍按内容走（`weight(fill = false)` + 滚动容器
+                                // 取 min(内容, 可用)），视觉与加滚动之前完全一致。
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(
+                                if (tightHeight) NpSpace.sm else NpSpace.lg,
+                                Alignment.CenterVertically,
+                            ),
                         ) {
                             InfoBlock(startAligned = true, modifier = Modifier.fillMaxWidth())
                             AudioProgressRow(

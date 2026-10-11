@@ -387,12 +387,17 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // 写入仓库，这里一次读全量再经 CompositionLocal 下发，卡片与筛选只读
     // [LocalPlaybackProgress]，不再各开订阅。
     val historyEntries by history.recent.collectAsStateWithLifecycle(initialValue = emptyList())
+    // 审查批次 A3：键必须是**跨来源唯一键** `sourceId:mediaId`，不能用裸 `mediaId`。
+    // 历史的唯一键本来就是它（[HistoryEntry.keyOf]，E73 分命名空间），但这里退化成裸 ID：
+    // 不同 MediaSourceProvider 出现相同媒体 ID 时，associate 会互相覆盖同一键，
+    // 于是"继续观看"的进度、未看完筛选、最近播放排序可能用到另一来源那条记录。
+    // 建表与查表（[fractionOf] / 聚合页 / 详情续播）必须同口径，故统一走 keyOf。
     val positions = remember(historyEntries) {
-        historyEntries.associate { it.mediaId to it.positionMs }
+        historyEntries.associate { it.mediaKey to it.positionMs }
     }
     // 「播放历史 / 最近播放」的时间序：进度值排不出时间序，另取一份 lastAt
     val lastAt = remember(historyEntries) {
-        historyEntries.associate { it.mediaId to it.lastPlayedAt }
+        historyEntries.associate { it.mediaKey to it.lastPlayedAt }
     }
     // 下拉刷新（§10 批次 4）：重扫全部来源；指示器跟随 MediaScanned 事件收尾，
     // 不靠"假转 1 秒"——扫描失败/无目录时也会按时收（超时兜底）
@@ -447,10 +452,18 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val contextItems by remember { kernel.registry.observe<ContextMenuItem>() }
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<ContextMenuItem>())
 
+    // E128：长按回调**记住实例**。`LocalMediaLongPress` 是 staticCompositionLocalOf——
+    // 值一变，其下整个子树全部重组；而 `{ item, rect -> contextMenu = item to rect }`
+    // 字面量每次重组都是新实例。于是 LibraryScreen 每次重组（含播放中每 5s 的进度表
+    // 重建、下拉刷新收尾等）都会把**整页内容**连带重组一遍——本页动辄上百张卡片。
+    // 记住后值恒定，这条"整子树失效"从此不再触发（positions 的变化仍会，见 A5 活账）。
+    val longPressHandler: (MediaItem, Rect) -> Unit = remember {
+        { item, rect -> contextMenu = item to rect }
+    }
     CompositionLocalProvider(
         LocalPlaybackProgress provides positions,
         LocalPlaybackLastAt provides lastAt,
-        LocalMediaLongPress provides { item, rect -> contextMenu = item to rect },
+        LocalMediaLongPress provides longPressHandler,
     ) {
 
     val title: String
@@ -610,7 +623,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                 VideoDetailScreen(
                                     item = detail,
                                     siblings = siblings,
-                                    resumeMs = positions[detail.id] ?: 0L,
+                                    // 与建表同键（审查批次 A3）
+                                    resumeMs = positions[HistoryEntry.keyOf(detail)] ?: 0L,
                                     navigator = navigator,
                                     inlinePlayer = inlinePlayer,
                                     // ⛶ = 明确的全屏意图：独占播放页只有沉浸一种（假全屏已删除）
@@ -1379,7 +1393,10 @@ internal fun MediaCover(
     if (model != null) {
         AsyncImage(
             model = model,
-            contentDescription = item.title,
+            // E128：封面是**装饰**——四张调用点（网格卡/列表行/文件夹卡/详情海报）旁边
+            // 都有标题文本，卡片语义合并后（NpMediaCard 的 mergeDescendants），
+            // 保留 item.title 会让 TalkBack 把标题读两遍。读屏用户不缺这一条。
+            contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = modifier.fillMaxSize(),
         )
@@ -1531,6 +1548,12 @@ private fun FolderBrowser(
             )
         }
         // §20.3 余量①：子文件夹也接首屏错峰（此前只有本级视频接了）
+        //
+        // 审查批次 D5：**两组共用一条递增序号**。旧写法让子文件夹与视频各自从 index=0
+        // 起算，于是"第 1 个文件夹"与"第 1 个视频"拿到同一个延迟、第 2 个也同延迟，
+        // 首屏读起来是两组同时弹出来，而不是一条连续的错峰。
+        // 视频组从 `node.children.size` 接着数，整屏才是 0,1,2,… 的单一序列。
+        val videoStaggerBase = node.children.size
         gridItemsIndexed(node.children, key = { _, child -> "folder:${child.path}" }) { index, child ->
             NpFolderCard(
                 name = child.name,
@@ -1559,7 +1582,7 @@ private fun FolderBrowser(
                     onOpen = onOpenVideo,
                     modifier = Modifier
                         .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
-                        .npStaggeredEntry(index, staggerWindow),
+                        .npStaggeredEntry(videoStaggerBase + index, staggerWindow),
                 )
             }
         } else {
@@ -1573,7 +1596,7 @@ private fun FolderBrowser(
                     showFolderTag = true,
                     modifier = Modifier
                         .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
-                        .npStaggeredEntry(index, staggerWindow),
+                        .npStaggeredEntry(videoStaggerBase + index, staggerWindow),
                 )
             }
         }
@@ -2045,8 +2068,9 @@ private fun AggregateList(
             "continue" ->
                 all.filter { fractionOf(it, positions) in 0.01f..<HistoryRepository.WATCHED_DONE_RATIO }
             // 设计稿 `videos.filter(v => v.prog > 0)`，顺序 = 最近播放时间倒序
-            "history" -> all.filter { (positions[it.id] ?: 0L) > 0L }
-                .sortedByDescending { lastAt[it.id] ?: 0L }
+            // 与建表同键（审查批次 A3）
+            "history" -> all.filter { (positions[HistoryEntry.keyOf(it)] ?: 0L) > 0L }
+                .sortedByDescending { lastAt[HistoryEntry.keyOf(it)] ?: 0L }
             "videos" -> all.filter { it.kind == MediaKind.VIDEO }
             "audios" -> all.filter { it.kind == MediaKind.AUDIO }
             // recent = 按加入时间倒序的全量（首页的 take(8) 只是它的前 8 条）
@@ -2298,7 +2322,8 @@ private fun MediaItem.progressFraction(): Float =
 /** 进度分数的纯函数形态（remember 计算块 / 列表过滤里用，不读 CompositionLocal）。 */
 internal fun fractionOf(item: MediaItem, positions: Map<String, Long>): Float {
     if (item.durationMs <= 0 || item.id.isEmpty()) return 0f
-    val saved = positions[item.id] ?: return 0f
+    // 与建表同键（审查批次 A3）：跨来源唯一键，而不是裸 mediaId
+    val saved = positions[HistoryEntry.keyOf(item)] ?: return 0f
     if (saved <= 0) return 0f
     return (saved.toFloat() / item.durationMs).coerceIn(0f, 1f)
 }

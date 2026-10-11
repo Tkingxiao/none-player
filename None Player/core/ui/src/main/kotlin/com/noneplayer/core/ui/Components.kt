@@ -18,8 +18,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -138,6 +136,13 @@ fun Modifier.npPressScale(
             interactionSource = source,
             indication = null,
             enabled = enabled,
+            // E8：本项目此前 0 处显式 Role——读屏只报"双击即可激活"不报"按钮"。
+            // **role 必须交给 clickable 自己**（而不是后面再挂一个 `.semantics{}`）：
+            // 链上多一个语义修饰符 = 同一个布局节点多出**一个语义节点**，
+            // 而那个节点 `clickable=false` 却因为带 role 被判为"对无障碍重要"，
+            // 于是每张卡片在无障碍树里多一个节点、滚动期多一族增删事件
+            // （实机 uiautomator 实测：每张卡 4 个 TextView + 1 个多余 Button）。
+            role = Role.Button,
             onClick = tap,
         )
     } else {
@@ -146,6 +151,7 @@ fun Modifier.npPressScale(
             interactionSource = source,
             indication = null,
             enabled = enabled,
+            role = Role.Button,
             onClick = tap,
             onLongClick = {
                 haptics.performHaptic(NpHaptic.Long)
@@ -156,10 +162,6 @@ fun Modifier.npPressScale(
     return this
         .graphicsLayer { scaleX = scale.value; scaleY = scale.value }
         .then(clickModifier)
-        // E8：本项目此前 0 处显式 Role——读屏只报"双击即可激活"不报"按钮"。
-        // 收口在这一处 = 卡片/图标按钮/chip/列表行一次铺满；个别需要别的角色
-        // 的调用点再单独覆盖。
-        .semantics { role = Role.Button }
 }
 
 /**
@@ -246,8 +248,11 @@ fun Modifier.npClickable(
     interactionSource = remember { MutableInteractionSource() },
     indication = null,
     enabled = enabled,
+    // 同 [npPressScale]：role 交给 clickable，不再另挂一个 `.semantics{}`——
+    // 后者会给同一个布局节点多造一个语义节点（每张卡/每个按钮各一个）。
+    role = Role.Button,
     onClick = onClick,
-).semantics { role = Role.Button }
+)
 
 /**
  * 「视觉小、命中 44」分离（§3.1 红线 / §14 #13）：**方形状**可点元素专用。

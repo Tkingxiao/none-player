@@ -25,13 +25,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.boundsInWindow
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -69,14 +66,18 @@ fun NpFilterSelect(
 ) {
     val ink = LocalNpInk.current
     var open by remember { mutableStateOf(false) }
-    var anchor by remember { mutableStateOf(Rect.Zero) }
+    // E128：锚点是非可观察持有者（同 `NpAnchorHolder` 的既有约定）。旧写法是
+    // `mutableStateOf(Rect)`——本组件长在列表页的控件行里，滚动时它每帧移动，
+    // 布局回调就每帧写状态、每帧新建 Rect，触发这颗 chip 逐帧重组；
+    // 而锚点真正被读的时机只有"弹层打开"那一瞬。
+    val anchor = rememberNpAnchorHolder()
     val chevron by animateFloatAsState(
         targetValue = if (open) 180f else 0f,
         animationSpec = npMotion(Motion.Panel),
         label = "fselChevron",
     )
 
-    Box(modifier = modifier.onGloballyPositioned { anchor = it.boundsInWindow() }) {
+    Box(modifier = modifier.npAnchor(anchor)) {
         Row(
             modifier = Modifier
                 .clip(RoundedCornerShape(NpRadius.chip))
@@ -112,7 +113,7 @@ fun NpFilterSelect(
         }
         if (open) {
             Popup(
-                popupPositionProvider = remember(anchor, alignEnd) {
+                popupPositionProvider = remember(alignEnd) {
                     DropdownPositionProvider(anchor, alignEnd)
                 },
                 onDismissRequest = { open = false },
@@ -137,9 +138,12 @@ fun NpFilterSelect(
  *
  * [alignEnd] 为 true 时右对齐（设计稿 `.sort-fsel .fsel-menu{left:auto;right:0}`）——
  * 排序控件在标题行最右侧，左对齐展开会被视口裁掉。
+ *
+ * 锚点矩形在 [calculatePosition] 被调用的那一瞬从持有者现取（E128）——
+ * 持有者不是状态，滚动期不产生逐帧写入；弹层真正要定位时读到的一定是最新布局值。
  */
 private class DropdownPositionProvider(
-    private val anchor: Rect,
+    private val anchor: NpAnchorHolder,
     private val alignEnd: Boolean,
 ) : PopupPositionProvider {
     override fun calculatePosition(
@@ -148,14 +152,15 @@ private class DropdownPositionProvider(
         layoutDirection: LayoutDirection,
         popupContentSize: IntSize,
     ): IntOffset {
+        val rect = anchor.current()
         val x = if (alignEnd) {
-            anchor.right.roundToInt() - popupContentSize.width
+            rect.right.roundToInt() - popupContentSize.width
         } else {
-            anchor.left.roundToInt()
+            rect.left.roundToInt()
         }
         // 视口右缘兜底：360dp 手机 + 184dp 弹层时右对齐仍可能溢出 1–2px
         val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
-        return IntOffset(x.coerceIn(0, maxX), anchor.bottom.roundToInt() + 8)
+        return IntOffset(x.coerceIn(0, maxX), rect.bottom.roundToInt() + 8)
     }
 }
 

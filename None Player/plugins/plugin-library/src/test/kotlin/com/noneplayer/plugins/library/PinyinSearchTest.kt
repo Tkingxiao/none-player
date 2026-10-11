@@ -42,4 +42,47 @@ class PinyinSearchTest {
         assertTrue(PinyinSearch.matches(item("movie.mp4", folder = "纪录片"), "纪录"))
         assertFalse(PinyinSearch.matches(item("爱情神话.mp4"), "xyz"))
     }
+
+    /**
+     * 审查批次 A1：`."` 曾因 `contains("")` 恒真而命中**全部**媒体。
+     * 这两个断言就是那次缺陷的回归闸。
+     */
+    @Test
+    fun `matchesAll 不会因单个点命中所有媒体`() {
+        assertFalse(PinyinSearch.matchesAll(item("爱情神话.mp4"), "."))
+        assertFalse(PinyinSearch.matchesAll(item("movie.mkv"), "."))
+        assertFalse(PinyinSearch.matchesAll(item("没有任何扩展名"), "."))
+    }
+
+    @Test
+    fun `matchesAll 扩展名匹配仍然有效`() {
+        assertFalse(PinyinSearch.matchesAll(item("爱情神话.mp4"), ".mkv"))
+        assertTrue(PinyinSearch.matchesAll(item("movie.mkv"), ".mkv"))
+        assertTrue(PinyinSearch.matchesAll(item("movie.mkv"), "mkv"))
+        assertTrue(PinyinSearch.matchesAll(item("MOVIE.MKV"), ".mkv"))
+        // 标题本身含点但扩展名不匹配：不应命中
+        assertFalse(PinyinSearch.matchesAll(item("a.b.mkv"), ".mp4"))
+    }
+
+    @Test
+    fun `isSearchable 拒绝空白与纯点串`() {
+        assertFalse(PinyinSearch.isSearchable(""))
+        assertFalse(PinyinSearch.isSearchable("   "))
+        assertFalse(PinyinSearch.isSearchable("."))
+        assertFalse(PinyinSearch.isSearchable(".."))
+        assertFalse(PinyinSearch.isSearchable(" . "))
+        assertTrue(PinyinSearch.isSearchable("mkv"))
+        assertTrue(PinyinSearch.isSearchable(".mkv"))
+        assertTrue(PinyinSearch.isSearchable("爱"))
+    }
+
+    @Test
+    fun `matchesAll 保留标题与文件夹域`() {
+        assertTrue(PinyinSearch.matchesAll(item("电影.mkv"), "电影"))
+        assertTrue(PinyinSearch.matchesAll(item("movie.mkv", folder = "纪录片"), "纪录"))
+        assertFalse(PinyinSearch.matchesAll(item("movie.mkv"), "不存在的词"))
+        // 空查询不参与匹配
+        assertFalse(PinyinSearch.matchesAll(item("movie.mkv"), ""))
+        assertFalse(PinyinSearch.matchesAll(item("movie.mkv"), "   "))
+    }
 }

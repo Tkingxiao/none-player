@@ -19,11 +19,18 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.setProgress
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.unit.dp
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpHaptic
+import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.rememberNpHaptics
 import kotlin.math.PI
@@ -74,6 +81,26 @@ internal fun WaveformSeekBar(
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
+                // E129（审查 #11）：自绘波形此前**完全没有语义**——仅听音频页的主进度
+                // 在读屏里等于不存在。这里补齐与 [NpSeekBar] 同一套：范围读数 +
+                // 时间读数 + `setProgress` 可调节动作，让无障碍路径复用同一条
+                // `onSeek`，不另开一份只改 UI 的假 seek。
+                .semantics {
+                    contentDescription = "播放进度"
+                    progressBarRangeInfo = ProgressBarRangeInfo(
+                        (positionMs.toFloat() / maxPosition).coerceIn(0f, 1f),
+                        0f..1f,
+                    )
+                    stateDescription = if (durationMs > 0L) {
+                        "${formatTimestamp(positionMs)} / ${formatTimestamp(durationMs)}"
+                    } else {
+                        formatTimestamp(positionMs)
+                    }
+                    setProgress { target ->
+                        onSeek((target.coerceIn(0f, 1f) * maxPosition).toLong())
+                        true
+                    }
+                }
                 .pointerInput(maxPosition, barCount) {
                     fun seekTo(x: Float) {
                         onSeek(

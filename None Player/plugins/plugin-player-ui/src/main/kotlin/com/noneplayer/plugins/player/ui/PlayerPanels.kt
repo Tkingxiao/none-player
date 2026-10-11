@@ -20,14 +20,17 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.layout.WindowInsets
@@ -39,6 +42,8 @@ import com.noneplayer.core.ui.NpChip
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.NpRadius
+import com.noneplayer.core.ui.Motion
+import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.kernel.api.NpChapter
 
@@ -239,6 +244,8 @@ private fun ToggleLine(label: String, checked: Boolean, onChecked: (Boolean) -> 
  */
 @Composable
 fun ChaptersPanel(
+    /** 进出场驱动（审查批次 C3）：false 时播退场，由外层撑到播完再卸载 */
+    visible: Boolean = true,
     chapters: List<NpChapter>,
     positionMs: State<Long>,
     onSelect: (NpChapter) -> Unit,
@@ -254,9 +261,17 @@ fun ChaptersPanel(
             }
         }
     }
+    // 审查批次 C3：与选集面板同一套底部抽屉进出场（旧实现硬切）。
+    // 实现与 `PlayerScreen.npSheetSlide` 同参同曲线，只是本文件拿不到那个 private 函数。
+    val slide by animateFloatAsState(
+        targetValue = if (visible) 0f else 1f,
+        animationSpec = if (visible) npMotion(Motion.Panel) else npMotion(Motion.Field),
+        label = "chaptersSlide",
+    )
     Box(
         modifier = modifier
             .fillMaxSize()
+            .graphicsLayer { alpha = (1f - slide).coerceIn(0f, 1f) }
             .background(Color.Black.copy(alpha = 0.55f))
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -272,6 +287,7 @@ fun ChaptersPanel(
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 .fillMaxHeight(0.55f)
+                .graphicsLayer { translationY = size.height * slide }
                 .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
             Column {

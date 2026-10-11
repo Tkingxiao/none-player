@@ -13,19 +13,24 @@ import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.PluginIndex
 import com.noneplayer.kernel.api.ProcessLifecycle
 import com.noneplayer.kernel.api.ServiceLocator
+import com.noneplayer.kernel.api.StartupTaskPlugin
 import com.noneplayer.kernel.api.VideoPlayerFactory
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.register
 import com.noneplayer.kernel.ui.api.KernelHost
 import com.noneplayer.kernel.ui.api.ScreenProvider
 import com.noneplayer.kernel.ui.api.TabProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -72,6 +77,7 @@ class Kernel private constructor(
 
     private val installMutex = Mutex()
     private var installed: List<Plugin> = emptyList()
+    private val backgroundStartupJobs = mutableListOf<Job>()
 
     /** boot() 的一次性闸门（见 [boot] 注释）；[shutdown] 复位，允许重新引导。 */
     private val bootGate = java.util.concurrent.atomic.AtomicBoolean(false)
@@ -112,12 +118,6 @@ class Kernel private constructor(
             }.onFailure {
                 Log.w(TAG, "per-media 键命名空间搬迁失败，本次启动的记忆可能读不到旧值（下次启动重试）", it)
             }
-            // P1-4（boot 首查审计）：Room 的建库与首条查询放在这里——本协程跑在
-            // Dispatchers.Default，正处启动画面期间。此前 `HistoryRepository` 的四个
-            // 急切 flow 属性会在**主线程同步段**构造时就执行 `Room.databaseBuilder().build()`
-            // （E107 把服务注册提前到同步段的代价），现在属性改 `by lazy`、预热挪到这里。
-            runCatching { services.get<HistoryRepository>().prime() }
-                .onFailure { Log.w(TAG, "历史库预热失败（UI 首次收集时会再试）", it) }
             val allPlugins = pluginIndexes.flatMap { it.plugins() }
             check(allPlugins.isNotEmpty()) {
                 "未收集到任何插件。请确认 :app 装配了至少一个 PluginIndex（kernel-ksp 生成）。"
@@ -132,19 +132,63 @@ class Kernel private constructor(
                     events.publish(KernelEvent.PluginInstalled(plugin.id))
                 }
             }
-            // E59 修复：onStart() 逐插件隔离——此前所有插件的 onStart 共享本方法外层的
-            // 大 try/catch，任何一个插件启动期抽风（如一次 MediaStore 查询异常）都会被
-            // catch 成 BootState.Failed，拖垮整个 App 的启动。微内核的插件化解耦目标要求
-            // 单个插件的 onStart 失败只应是局部故障，不应连累其余已就绪的插件与主界面。
+            // E59 修复：普通 onStart 逐插件隔离；显式声明 [StartupTaskPlugin] 的插件
+            //（首次 MediaStore 扫描是典型）**只把任务安排下去**，不在这里同步等它跑完——
+            // 否则"扫完 81 项媒体"这段时间用户一直盯着启动画面。
+            val startupTasks = mutableListOf<Pair<String, Deferred<Unit>>>()
             sorted.forEach { plugin ->
-                runCatching { plugin.onStart() }
-                    .onFailure { cause ->
-                        Log.w(TAG, "插件 ${plugin.id} onStart 异常，已隔离，其余插件不受影响", cause)
+                if (plugin is StartupTaskPlugin) {
+                    runCatching {
+                        val task = plugin.startup(scope)
+                        startupTasks += plugin.id to task
+                        // 与后台任务同寿：`shutdown()` 取消它们（Deferred 也是 Job）
+                        backgroundStartupJobs += task
+                    }.onFailure { cause ->
+                        Log.w(TAG, "插件 ${plugin.id} 启动任务未能安排，已隔离", cause)
                         events.publish(KernelEvent.PluginStartFailed(plugin.id, cause))
                     }
+                } else {
+                    runCatching { plugin.onStart() }
+                        .onFailure { cause ->
+                            Log.w(TAG, "插件 ${plugin.id} onStart 异常，已隔离，其余插件不受影响", cause)
+                            events.publish(KernelEvent.PluginStartFailed(plugin.id, cause))
+                        }
+                }
             }
 
             registerBuiltins()
+            // Room 建库/首查对页面可用性不是前置条件；在首页进入骨架态时并行预热。
+            backgroundStartupJobs += scope.launch(Dispatchers.IO) {
+                runCatching { services.get<HistoryRepository>().prime() }
+                    .onFailure { Log.w(TAG, "历史库预热失败（UI 首次收集时会再试）", it) }
+            }
+            // 启动任务给一个**有界预算**：扫得快就带着内容进首页（常见于热启动/小库），
+            // 扫得慢就先让 UI 走、内容随后补齐。超时**不取消**任务——它本来就不在
+            // 页面可用的关键路径上，取消等于把媒体列表丢掉。
+            //
+            // **异常必须在这里就地隔离**：任务跑在 `scope.async` 里，异常会随 `await()`
+            // 重抛；若不接住，一次插件侧失败就会冒到本方法的 catch 里把整个引导打成
+            // `BootState.Failed`——那正是 E59 明令禁止的"单插件故障连累全应用"。
+            // `CancellationException` 原样重抛：它承载超时与停机两种控制流，吞掉会让
+            // `withTimeoutOrNull` 失效。
+            if (startupTasks.isNotEmpty()) {
+                val finished = withTimeoutOrNull(STARTUP_SCAN_BUDGET_MS) {
+                    startupTasks.forEach { (pluginId, task) ->
+                        try {
+                            task.await()
+                        } catch (cancellation: CancellationException) {
+                            throw cancellation
+                        } catch (cause: Throwable) {
+                            Log.w(TAG, "插件 $pluginId 启动任务异常，已隔离，其余插件不受影响", cause)
+                            events.publish(KernelEvent.PluginStartFailed(pluginId, cause))
+                        }
+                    }
+                    true
+                }
+                if (finished == null) {
+                    Log.i(TAG, "启动任务未在 ${STARTUP_SCAN_BUDGET_MS}ms 内完成，先放行 UI，后台继续")
+                }
+            }
             _bootState.value = BootState.Running
             Log.i(TAG, "内核引导完成，共 ${sorted.size} 个插件: ${sorted.map { it.id }}")
         } catch (t: Throwable) {
@@ -155,6 +199,8 @@ class Kernel private constructor(
 
     /** 停机：逆序 onStop 释放资源（设计文档 §15.5） */
     suspend fun shutdown() {
+        backgroundStartupJobs.forEach(Job::cancel)
+        backgroundStartupJobs.clear()
         installMutex.withLock {
             installed.reversed().forEach { plugin ->
                 runCatching { plugin.onStop() }
@@ -199,6 +245,7 @@ class Kernel private constructor(
 
     companion object {
         private const val TAG = "NonePlayerKernel"
+        private const val STARTUP_SCAN_BUDGET_MS = 1_200L
 
         /**
          * 装配内核。[context] 当前仅保留引用（WorkManager、权限触发在后续阶段接入），

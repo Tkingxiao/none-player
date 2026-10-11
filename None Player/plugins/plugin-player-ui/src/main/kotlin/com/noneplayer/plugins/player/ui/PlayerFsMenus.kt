@@ -1,6 +1,13 @@
 package com.noneplayer.plugins.player.ui
 
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpRadius
@@ -118,10 +125,24 @@ class FsMenuAnchor(
 fun FsDropdown(
     anchor: FsMenuAnchor,
     onDismiss: () -> Unit,
+    /**
+     * 内部子页 key（审查批次 C1）。
+     *
+     * 传入后，MAIN → 倍速/字幕/音轨…这类 drill-in 切换会走一段轻量过场，
+     * 而不是 `when(page)` 直接换内容。此前面板整体有入场/退场动画，
+     * 唯独页与页之间是硬切，用户点"倍速"时内容瞬间跳变。
+     *
+     * 方向按**子页深度**推断：进子页自右来、回主页自左来；
+     * 同级互换（理论上不会出现）退化为纯淡入淡出。
+     * 遵守项目既有管道：位移受 [npDisplacementAllowed] 门控，轻量档/Reduce Motion
+     * 自动退化成短淡入淡出；时长走 `Field`(150) 与容器同一条速度。
+     */
+    pageKey: Any? = null,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
     val density = LocalDensity.current
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+    val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val gap = 10.dp
     val margin = 12.dp
     // 向上展开时的"下沿参照"：默认是触发控件顶；给了 aboveLimitRect（进度条）时以它为准，
@@ -138,7 +159,15 @@ fun FsDropdown(
     } else {
         screenHeight - anchorBottom - gap - margin
     }
-    val maxHeight = minOf(space, screenHeight * 0.72f).coerceAtLeast(180.dp)
+    // 审查批次 D4：**去掉 180dp 下限**。旧写法 `minOf(space, 72%).coerceAtLeast(180.dp)`
+    // 在可用空间不足 180dp 时（矮横窗、分屏、桌面自由窗口把窗口压扁）会把菜单强行
+    // 撑到 180dp——它比剩余空间还高，于是必然溢出窗口或盖住锚点/进度条，
+    // 而定位只 clamp 左上角、改不了自身尺寸。空间不够时**就该矮**，靠内部滚动看内容。
+    // 兜底只留一个"至少还能画出一行"的极小值，避免 0 高度导致内容不可见。
+    val maxHeight = minOf(space, screenHeight * 0.72f).coerceAtLeast(48.dp)
+    // 审查批次 D4：宽度同样按真实窗口收敛。固定 284dp 在窄分屏（<308dp）里
+    // 连左右各 12dp 边距都满足不了，定位 clamp 之后菜单会顶到屏幕边缘。
+    val menuWidth = 284.dp.coerceAtMost((screenWidth - margin * 2).coerceAtLeast(160.dp))
 
     // M21：锚点在原点（顶栏⋯在上沿、底栏钮在下沿），缩放两个轴一起走才像"从按钮长出来"，
     // 只缩 Y 会读成面板被压扁。轻量档/Reduce Motion 把缩放归零 → 纯淡入淡出。
@@ -186,9 +215,15 @@ fun FsDropdown(
         onDismissRequest = requestDismiss,
         properties = PopupProperties(focusable = true),
     ) {
+        // 审查批次 C1：子页过场。只在 [pageKey] 真正变化时播，
+        // 且**不复用容器的入场缩放**——容器那一段是"面板整体从按钮长出来"，
+        // 子页切换是"内容往里推进一层"，两者语义不同，叠在一起会读成面板又开了一次。
+        val shiftAllowed = npDisplacementAllowed()
+        val pageShiftPx = with(density) { 12.dp.roundToPx() }
+        val pageMs = npDuration(Motion.Field)
         Column(
             modifier = Modifier
-                .width(284.dp)
+                .width(menuWidth)
                 .heightIn(max = maxHeight)
                 .graphicsLayer {
                     transformOrigin = TransformOrigin(0.5f, if (anchor.preferAbove) 1f else 0f)
@@ -201,8 +236,41 @@ fun FsDropdown(
                 .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
                 .verticalScroll(rememberScrollState())
                 .padding(vertical = 6.dp),
-            content = { content(requestDismiss) },
-        )
+        ) {
+            // 上一页 key：用于推断"推进还是返回"，从而决定滑入方向
+            var previousKey by remember { mutableStateOf<Any?>(pageKey) }
+            val forward = remember(pageKey) {
+                val prev = previousKey
+                previousKey = pageKey
+                // 主页 → 子页 = 推进；子页 → 主页 = 返回；首次/同 key = 无方向（纯淡）
+                when {
+                    prev == null && pageKey != null -> true
+                    prev != null && pageKey == null -> false
+                    else -> true
+                }
+            }
+            AnimatedContent(
+                targetState = pageKey,
+                transitionSpec = {
+                    val shift = if (shiftAllowed) {
+                        if (forward) pageShiftPx else -pageShiftPx
+                    } else {
+                        0
+                    }
+                    (fadeIn(animationSpec = tween(pageMs, easing = NpEasing.Silk)) +
+                        slideInHorizontally(
+                            animationSpec = tween(pageMs, easing = NpEasing.Silk),
+                        ) { shift }) togetherWith
+                        (fadeOut(animationSpec = tween(pageMs, easing = NpEasing.SilkExit)) +
+                            slideOutHorizontally(
+                                animationSpec = tween(pageMs, easing = NpEasing.SilkExit),
+                            ) { -shift })
+                },
+                label = "fsMenuPage",
+            ) { _ ->
+                Column(content = { content(requestDismiss) })
+            }
+        }
     }
 }
 

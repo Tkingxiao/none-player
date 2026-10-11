@@ -28,6 +28,14 @@ import androidx.compose.ui.unit.dp
  *
  * 判据是"**窗口**形态 + 平台能力"，不是"屏幕尺寸"——折叠屏展开/分屏会让
  * 屏幕宽度与实际窗口宽度脱钩（§13.2 开头）。
+ *
+ * **`FOLDABLE` 的语义边界（E129 / 审查 #5）**：这一档只表示"设备是折叠屏、
+ * 且此刻存在非 FLAT 的折叠特征"，**不携带任何铰链几何**——没有 bounds、
+ * 没有 orientation、没有 occlusion。消费方因此必须按"窗口是一个连续矩形"来布局，
+ * 不得假定内容不会被折痕压住。要升级成真正的几何避让，入口在
+ * `MainActivity.rememberFoldingFeature`：把 `FoldingFeature` 的
+ * bounds/orientation 一并算进本 data class，而不是让页面各自去读
+ * `WindowInfoTracker`（那会破坏 §13.2 的"一处判定、全局消费"）。
  */
 enum class NpFormFactor { PHONE, FOLDABLE, TABLET, DESKTOP }
 

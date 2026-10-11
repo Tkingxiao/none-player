@@ -46,6 +46,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -70,6 +71,7 @@ import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSegmented
+import com.noneplayer.core.ui.NpSkeleton
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.npClickable
 import com.noneplayer.core.ui.npItemFadeSpec
@@ -123,7 +125,14 @@ fun SearchScreen(navigator: Navigator) {
         delay(SEARCH_DEBOUNCE_MS)
         debouncedQuery = query
     }
-    val effectiveQuery = debouncedQuery.trim()
+    // 审查批次 A1：仅由点构成（`.`、`..`）不算一次搜索——旧实现会命中整个媒体库
+    // （扩展名分支 `contains("")` 恒真 + 标题域 `.` 命中所有带扩展名的文件）。
+    // 判据与结果计算共用 `PinyinSearch.isSearchable`，两处不会再各说各话。
+    val effectiveQuery = debouncedQuery.trim().takeIf { PinyinSearch.isSearchable(it) }.orEmpty()
+    // 审查批次 A2：输入已改、结果尚未跟上（防抖窗内）时，旧结果**不可提交**——
+    // 否则点击结果会把当前输入框里的新词记进搜索历史，打开的却是旧词的条目。
+    // 结果区因此显示"计算中"占位，而不是留一批词与结果不匹配的条目让用户点。
+    val resultsStale = query.trim() != debouncedQuery.trim()
     val history by settings.searchHistory.collectAsStateWithLifecycle(initialValue = emptyList())
     val sortMode by settings.sortMode.collectAsStateWithLifecycle(SortMode.ADDED)
     val sortAscending by settings.sortAscending.collectAsStateWithLifecycle(false)
@@ -139,18 +148,10 @@ fun SearchScreen(navigator: Navigator) {
         if (q.isEmpty()) {
             emptyList()
         } else {
-            // §3.7 匹配域：标题 / 文件夹 / 扩展名。标题按 **cardTitle**（E42 富化后的
-            // 展示名——用户看到的"我的视频"必须能搜到；原名同时保留匹配，搜"[字幕组]"也行）。
-            // 批次 8：纯 ASCII 查询词追加拼音域（"ai" 命中「爱…」、"aq" 命中首字母），
-            // 与 LocalSearchProvider 共用 PinyinSearch 一份口径
-            val matched = items.filter { item ->
-                item.title.contains(q, ignoreCase = true) ||
-                    item.cardTitle.contains(q, ignoreCase = true) ||
-                    (item.folder?.contains(q, ignoreCase = true) == true) ||
-                    item.title.substringAfterLast('.', "")
-                        .contains(q.removePrefix("."), ignoreCase = true) ||
-                    PinyinSearch.matches(item, q)
-            }
+            // §3.7 匹配域：标题 / 短标题 / 文件夹 / 扩展名 / 拼音。
+            // 走 `PinyinSearch.matchesAll` 唯一入口——扩展名分支曾在两处各写一遍，
+            // 且 `contains("")` 让搜索单个 "." 命中全库（审查批次 A1）。
+            val matched = items.filter { item -> PinyinSearch.matchesAll(item, q) }
             val comparator: Comparator<MediaItem> = when (sortMode) {
                 // E42：自然序（与媒体库/队列同一口径）
                 SortMode.NAME -> MediaNaturalOrder
@@ -162,9 +163,16 @@ fun SearchScreen(navigator: Navigator) {
         }
     }
 
-    fun commitSearch() {
-        val q = query.trim()
-        if (q.isNotEmpty()) scope.launch { settings.addSearchTerm(q) }
+    /**
+     * 把一次搜索词记进「最近搜索」。
+     *
+     * 审查批次 A2：**必须传入这次动作真正对应的词**，不能读 [query] 当前值。
+     * 防抖窗内输入框已经是新词、而结果还属于旧词，此时若读 [query]，
+     * 会把新词记进历史、打开的却是旧词的结果条目——历史与内容对不上。
+     */
+    fun commitSearch(term: String = query) {
+        val q = term.trim()
+        if (PinyinSearch.isSearchable(q)) scope.launch { settings.addSearchTerm(q) }
     }
 
     NpPageScaffold(
@@ -199,13 +207,17 @@ fun SearchScreen(navigator: Navigator) {
                         gutter = gutter,
                         onPick = { term ->
                             query = term
-                            commitSearch()
+                            commitSearch(term)
                         },
                     )
                 } else {
                     SearchResults(
-                        results = results,
+                        // 审查批次 A2：防抖窗内结果属于旧词，此时不能让它们可被打开
+                        // ——点了会把新词记进历史却打开旧条目。传空列表 + 占位提示，
+                        // 而不是留一批"词与内容不匹配"的条目在屏上。
+                        results = if (resultsStale) emptyList() else results,
                         query = effectiveQuery,
+                        stale = resultsStale,
                         gutter = gutter,
                         compact = compact,
                         gridColumns = gridColumns,
@@ -217,8 +229,9 @@ fun SearchScreen(navigator: Navigator) {
                         onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
                         onOpen = { item ->
                             // 打开结果也是一次"有效搜索"：只靠 IME 的搜索键记历史，
-                            // 硬件键盘/手势输入的用户永远攒不出最近搜索
-                            commitSearch()
+                            // 硬件键盘/手势输入的用户永远攒不出最近搜索。
+                            // 记的是**这批结果所属的词** [effectiveQuery]，不是输入框当前值。
+                            commitSearch(effectiveQuery)
                             openPlayer(navigator, item)
                         },
                     )
@@ -347,6 +360,8 @@ private fun RecentSearches(
 private fun SearchResults(
     results: List<MediaItem>,
     query: String,
+    /** 结果尚未跟上输入框（防抖窗内）——显示"搜索中"而不是"未找到" */
+    stale: Boolean = false,
     gutter: Dp,
     compact: Boolean,
     gridColumns: Int,
@@ -382,10 +397,11 @@ private fun SearchResults(
                     sortAscending = sortAscending,
                     onSort = onSort,
                     onToggleAscending = onToggleAscending,
+                    compact = compact,
                 )
             }
             if (results.isEmpty()) {
-                item(key = "empty") { SearchEmpty(query = query) }
+                item(key = "empty") { SearchPlaceholder(query = query, stale = stale) }
             }
             itemsIndexed(results, key = { _, item -> "${item.sourceId}:${item.id}" }) { index, item ->
                 MediaListRow(
@@ -420,10 +436,13 @@ private fun SearchResults(
                 sortAscending = sortAscending,
                 onSort = onSort,
                 onToggleAscending = onToggleAscending,
+                compact = compact,
             )
         }
         if (results.isEmpty()) {
-            item(key = "empty", span = { GridItemSpan(maxLineSpan) }) { SearchEmpty(query = query) }
+            item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+                SearchPlaceholder(query = query, stale = stale)
+            }
         }
         gridItemsIndexed(results, key = { _, item -> "${item.sourceId}:${item.id}" }) { index, item ->
             MediaCardBody(
@@ -437,7 +456,15 @@ private fun SearchResults(
     }
 }
 
-/** `sec-head`：标题 + 计数（右端 mono）+ 排序 + 视图切换。 */
+/**
+ * `sec-head`：标题 + 计数（右端 mono）+ 排序 + 视图切换。
+ *
+ * 审查批次 D6：**窄窗不再把五组控件硬塞一行**。旧实现在紧凑档里标题只靠
+ * `weight(1f)` 吃剩余宽度，排序/升降序/视图/计数四组都是固定宽，360dp 甚至
+ * 分屏窄窗下标题会被压到几乎不可读、各控件热区也贴在一起。
+ * 现在紧凑档：计数并进标题（"搜索结果 · N 项"）、隐藏独立计数、间距收到 8dp，
+ * 把宽度让给标题与操作；宽档保持设计稿原样。
+ */
 @Composable
 private fun SearchHead(
     count: Int,
@@ -447,6 +474,7 @@ private fun SearchHead(
     sortAscending: Boolean,
     onSort: (SortMode) -> Unit,
     onToggleAscending: (Boolean) -> Unit,
+    compact: Boolean = false,
 ) {
     val ink = LocalNpInk.current
     // 设计稿 `.sec-head{gap:12px}`，控件顺序 `sortMenu → viewToggle → 计数`
@@ -455,13 +483,15 @@ private fun SearchHead(
             .fillMaxWidth()
             .padding(top = 14.dp, bottom = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        horizontalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp),
     ) {
         Text(
-            text = "搜索结果",
+            // 紧凑档把计数并进标题：省下一组固定宽，标题也不至于被压没
+            text = if (compact) "搜索结果 · $count 项" else "搜索结果",
             style = NpTypography.headlineSmall,
             color = ink.fg,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
         NpFilterSelect(
@@ -501,13 +531,43 @@ private fun SearchHead(
             itemWidth = 34.dp,
             onSelect = onViewStyle,
         )
-        Text(text = "$count 项", style = NpMono, color = ink.muted, maxLines = 1)
+        // 紧凑档计数已在标题里，避免同屏两个"N 项"
+        if (!compact) {
+            Text(text = "$count 项", style = NpMono, color = ink.muted, maxLines = 1)
+        }
     }
 }
 
-/** 空态：`未找到 "q"` / `试试其他关键词，或检查文件名筛选。`（设计稿 1159）。 */
+/**
+ * 结果区占位：`搜索中…` / `未找到 "q"`（设计稿 1159）。
+ *
+ * 审查批次 A2：**"还在算"不等于"没结果"**。防抖窗内如果把旧结果撤掉却仍显示
+ * "未找到 xxx"，用户会以为这个关键词就是搜不到，而其实只是 120ms 还没到。
+ * 两种语义必须分开：stale → 搜索中（骨架），否则 → 未找到。
+ */
 @Composable
-private fun SearchEmpty(query: String) {
+private fun SearchPlaceholder(query: String, stale: Boolean) {
+    if (stale) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text = "搜索中…",
+                style = NpTypography.bodyMedium,
+                color = LocalNpInk.current.muted,
+            )
+            NpSkeleton(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 16.dp)
+                    .height(96.dp),
+            )
+        }
+        return
+    }
     NpEmptyState(
         title = "未找到 “$query”",
         message = "试试其他关键词，或检查文件名筛选。",

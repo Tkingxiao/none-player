@@ -36,8 +36,6 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.addPathNodes
-import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -54,12 +52,15 @@ import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.ProbeMemo
 import com.noneplayer.core.data.ThemeMode
 import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.NpAnchorHolder
 import com.noneplayer.core.ui.NpAppTopBar
 import com.noneplayer.core.ui.NpEyebrow
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpSwitch
+import com.noneplayer.core.ui.npAnchor
+import com.noneplayer.core.ui.rememberNpAnchorHolder
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.get
@@ -464,8 +465,15 @@ private fun GestureSettingsGroup(gutter: Dp) {
     EyebrowBlock(text = "手势", gutter = gutter)
     Column(modifier = Modifier.padding(horizontal = gutter)) {
         NpSettingRow(
-            title = "启用音量/亮度手势",
-            subtitle = "左右滑动调节音量与亮度",
+            // 审查批次 D3：文案与实际行为对齐。
+            // 这个开关在播放页接的是 `gesturesEnabled`，它门控的是**整个舞台手势组**
+            // （横滑 seek、竖滑亮度/音量、双击快退快进、长按 3x），不只是音量亮度。
+            // 旧标题写"启用音量/亮度手势"、副标题写"左右滑动调节音量与亮度"，
+            // 两处都不对：轴方向反了（音量/亮度是**竖**滑），范围也小了
+            // ——用户以为只关掉音量亮度，结果双击快进也一起没了。
+            // 语义未改（仍是同一个开关），只把话说准。
+            title = "启用播放手势",
+            subtitle = "横滑快进 · 竖滑亮度/音量 · 双击快退快进 · 长按 3x",
             icon = NpIcon.Sound,
             trailing = {
                 NpSwitch(
@@ -480,7 +488,11 @@ private fun GestureSettingsGroup(gutter: Dp) {
         )
         NpSettingRow(
             title = "双击动作",
-            subtitle = "播放页双击左右两侧：快退 / 快进",
+            subtitle = if (gestures) {
+                "播放页双击左右两侧：快退 / 快进"
+            } else {
+                "双击左右两侧：快退 / 快进（需先开启上方播放手势）"
+            },
             icon = NpIcon.Gear,
             showDivider = false,
             trailing = {
@@ -517,13 +529,13 @@ private fun ValuePickerRow(
     onSelect: (String) -> Unit,
 ) {
     var open by remember { mutableStateOf(false) }
-    var anchor by remember { mutableStateOf(androidx.compose.ui.geometry.Rect.Zero) }
+    // E128：锚点走**非可观察持有者**（core:ui 的 NpAnchorHolder 同款）。
+    // 旧写法 `anchor` 是 mutableStateOf——滚动设置页时这一行每帧移动，布局回调就每帧
+    // 写一次状态、顺带每帧新建一个 Rect（并在弹层开着时每帧重建 PositionProvider），
+    // 而锚点只在"打开弹层"的那一瞬被读一次。持有者的写入不进快照系统，滚动期零重组。
+    val anchor = rememberNpAnchorHolder()
     val ink = LocalNpInk.current
-    Box(
-        modifier = Modifier.onGloballyPositioned {
-            anchor = it.boundsInWindow()
-        },
-    ) {
+    Box(modifier = Modifier.npAnchor(anchor)) {
         NpSettingRow(
             title = title,
             icon = icon,
@@ -545,9 +557,7 @@ private fun ValuePickerRow(
         )
         if (open) {
             androidx.compose.ui.window.Popup(
-                popupPositionProvider = remember(anchor) {
-                    SettingsMenuPositionProvider(anchor)
-                },
+                popupPositionProvider = remember { SettingsMenuPositionProvider(anchor) },
                 onDismissRequest = { open = false },
                 properties = androidx.compose.ui.window.PopupProperties(focusable = true),
             ) {
@@ -566,9 +576,14 @@ private fun ValuePickerRow(
     }
 }
 
-/** 设置行的弹层落点：锚定行下方 8dp，右对齐（与 `.fsel-menu` 同规则）。 */
+/**
+ * 设置行的弹层落点：锚定行下方 8dp，右对齐（与 `.fsel-menu` 同规则）。
+ *
+ * 锚点矩形由 [NpAnchorHolder] 在**弹出那一刻**现取（`calculatePosition` 是弹层布局时
+ * 才被调用的）——持有者因此不需要是状态，滚动期也就没有逐帧写入（E128）。
+ */
 private class SettingsMenuPositionProvider(
-    private val anchor: androidx.compose.ui.geometry.Rect,
+    private val anchor: NpAnchorHolder,
 ) : androidx.compose.ui.window.PopupPositionProvider {
     override fun calculatePosition(
         anchorBounds: androidx.compose.ui.unit.IntRect,
@@ -576,11 +591,12 @@ private class SettingsMenuPositionProvider(
         layoutDirection: androidx.compose.ui.unit.LayoutDirection,
         popupContentSize: androidx.compose.ui.unit.IntSize,
     ): androidx.compose.ui.unit.IntOffset {
-        val x = anchor.right.toInt() - popupContentSize.width
+        val rect = anchor.current()
+        val x = rect.right.toInt() - popupContentSize.width
         val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
         return androidx.compose.ui.unit.IntOffset(
             x.coerceIn(0, maxX),
-            anchor.bottom.toInt() + 8,
+            rect.bottom.toInt() + 8,
         )
     }
 }
