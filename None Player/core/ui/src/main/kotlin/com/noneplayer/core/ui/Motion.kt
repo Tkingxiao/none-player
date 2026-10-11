@@ -34,7 +34,6 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
@@ -179,28 +178,6 @@ internal fun <T> bouncySpring(durationMs: Int): FiniteAnimationSpec<T> =
         dampingRatio = Spring.DampingRatioMediumBouncy,
         stiffness = silkStiffness(durationMs),
     )
-
-/**
- * 越界橡皮筋（§7.4）：把"拖出界外"的那段位移 [overshoot]（取绝对值传入）压成一段
- * 越走越沉、但**永远不到边界另一侧**的跟随量，系数 0.55。
- *
- * 用途是消除"顶到端点就变死区"的手感：硬夹紧时手指继续划的那段距离被整段丢掉，
- * 想往回走必须先把丢掉的距离重新划满——用户读到的是"反向时先卡一下"。
- * 橡皮筋让越界位移仍然可见（有阻尼），抬手由调用方弹回界内，规格红线是
- * **不允许停在界外**。
- *
- * 两个参数同一单位（px 或 dp 都行，只要一致）；[dimension] 是被越过的可拖拽尺寸。
- */
-fun rubberband(overshoot: Float, dimension: Float, factor: Float = RubberBandFactor): Float {
-    if (dimension <= 0f || overshoot == 0f) return 0f
-    val magnitude = abs(overshoot)
-    // 渐近式：越界越多增益越小，总量渐近但不等于 dimension（Android Overscroll 同族公式）
-    val banded = dimension * (1f - 1f / (magnitude * factor / dimension + 1f))
-    return if (overshoot < 0f) -banded else banded
-}
-
-/** §7.4 固定的橡皮筋系数，不在调用点改写。 */
-const val RubberBandFactor = 0.55f
 
 // ================= 三档性能模式（§9.6 / R13） =================
 

@@ -32,39 +32,6 @@ class MotionTokensTest {
         assertTrue(silkStiffness(Motion.Sheet) > silkStiffness(Motion.Tonearm))
     }
 
-    // ---------- 越界橡皮筋（§7.4） ----------
-
-    @Test
-    fun `橡皮筋把越界位移压成阻尼量且永远不到边界另一侧`() {
-        val dimension = 1000f
-        assertEquals(0f, rubberband(0f, dimension), 0f)
-
-        // 有阻尼：越界 100 的呈现量必须小于手指实际划过的 100
-        val near = rubberband(100f, dimension)
-        assertTrue("near=$near 没有被阻尼，等于裸夹紧", near in 0f..100f && near != 100f)
-
-        // 越走越沉但仍在增长（不是"顶死就卡住"的死区）
-        assertTrue(rubberband(100f, dimension) < rubberband(300f, dimension))
-        assertTrue(rubberband(300f, dimension) < rubberband(900f, dimension))
-
-        // 渐近红线：越界量的呈现量永远不越过 dimension ——**不允许停在界外**。
-        // 极大值处 float 精度会让结果正好落在 dimension 上，所以断言取"不超过"。
-        for (overshoot in listOf(1f, 50f, 1000f, 100000f, Float.MAX_VALUE / 2f)) {
-            assertTrue("overshoot=$overshoot 出界：${rubberband(overshoot, dimension)}", rubberband(overshoot, dimension) <= dimension)
-        }
-        assertTrue(rubberband(900f, dimension) < dimension)
-
-        // 方向保号：向上过头仍是负值，抬手弹回 0 的路径不用调用方再判符号
-        assertEquals(-rubberband(240f, dimension), rubberband(-240f, dimension), 1e-4f)
-
-        // 系数照规格 §7.4 固定 0.55
-        assertEquals(RubberBandFactor, 0.55f, 0f)
-
-        // 尺寸非法（首帧还没量到面板高）时不产生 NaN/无穷，只当没越界
-        assertEquals(0f, rubberband(200f, 0f), 0f)
-        assertEquals(0f, rubberband(200f, -1f), 0f)
-    }
-
     // ---------- 性能档位判据（§9.6） ----------
 
     @Test

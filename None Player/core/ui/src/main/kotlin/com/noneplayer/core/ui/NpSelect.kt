@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -165,6 +166,58 @@ private class DropdownPositionProvider(
 }
 
 /**
+ * L3 浮层面板（E129）——弹出菜单/锚定小窗的**共用材质与入场**，一处配方。
+ *
+ * 材质五件套里 L3 的本相（§4 层次模型）：`surface` 实底 + 1dp 发丝描边 +
+ * `npShadow` 投影 + 顶高光。**阴影画在最外一层、白底画在阴影层之内**——
+ * 与 [NpGlass] 同款顺序（`npShadow → clip → background`）。
+ * 反过来写（先 `background` 后 `npShadow`）会让阴影的贴图落进浮层自己的白底之上：
+ * 内缘出现一圈"灰带"、白底看起来像一块**错位的白框**（用户 2026-10-11 实报
+ * 「性能模式中的白色方框位置有问题」，设置页值行菜单与列表筛选菜单同病）。
+ *
+ * 入场（M21）：origin-aware `scale 0.95→1 + fade`，`Field`(150) `Snappy`——
+ * 缩放原点在**靠锚点的那一角**（`alignEnd` 时右上、否则左上），从触发钮"长出来"。
+ */
+@Composable
+fun NpMenuSurface(
+    modifier: Modifier = Modifier,
+    alignEnd: Boolean = false,
+    shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(14.dp),
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val ink = LocalNpInk.current
+    val scaleAllowed = npDisplacementAllowed()
+    val scaleFrom = if (scaleAllowed) 0.95f else 1f
+    var shown by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { shown = true }
+    val entrance by animateFloatAsState(
+        targetValue = if (shown) 1f else scaleFrom,
+        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        label = "menuEntrance",
+    )
+    val layerAlpha by animateFloatAsState(
+        targetValue = if (shown) 1f else 0f,
+        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        label = "menuAlpha",
+    )
+    Column(
+        modifier = modifier
+            .graphicsLayer {
+                transformOrigin = TransformOrigin(if (alignEnd) 1f else 0f, 0f)
+                scaleX = entrance
+                scaleY = entrance
+                this.alpha = layerAlpha
+            }
+            // 阴影在**白底之外**：白底在其后重绘，内缘不会再被阴影贴图染成灰带
+            .npShadow(ink, shape, elevation = 12.dp)
+            .clip(shape)
+            .background(ink.surface)
+            .border(1.dp, ink.border, shape),
+        content = content,
+    )
+}
+
+/**
  * `.fsel-menu`：最小 184dp 宽的弹层。
  *
  * 独立出来是因为设置页的"主题 / 默认倍速 / 字幕语言"也会复用同一个形状——
@@ -183,69 +236,45 @@ fun NpFilterMenu(
     alignEnd: Boolean = false,
 ) {
     val ink = LocalNpInk.current
-    val shape = RoundedCornerShape(14.dp)
-    // M21：origin-aware scale 0.95→1 + fade `Field`（设计稿 `.fsel.open .fsel-menu` 的 .96/.16s 收编到令牌）
-    val scaleAllowed = npDisplacementAllowed()
-    val scaleFrom = if (scaleAllowed) 0.95f else 1f
-    var shown by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { shown = true }
-    val entrance by animateFloatAsState(
-        targetValue = if (shown) 1f else scaleFrom,
-        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
-        label = "fselEntrance",
-    )
-    val layerAlpha by animateFloatAsState(
-        targetValue = if (shown) 1f else 0f,
-        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
-        label = "fselAlpha",
-    )
-    Column(
+    NpMenuSurface(
+        alignEnd = alignEnd,
         modifier = modifier
             // 宽度贴合内容（最宽一项 + 内边距），下限 184dp（设计稿 `.fsel-menu{min-width:184px}`）。
             // 不加 IntrinsicSize.Max 的话，行内的 fillMaxWidth() 在 Popup 的窗口级约束下
             // 会把菜单拉成整屏宽——一个筛选菜单占满屏幕会让人以为进了新页面。
             .width(IntrinsicSize.Max)
-            .widthIn(min = 184.dp, max = 300.dp)
-            .graphicsLayer {
-                transformOrigin = TransformOrigin(if (alignEnd) 1f else 0f, 0f)
-                scaleX = entrance
-                scaleY = entrance
-                this.alpha = layerAlpha
-            }
-            .clip(shape)
-            .background(ink.surface)
-            .npShadow(ink, shape, elevation = 12.dp)
-            .border(1.dp, ink.border, shape)
-            .padding(6.dp),
+            .widthIn(min = 184.dp, max = 300.dp),
     ) {
-        options.forEach { option ->
-            val on = option == selected
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .npClickable { onSelect(option) }
-                    .clip(RoundedCornerShape(10.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Text(
-                    text = option,
-                    style = NpTypography.bodyMedium.copy(
-                        fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
-                    ),
-                    color = if (on) ink.accent else ink.fg,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                // 勾位常驻并用透明占位，而不是 if(on)：否则选中瞬间文字会被挤动一下
-                Icon(
-                    imageVector = NpIcon.Check,
-                    contentDescription = null,
-                    tint = if (on) ink.accent else Color.Transparent,
-                    modifier = Modifier.size(16.dp),
-                )
+        Column(modifier = Modifier.padding(6.dp)) {
+            options.forEach { option ->
+                val on = option == selected
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .npClickable { onSelect(option) }
+                        .clip(RoundedCornerShape(10.dp))
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = option,
+                        style = NpTypography.bodyMedium.copy(
+                            fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal,
+                        ),
+                        color = if (on) ink.accent else ink.fg,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    // 勾位常驻并用透明占位，而不是 if(on)：否则选中瞬间文字会被挤动一下
+                    Icon(
+                        imageVector = NpIcon.Check,
+                        contentDescription = null,
+                        tint = if (on) ink.accent else Color.Transparent,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
             }
         }
     }
@@ -290,6 +319,10 @@ fun NpSegmented(
                             Modifier.weight(1f)
                         },
                     )
+                    // 设计稿 `.seg button.on`：surface 底 + `0 1px 3px 黑14%` 微投影。
+                    // E129：阴影画在**白底之外**（同 NpGlass 的顺序），否则投影会落在
+                    // 选中块自己的白底上、边缘发灰。
+                    .then(if (on) Modifier.npShadow(ink, RoundedCornerShape(9.dp), elevation = 3.dp) else Modifier)
                     .clip(RoundedCornerShape(9.dp))
                     .background(if (on) ink.surface else Color.Transparent)
                     .border(
@@ -297,8 +330,6 @@ fun NpSegmented(
                         color = if (on) ink.border else Color.Transparent,
                         shape = RoundedCornerShape(9.dp),
                     )
-                    // 设计稿 `.seg button.on`：surface 底 + `0 1px 3px 黑14%` 微投影
-                    .then(if (on) Modifier.npShadow(ink, RoundedCornerShape(9.dp), elevation = 3.dp) else Modifier)
                     // M4（§7.5 `Tick`）：点已选中项没有状态变化，不该响。
                     .npClickable {
                         if (!on) {

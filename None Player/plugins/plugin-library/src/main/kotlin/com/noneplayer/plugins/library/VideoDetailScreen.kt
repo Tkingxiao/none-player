@@ -80,8 +80,8 @@ import androidx.compose.runtime.setValue
  * 因此它是 LibraryScreen 的页内状态（[detailItem]），配合 rememberSaveable
  * 跨「进播放页 → 返回」的往返保留；返回键/顶栏返回 = 退出详情。
  *
- * 版式（用户明确要求）：宽屏（≥720dp）双栏——**视频小窗居左，剧集列表（同文件夹）
- * 常驻右侧**；视频详情（标题/元信息/文件信息）收进播放窗右下角的「详情」按钮，
+ * 版式（E134 用户定稿）：宽屏（≥720dp）双栏——**剧集列表常驻左侧、视频小窗居右**；
+ * 视频详情（标题/元信息/文件信息）收进播放窗右下角的「详情」按钮，
  * 点按弹出**浮窗层小窗口**显示，点遮罩 / 关闭键 / 返回键退出。
  * 窄窗（<720dp）单栏：视频、详情、剧集列表自上而下常显。
  *
@@ -145,7 +145,8 @@ internal fun VideoDetailScreen(
             bottom = bottomInset + 28.dp,
         )
         if (twoPane) {
-            // 视频详情弹成**浮窗层小窗口**；剧集列表（同文件夹）默认常驻右侧。
+            // E134（用户明确要求）：**剧集列表居左、视频小窗居右**（此前相反）。
+            // 视频详情弹成浮窗层小窗口，由播放窗右下角的「详情」按钮打开。
             // rememberSaveable 让弹窗状态跨播放往返保留——进播放页回来不丢。
             var showDetail by rememberSaveable { mutableStateOf(false) }
             Row(
@@ -154,6 +155,15 @@ internal fun VideoDetailScreen(
                     .padding(pad),
                 horizontalArrangement = Arrangement.spacedBy(28.dp),
             ) {
+                // 剧集列表自己就是滚动容器（LazyColumn）——同文件夹动辄几百集，
+                // 整表 `forEach` 会在打开详情的那一帧把全部行组合并测量一遍。
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxSize(),
+                ) {
+                    siblingRows(item = item, siblings = siblings, onSelect = onSelect)
+                }
                 Column(
                     modifier = Modifier
                         .weight(1.05f)
@@ -173,15 +183,6 @@ internal fun VideoDetailScreen(
                         onFullscreen = { onFullscreen(item) },
                         onOpenInfo = { showDetail = true },
                     )
-                }
-                // 右栏自己就是滚动容器（LazyColumn）——同文件夹动辄几百集，
-                // 整表 `forEach` 会在打开详情的那一帧把全部行组合并测量一遍。
-                LazyColumn(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxSize(),
-                ) {
-                    siblingRows(item = item, siblings = siblings, onSelect = onSelect)
                 }
             }
             if (showDetail) {
@@ -393,7 +394,7 @@ private fun DetailMeta(
 }
 
 /**
- * 剧集列表（同文件夹）——宽屏常驻右栏，窄窗跟随详情。
+ * 剧集列表——宽屏常驻**左栏**（E134 起），窄窗跟随详情。
  *
  * 写成 [LazyListScope] 扩展而不是普通的 `@Composable Column`：两处调用点各自
  * 已经是滚动容器，行必须交给它们**按需组合**。此前是 `Column { siblings.forEach }`，
@@ -410,7 +411,8 @@ private fun LazyListScope.siblingRows(
     item(key = "siblings-head") {
         Column {
             Spacer(Modifier.height(topSpacing))
-            NpSectionHead(title = "同文件夹（${siblings.size}）")
+            // E134：用户指定叫「剧集」（"同文件夹"是内部口径，不是给用户看的词）
+            NpSectionHead(title = "剧集（${siblings.size}）")
             Spacer(Modifier.height(6.dp))
         }
     }
@@ -482,10 +484,11 @@ private fun DetailPopup(
         Column(
             modifier = Modifier
                 .widthIn(max = 420.dp)
+                // E129：阴影在**白底之外**（同 NpGlass / NpMenuSurface 的顺序）
+                .npShadow(ink, shape, elevation = 18.dp)
                 .clip(shape)
                 .background(ink.surface)
                 .border(1.dp, ink.border, shape)
-                .npShadow(ink, shape, elevation = 18.dp)
                 .verticalScroll(rememberScrollState())
                 .padding(18.dp),
         ) {

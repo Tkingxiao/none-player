@@ -117,7 +117,8 @@ import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSectionHead
 import com.noneplayer.core.ui.NpSettingRow
-import com.noneplayer.core.ui.NpSpace
+import com.noneplayer.core.ui.NpAnchorHolder
+import com.noneplayer.core.ui.NpMenuSurface
 import com.noneplayer.core.ui.NpSegmented
 import com.noneplayer.core.ui.NpSheet
 import com.noneplayer.core.ui.NpSkeleton
@@ -480,10 +481,19 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
             subtitle = meta.second
         }
         viewMode == LibraryView.FOLDERS && selectedFolder != null -> {
-            // 设计稿 titles.folder：标题「文件夹」+ 副题「浏览目录内容」；
-            // 文件夹名与计数在内容区 listhead / hero 里（双层结构，别在这里重复）
-            title = "文件夹"
-            subtitle = "浏览目录内容"
+            // E134（用户实报"两个返回键"+"统计框占位过大"）：文件夹名与计数**都收进顶栏**，
+            // 内容区的 listhead（「‹ 文件夹 层名 N 项」）与 hero（大统计卡）同轮删除——
+            // 单层结构：返回箭头 + 层名（含相对路径）+ 一行计数。
+            val node = currentFolder
+            title = node?.name ?: "文件夹"
+            subtitle = node?.let {
+                // 一层目录的 path 与 name 相同，别念两遍
+                if (it.path == it.name) {
+                    "${it.totalCount} 个媒体文件"
+                } else {
+                    "${it.totalCount} 个媒体文件 · ${it.path}"
+                }
+            } ?: "浏览目录内容"
         }
         viewMode == LibraryView.FOLDERS -> {
             title = "文件夹"
@@ -698,7 +708,6 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                 onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
                                 onOpen = openDetailOrPlayer,
                                 onOpenEpisodes = { episodeSheet = it },
-                                onBack = { aggregate = null },
                             )
 
                         LibraryStage.Folder -> FolderBrowser(
@@ -717,9 +726,6 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                 onSort = { scope.launch { settings.setSortMode(it) } },
                                 onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
                                 onOpenFolder = { selectedFolder = it.path },
-                                onOpenParent = {
-                                    selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
-                                },
                                 onOpenVideo = openDetailOrPlayer,
                                 onOpenEpisodes = { episodeSheet = it },
                             )
@@ -1476,7 +1482,6 @@ private fun FolderBrowser(
     onSort: (SortMode) -> Unit,
     onToggleAscending: (Boolean) -> Unit,
     onOpenFolder: (FolderNode) -> Unit,
-    onOpenParent: () -> Unit,
     onOpenVideo: (MediaItem) -> Unit,
     onOpenEpisodes: (List<MediaItem>) -> Unit,
 ) {
@@ -1507,20 +1512,8 @@ private fun FolderBrowser(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
-        if (node.path.isNotEmpty()) {
-            item(key = "listhead", span = { GridItemSpan(maxLineSpan) }) {
-                // 设计稿的双层结构：顶栏「文件夹 / 浏览目录内容」，
-                // listhead「‹ 文件夹  层名 …… N 项」
-                FolderListHead(
-                    name = node.name,
-                    count = node.totalCount,
-                    onBack = onOpenParent,
-                )
-            }
-            item(key = "head", span = { GridItemSpan(maxLineSpan) }) {
-                FolderHead(node = node)
-            }
-        }
+        // E134：内容区不再有 listhead / hero 两层头部——层名、路径与计数都在顶栏
+        // （用户实报"两个返回键"与"统计框占位过大"，见标题块与 FolderHead 的删除注记）。
         if (noSubfolders) {
             item(key = "hint", span = { GridItemSpan(maxLineSpan) }) {
                 Text(
@@ -1546,6 +1539,17 @@ private fun FolderBrowser(
                 onSort = onSort,
                 onToggleAscending = onToggleAscending,
             )
+        }
+        // E134（用户实报"选集按钮位置不好"）：本层含多集条目（同目录 > 1 条）时，
+        // 选集入口放在**控件行之下、内容之上**——原来在列表尾部，一屏几十条要滚到底才看得见。
+        val episodes = node.directVideos
+        if (episodes.size > 1 && shownVideos.isNotEmpty()) {
+            item(key = "episodes-entry", span = { GridItemSpan(maxLineSpan) }) {
+                EpisodesEntry(
+                    multiCount = shownVideos.size,
+                    onOpen = { onOpenEpisodes(episodes) },
+                )
+            }
         }
         // §20.3 余量①：子文件夹也接首屏错峰（此前只有本级视频接了）
         //
@@ -1608,16 +1612,6 @@ private fun FolderBrowser(
                 )
             }
         }
-        // 设计稿 listFoot：本层含多集条目（同目录 > 1 条）时给出「选集」入口
-        val episodes = node.directVideos
-        if (episodes.size > 1 && shownVideos.isNotEmpty()) {
-            item(key = "listfoot", span = { GridItemSpan(maxLineSpan) }) {
-                ListFoot(
-                    multiCount = shownVideos.size,
-                    onOpen = { onOpenEpisodes(episodes) },
-                )
-            }
-        }
         // 设计稿 foldersView 第二段「存储位置」：只在根层显示（进到子目录后它与本层无关）。
         // 设计稿是假数据（"剩余 42.6 GB / 128 GB"），这里用 StatFs 取**真实**容量；
         // 取不到就不显示——不编造数字。
@@ -1630,62 +1624,55 @@ private fun FolderBrowser(
 }
 
 /**
- * 列表尾部「选集」入口（设计稿 `.list-foot`）：分隔发丝线 + accent 胶囊 + 多集提示。
+ * 「选集」入口（E134：从列表尾部移到控件行之下，并按"位置变了、体量变小"重做细行）。
  *
  * 只在**当前列表里确实有多集条目**时出现（[multiCount] 由调用方按"同文件夹条目数 > 1"
- * 计算）。按钮把整条剧集列表交给页面根层的 sheet（选中即起播）——
+ * 计算）。旧版是设计稿 `.list-foot` 的"尾部分隔线 + 大胶囊"——真机实报"位置不好：
+ * 一屏几十条时要滚到底才看得见"。移到顶部后与筛选/排序同区一眼可达，胶囊同步收成
+ * 34dp 芯片高。点击把整条剧集列表交给页面根层的 sheet（选中即起播）——
  * 这里不自己开 NpSheet：整屏浮层在 Lazy 项里会被裁剪。
  */
 @Composable
-private fun ListFoot(
+private fun EpisodesEntry(
     multiCount: Int,
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
-    Column(modifier = modifier.fillMaxWidth()) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 18.dp)
-                .height(1.dp)
-                .background(ink.border),
-        )
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Row(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(top = 16.dp),
+                .height(NpDimens.chipHeight)
+                .clip(RoundedCornerShape(NpRadius.chip))
+                .background(ink.accent)
+                .npPressScale(onClick = onOpen, pressedScale = 0.97f)
+                .padding(horizontal = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
         ) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(ink.accent)
-                    .npPressScale(onClick = onOpen, pressedScale = 0.97f)
-                    .padding(horizontal = 18.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Icon(
-                    imageVector = NpIcon.List,
-                    contentDescription = null,
-                    tint = ink.bg,
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(
-                    text = "选集",
-                    style = NpTypography.bodyMedium,
-                    color = ink.bg,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Spacer(modifier = Modifier.weight(1f))
+            Icon(
+                imageVector = NpIcon.List,
+                contentDescription = null,
+                tint = ink.bg,
+                modifier = Modifier.size(16.dp),
+            )
             Text(
-                text = "$multiCount 个条目包含多集",
-                style = NpTypography.bodySmall,
-                color = ink.muted,
+                text = "选集",
+                style = NpTypography.labelLarge,
+                color = ink.bg,
             )
         }
+        Spacer(modifier = Modifier.weight(1f))
+        Text(
+            text = "$multiCount 个条目包含多集",
+            style = NpTypography.bodySmall,
+            color = ink.muted,
+        )
     }
 }
 
@@ -1726,18 +1713,16 @@ private fun StorageSection(modifier: Modifier = Modifier) {
 }
 
 /**
- * `.listhead`：内容区顶部的返回行 —— 「‹ 文件夹」chip + 22sp 标题 + 右端 mono 计数。
+ * 聚合列表的内容区头：标题 + 右端 mono 计数。
  *
- * 设计稿的文件夹详情是**双层结构**：顶栏说"你在文件夹页"（标题「文件夹」+
- * 副题「浏览目录内容」），listhead 说"你在哪一层"（层名 + N 项）。
- * 此前两层信息被压成一层，顶栏副标题与 hero 副文案还完全重复。
+ * E134（同"两个返回键"的收口）：返回不再在这里出现——顶栏（覆盖式，任何档位常驻）
+ * 已经有返回箭头，内容区再放一枚就是同一动作两个入口；文件夹页的 listhead 连同返回
+ * 一并删除后，本组件只剩"标题 + N 项"这一种形态，参数随之收窄。
  */
 @Composable
-private fun FolderListHead(
+private fun AggregateHead(
     name: String,
     count: Int,
-    onBack: (() -> Unit)?,
-    backLabel: String = "文件夹",
 ) {
     val ink = LocalNpInk.current
     Row(
@@ -1747,33 +1732,6 @@ private fun FolderListHead(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        if (onBack != null) {
-            Row(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(10.dp))
-                    .npClickable(onClick = onBack)
-                    .padding(start = 4.dp, end = 10.dp, top = 6.dp, bottom = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Icon(
-                    imageVector = NpIcon.ChevronRight,
-                    contentDescription = "返回",
-                    tint = ink.muted,
-                    // 设计稿 `.listhead .back .xs{transform:rotate(180deg)}`：
-                    // 同一个 chevron 转 180° 就是返回箭头
-                    modifier = Modifier
-                        .size(14.dp)
-                        .graphicsLayer { rotationZ = 180f },
-                )
-                Text(
-                    text = backLabel,
-                    style = NpTypography.bodyMedium,
-                    color = ink.muted,
-                    maxLines = 1,
-                )
-            }
-        }
         Text(
             text = name,
             style = NpTypography.headlineMedium.copy(
@@ -1795,63 +1753,13 @@ private fun FolderListHead(
     }
 }
 
-/** `.folder-head`：色相渐变底 + 54dp 圆角图标 + 名称 + 统计（+ 1px 描边）。 */
-@Composable
-private fun FolderHead(node: FolderNode) {
-    val ink = LocalNpInk.current
-    val hue = NpMediaColor.folderHue(node.name)
-    val facc = NpMediaColor.accent(hue)
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(top = 12.dp)
-            .background(
-                brush = Brush.linearGradient(
-                    listOf(facc.copy(alpha = 0.16f), ink.surface),
-                ),
-                shape = RoundedCornerShape(NpRadius.hero),
-            )
-            // 设计稿 `.folder-head{border:1px solid var(--border)}`
-            .border(1.dp, ink.border, RoundedCornerShape(NpRadius.hero))
-            .padding(16.dp),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(14.dp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(54.dp)
-                    .background(
-                        color = facc.copy(alpha = 0.18f),
-                        shape = RoundedCornerShape(NpRadius.card),
-                    ),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = NpIcon.Folder,
-                    contentDescription = null,
-                    tint = facc,
-                    modifier = Modifier.size(26.dp),
-                )
-            }
-            Column {
-                Text(
-                    text = node.name,
-                    style = NpTypography.headlineSmall,
-                    color = ink.fg,
-                    maxLines = 1,
-                )
-                Text(
-                    text = "${node.totalCount} 个媒体文件 · 点击条目开始播放",
-                    style = NpTypography.bodySmall,
-                    color = ink.muted,
-                    modifier = Modifier.padding(top = 3.dp),
-                )
-            }
-        }
-    }
-}
+/**
+ * E134：`.folder-head` 大统计卡**已删除**（用户实报"统计框在手机和电脑上占用位置过大"）。
+ *
+ * 它承载的三样信息全部有更好的归属：层名与相对路径 → 顶栏标题/副题；计数 → 顶栏副题；
+ * "点击条目开始播放" → 可发现性由卡片自身的点击态承担。同轮删除的还有 listhead
+ * （用户实报"两个返回键"）——内容区头部就此清零，文件夹页从控件行直接进入内容。
+ */
 
 /**
  * 自适应网格每格最小宽度：把用户的「列数」偏好重新诠释为**密度档**——
@@ -1902,7 +1810,8 @@ internal fun filterList(
  * 原先它是 `NpFilterSelect`（点开→列表→选），改档要两次点击，而且选中态藏在
  * 触发钮的文字里，不看那两个字就不知道现在按什么排。
  *
- * 视图模式（网格/列表）与列数收进面板：列数只在紧凑档出现——`Medium/Expanded`
+ * 视图模式（网格/列表）与列数收进**锚定菜单**（E129：从右侧视图钮下方长出的小窗，
+ * 不再是向上弹的底部 Sheet）：列数只在紧凑档出现——`Medium/Expanded`
  * 下列数由窗口宽度自适应，给用户一个"双列/三列"开关是欺骗（§5.7）。
  *
  * 升降序用**文字**而不是图标：设计稿的 `I.sortIco` 是"上下双箭头"，正序倒序画的是
@@ -1925,7 +1834,9 @@ private fun ControlsRow(
     onToggleAscending: (Boolean) -> Unit,
 ) {
     val ink = LocalNpInk.current
-    var viewSheetVisible by rememberSaveable { mutableStateOf(false) }
+    var viewMenuVisible by rememberSaveable { mutableStateOf(false) }
+    // E129：视图菜单的锚点——非可观察持有者，滚动期零写入（见 NpAnchorHolder 的约定）
+    val viewAnchor = rememberNpAnchorHolder()
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1965,12 +1876,16 @@ private fun ControlsRow(
                     maxLines = 1,
                 )
             }
-            NpIconButton(
-                icon = if (viewStyle == "list") NpIcon.ListView else NpIcon.GridView,
-                contentDescription = "视图模式",
-                onClick = { viewSheetVisible = true },
-                selected = viewSheetVisible,
-            )
+            Box(modifier = Modifier.npAnchor(viewAnchor)) {
+                NpIconButton(
+                    icon = if (viewStyle == "list") NpIcon.ListView else NpIcon.GridView,
+                    contentDescription = "视图模式",
+                    // E129：「视图」是**锚定弹层**——从这颗钮的下方长出（右对齐 + 从右上角
+                    // 原点 scale 0.95→1），不再用向上弹的底部 Sheet：触发器在哪、选项就长在哪。
+                    onClick = { viewMenuVisible = true },
+                    selected = viewMenuVisible,
+                )
+            }
         }
         // 排序 chips（§5.7）：窄屏放不下四枚就横滑，不缩字号、不改标签
         Row(
@@ -1989,32 +1904,56 @@ private fun ControlsRow(
             }
         }
     }
-    if (viewSheetVisible) {
-        NpSheet(onDismiss = { viewSheetVisible = false }, title = "视图") {
-            Text(
-                text = "视图模式",
-                style = NpMonoSmall,
-                color = ink.muted,
+    if (viewMenuVisible) {
+        androidx.compose.ui.window.Popup(
+            popupPositionProvider = remember { ViewMenuPositionProvider(viewAnchor) },
+            onDismissRequest = { viewMenuVisible = false },
+            properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+        ) {
+            ViewMenu(
+                viewStyle = viewStyle,
+                onViewStyle = onViewStyle,
+                gridColumns = gridColumns,
+                onGridColumns = onGridColumns,
+                compact = compact,
             )
+        }
+    }
+}
+
+/**
+ * 「视图」锚定菜单（E129，取代原来的底部 Sheet）：视图模式 segmented + 紧凑档的列数 chips。
+ *
+ * 材质与入场复用 [NpMenuSurface]（L3：白底画在阴影层内、从右上角长出的 scale 0.95→1 + fade），
+ * 与筛选菜单 / 设置值行菜单同一套语言——三类"选项"长得像同一件东西，用户才认得出。
+ */
+@Composable
+private fun ViewMenu(
+    viewStyle: String,
+    onViewStyle: (String) -> Unit,
+    gridColumns: Int,
+    onGridColumns: (Int) -> Unit,
+    compact: Boolean,
+) {
+    val ink = LocalNpInk.current
+    NpMenuSurface(
+        alignEnd = true,
+        modifier = Modifier.width(236.dp),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(text = "视图", style = NpTypography.titleSmall, color = ink.fg)
             NpSegmented(
                 options = listOf("网格", "列表"),
                 selected = if (viewStyle == "list") "列表" else "网格",
                 onSelect = { onViewStyle(if (it == "列表") "list" else "grid") },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
+                modifier = Modifier.fillMaxWidth(),
             )
             if (compact) {
-                Text(
-                    text = "列数",
-                    style = NpMonoSmall,
-                    color = ink.muted,
-                    modifier = Modifier.padding(top = NpSpace.md),
-                )
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.padding(top = 8.dp),
-                ) {
+                Text(text = "列数", style = NpMonoSmall, color = ink.muted)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     (1..3).forEach { count ->
                         NpChip(
                             text = "$count 列",
@@ -2025,6 +1964,29 @@ private fun ControlsRow(
                 }
             }
         }
+    }
+}
+
+/**
+ * 「视图」菜单的落点：锚在触发钮下方 8dp、右对齐（同设置值行与 `.fsel-menu` 的规则）。
+ * 锚点矩形在 `calculatePosition` 那一刻从持有者现取——持有者不是状态，滚动期零写入。
+ */
+private class ViewMenuPositionProvider(
+    private val anchor: NpAnchorHolder,
+) : androidx.compose.ui.window.PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: androidx.compose.ui.unit.IntRect,
+        windowSize: androidx.compose.ui.unit.IntSize,
+        layoutDirection: androidx.compose.ui.unit.LayoutDirection,
+        popupContentSize: androidx.compose.ui.unit.IntSize,
+    ): androidx.compose.ui.unit.IntOffset {
+        val rect = anchor.current()
+        val x = rect.right.toInt() - popupContentSize.width
+        val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+        return androidx.compose.ui.unit.IntOffset(
+            x.coerceIn(0, maxX),
+            rect.bottom.toInt() + 8,
+        )
     }
 }
 
@@ -2058,7 +2020,6 @@ private fun AggregateList(
     onToggleAscending: (Boolean) -> Unit,
     onOpen: (MediaItem) -> Unit,
     onOpenEpisodes: (List<MediaItem>) -> Unit,
-    onBack: () -> Unit,
 ) {
     val ink = LocalNpInk.current
     val gutter = if (compact) 14.dp else 20.dp
@@ -2111,13 +2072,11 @@ private fun AggregateList(
     ) {
         item(key = "head", span = { GridItemSpan(maxLineSpan) }) {
             if (isLead) {
-                // 设计稿 aggregateView 的 listhead：`‹ 返回` + 标题 + N 项
-                // （videos / audios 是从首页"查看全部"进来的，返回 = 回首页）
-                FolderListHead(
+                // E134：`‹ 返回` chip 已删（顶栏有返回，内容区不再重复）；
+                // 这里只留「标题 + N 项」。
+                AggregateHead(
                     name = meta.first,
                     count = shown.size,
-                    onBack = onBack,
-                    backLabel = "返回",
                 )
             } else {
                 Row(
@@ -2171,6 +2130,15 @@ private fun AggregateList(
                 )
             }
         }
+        // E134：选集入口从列表尾部移到"lead"之下（与文件夹页同口径：入口在内容之前）
+        if (multi.isNotEmpty()) {
+            item(key = "episodes-entry", span = { GridItemSpan(maxLineSpan) }) {
+                EpisodesEntry(
+                    multiCount = multi.size,
+                    onOpen = { onOpenEpisodes(episodes) },
+                )
+            }
+        }
         if (viewStyle == "list") {
             gridItemsIndexed(
                 shown,
@@ -2198,14 +2166,6 @@ private fun AggregateList(
                     modifier = Modifier
                         .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
                         .npStaggeredEntry(index, staggerWindow),
-                )
-            }
-        }
-        if (multi.isNotEmpty()) {
-            item(key = "listfoot", span = { GridItemSpan(maxLineSpan) }) {
-                ListFoot(
-                    multiCount = multi.size,
-                    onOpen = { onOpenEpisodes(episodes) },
                 )
             }
         }

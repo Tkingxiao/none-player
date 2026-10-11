@@ -134,14 +134,16 @@ fun NpSheet(
     }
 
     /**
-     * 累加一次拖拽增量：界内（含向下关闭方向）1:1 跟手，向上过头走橡皮筋
-     * （越走越沉、渐近但不越过面板高），抬手由 [settle] 弹回 0——**不允许停在界外**。
+     * 累加一次拖拽增量：界内向下 1:1 跟手（关闭方向），**向上钳制为 0**——
+     * 本 Sheet 没有"更高一档"可去，上拉不该产生任何位移。
+     *
+     * E134（真机实报）：此前上拉走橡皮筋（渐近可抬近一整个面板高），读起来是
+     * "面板能无限往上拉、还浮在半空"。钳制后抬手只需处理向下方向的收尾。
      */
     fun applyDrag(delta: Float) {
-        rawDrag += delta
-        val banded = if (rawDrag >= 0f) rawDrag else rubberband(rawDrag, panelHeightPx.coerceAtLeast(1f))
+        rawDrag = (rawDrag + delta).coerceAtLeast(0f)
         scope.launch {
-            dragOffset.snapTo(banded)
+            dragOffset.snapTo(rawDrag)
             trackDetent()
         }
     }
@@ -236,30 +238,42 @@ fun NpSheet(
         onDismissRequest = { close() },
         properties = PopupProperties(focusable = true),
     ) {
-        // E130-D9（真机实测采出）：**补偿弹窗内容视图的屏幕偏移**。
-        //
-        // 真机取证（Pixel 10 Pro / 1280×2856 @480dpi / Android 17）：
-        //   · 弹窗窗口属性 = (0,0)(1281×2856)，窗口本身铺满屏幕；
-        //   · 但窗口内的 ComposeView 被平台按 fitSystemWindows 下移了一个状态栏高度：
-        //     实测 `view.getLocationOnScreen().y = 156`，而它自身高度仍是整窗高 2856，
-        //     于是内容底边落在屏幕 3012 —— **溢出屏幕 156px**；
-        //   · 面板 BottomCenter 对齐 → 底边正好被切掉这 156px。
-        // 实测两个面板都差这 156px：字幕面板四个偏移按钮只剩顶部一条（文字仅 7px 可见、
-        // 点不准也看不清），「播放选项」面板最后两行 bounds 全 0（整行不可见）。
-        //
-        // 为什么不用 `WindowInsets.statusBars`：**弹窗内它是 0**（实测），
-        // 拿它做补偿等于没补（这也是前两版改法"逐字节无变化"的原因）。
-        // 只有视图自身的屏幕 Y 是这段偏移的真值，所以直接量它、再平移面板本体。
-        // 平移走 graphicsLayer，不改布局坐标，因此不会引起测量/滚动位置变化。
+        // E130-D9 修了"面板被状态栏挤下、底边溢出屏幕"；E134 再收一例反方向的偏差
+        // （真机实报「选集框浮空了」）：**面板必须贴在屏幕底**，而弹窗内容视图在不同
+        // 平台/形态下会被窗口 inset 处理成两种偏差——Pixel 10 Pro 竖屏是整个下移一个
+        // 状态栏高（底边溢出），本机横屏是内容高被收掉一条、底边悬空。两者可用同一条
+        // 式子归零：
+        //     adjust = 屏幕高 − 视图屏幕 Y − 容器高
+        // 正 = 视图底还在屏幕内差一段（把面板往下补），负 = 视图底溢出屏幕（往上收）。
+        // 平移仍走 graphicsLayer，不改布局坐标，不干扰测量 / 滚动位置 / 下滑关闭。
+        // 为什么不用 `WindowInsets.statusBars`：弹窗内它恒为 0（D9 已实测），拿不到真值。
         val view = androidx.compose.ui.platform.LocalView.current
-        var viewOffsetPx by remember { mutableIntStateOf(0) }
+        var screenBottomAdjustPx by remember { mutableIntStateOf(0) }
+        var containerHeightPx by remember { mutableIntStateOf(0) }
         BoxWithConstraints(
             modifier = modifier
                 .fillMaxSize()
+                .onSizeChanged { containerHeightPx = it.height }
                 .onGloballyPositioned {
                     val loc = IntArray(2)
                     view.getLocationOnScreen(loc)
-                    if (loc[1] != viewOffsetPx) viewOffsetPx = loc[1]
+                    // 屏幕高必须取**真实窗口**尺寸：`view.resources.displayMetrics` 在弹窗
+                    // 里给的是被系统条收窄后的可用高（实测 1760 vs 物理 1800），拿它做基准
+                    // 等于把"面板贴到系统条上沿"当成达标——那正是用户看到的"浮空"。E134 实测。
+                    val screenH = run {
+                        val wm = view.context.getSystemService(android.content.Context.WINDOW_SERVICE)
+                            as android.view.WindowManager
+                        if (android.os.Build.VERSION.SDK_INT >= 30) {
+                            wm.currentWindowMetrics.bounds.height()
+                        } else {
+                            @Suppress("DEPRECATION")
+                            android.util.DisplayMetrics().also { wm.defaultDisplay.getRealMetrics(it) }.heightPixels
+                        }
+                    }
+                    if (containerHeightPx > 0) {
+                        val adjust = screenH - loc[1] - containerHeightPx
+                        if (adjust != screenBottomAdjustPx) screenBottomAdjustPx = adjust
+                    }
                 },
         ) {
             // 设计稿 .sheet{max-height:82vh}——在 BoxWithConstraints 作用域先固化，
@@ -295,7 +309,7 @@ fun NpSheet(
                     .fillMaxWidth()
                     .graphicsLayer {
                         translationY =
-                            (1f - progress.value) * size.height + dragOffset.value - viewOffsetPx
+                            (1f - progress.value) * size.height + dragOffset.value + screenBottomAdjustPx
                     },
             ) {
                 Column(
@@ -303,10 +317,13 @@ fun NpSheet(
                         .fillMaxWidth()
                         .heightIn(max = sheetMaxHeight)
                         .onSizeChanged { panelHeightPx = it.height.toFloat() }
+                        // E129：阴影在**白底之外**（同 NpGlass / NpMenuSurface 的顺序）。
+                        // 反写（先 background 后 npShadow）会把阴影贴图落进面板自己的
+                        // 白底之上——内缘一圈灰带、白底像一块错位的白框。
+                        .npShadow(ink, shape, elevation = 18.dp)
                         .clip(shape)
                         .background(ink.surface)
                         .border(1.dp, ink.border, shape)
-                        .npShadow(ink, shape, elevation = 18.dp)
                         .npTopHairline(ink)
                         .nestedScroll(contentDragConnection)
                         .then(releaseFallback)

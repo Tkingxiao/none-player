@@ -143,9 +143,11 @@ internal fun MediaContextMenu(
                     scaleY = entrance
                     this.alpha = layerAlpha
                 }
+                // E129：阴影在**白底之外**（阴影层内先画投影、白底后画盖住它）——
+                // 与 NpGlass / NpMenuSurface 同序；反写会留下内缘灰带（错位白框感）。
+                .npShadow(ink, RoundedCornerShape(16.dp), elevation = 14.dp)
                 .clip(RoundedCornerShape(16.dp))
                 .background(ink.surface)
-                .npShadow(ink, RoundedCornerShape(16.dp), elevation = 14.dp)
                 .border(1.dp, ink.border, RoundedCornerShape(16.dp))
                 .padding(8.dp),
         ) {

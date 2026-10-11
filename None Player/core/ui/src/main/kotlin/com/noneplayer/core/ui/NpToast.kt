@@ -89,10 +89,12 @@ fun NpToastHost(
                 maxLines = 2,
                 modifier = Modifier
                     .padding(bottom = 28.dp)
+                    // E129：阴影在**胶囊底之外**（同 NpGlass / NpMenuSurface）——
+                    // 反写会让阴影贴图落进自己的底上，内缘出现灰带/错位白框。
+                    .npShadow(ink, shape, elevation = 12.dp)
                     .clip(shape)
                     .background(ink.surface)
                     .border(1.dp, ink.border, shape)
-                    .npShadow(ink, shape, elevation = 12.dp)
                     .padding(horizontal = 18.dp, vertical = 11.dp),
             )
         }
