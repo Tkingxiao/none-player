@@ -34,9 +34,11 @@ import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.MetadataEnricher
 import com.noneplayer.kernel.api.ProcessLifecycle
+import com.noneplayer.kernel.api.ScanFolderController
 import com.noneplayer.kernel.api.ScanResult
 import com.noneplayer.kernel.api.query
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
@@ -88,7 +90,7 @@ class LocalMediaSource(
     private val history: HistoryRepository,
     /** E25：进程前台/后台状态；null = 不跟随（测试/降级路径，保持旧行为） */
     private val processLifecycle: ProcessLifecycle? = null,
-) : MediaSourceProvider, CacheProvider {
+) : MediaSourceProvider, CacheProvider, ScanFolderController {
 
     override val sourceId: String = LOCAL_MEDIA_SOURCE_ID
     override val displayName: String = "本地媒体"
@@ -109,9 +111,27 @@ class LocalMediaSource(
     private val _media = MutableStateFlow<List<MediaItem>>(emptyList())
     override fun observeMedia(): Flow<List<MediaItem>> = _media.asStateFlow()
 
-    /** 首扫完成（`_lastScan` 有值）之后才能给快照——之前的空是"还没扫"而不是"没有"。 */
+    /**
+     * **扫描索引快照**：上次扫描结果的落盘副本（`filesDir/scan_index.json`）。
+     *
+     * 存在理由（两件事共用一份存储）：
+     *  - 冷启动首帧：媒体列表此前只在内存里，进程一死就要等一整轮全量扫描
+     *    （大库是分钟级）——"不加载好不进去"（用户实报）。快照让 UI 挂载即有内容，
+     *    扫描在后台做增量刷新。
+     *  - 增量扫描的对照组：`scanInternal` 以快照为基线做**按 id 对比**——
+     *    未变的项直接复用（跳过富化/嗅探/封面生成），只对新增与变更项跑完整管线。
+     *    `added/removed` 统计因此在跨进程的两次扫描之间也成立（旧实现每次冷启都为 0）。
+     *
+     * 写入时机：每次扫描完成、发布之后。失败（磁盘满/IO 错）不拖垮扫描——缓存不是真相。
+     */
+    private val snapshotFile get() = File(context.filesDir, "scan_index.json")
+
+    /** 快照/本进程扫描是否已产出过一次数据——`mediaSnapshot()` 的判据（区分"还没扫"与"确实空"） */
+    @Volatile
+    private var hasSnapshot = false
+
     override fun mediaSnapshot(): List<MediaItem>? =
-        if (_lastScan.value != null) _media.value else null
+        if (hasSnapshot || _lastScan.value != null) _media.value else null
 
     private val _scanning = MutableStateFlow(false)
     val scanning: StateFlow<Boolean> = _scanning.asStateFlow()
@@ -157,6 +177,7 @@ class LocalMediaSource(
             // 乃至拖垮整个内核启动，而是落成一条带原因的失败摘要。
             runCatching { scanInternal(folderUriStrs) }
                 .getOrElse { t ->
+                    if (t is CancellationException) throw t
                     Log.w(TAG, "扫描异常，已降级为失败摘要而非崩溃", t)
                     val failSummary = LocalScanSummary(
                         added = 0,
@@ -217,34 +238,59 @@ class LocalMediaSource(
             )
             return ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
         }
-        val previousIds = _media.value.map { it.id }.toSet()
-        val storeItems = queryMediaStore(validScopes)
+        val previousList = _media.value
+        // 增量基线：上次发布（或本进程从快照恢复）的列表。按 id 复用未变项——
+        // 富化 / 容器嗅探 / 封面生成只对新增与变更项跑；未变项连无扩展名文件的
+        // 文件头读取都跳过（那是逐文件 I/O，大库上是最贵的一段）。
+        val baseline = previousList.associateBy { it.id }
+        val previousIds = baseline.keys
+        val rawStore = queryMediaStore(validScopes)
             // 垃圾文件过滤（§10 批次 4）：下载中的 .part/.tmp 等半成品不进库
             .filterNot { isJunkFile(it.title, it.sizeBytes) }
-            // 元数据富化（E34 的消费端）：插件按注册顺序串行富化，失败不拖垮扫描
-            .map { enrichAll(it) }
-            // 容器嗅探（§12.4，批次 8）：无扩展名/错扩展名按文件头判容器，
-            // mime 改对才会被引擎的 Extractor 链正确认领
-            .map { sniffMimeCorrection(it) }
-            // 无扩展名文件拾取与 .cue 分轨展开在 queryMediaStore 内完成
-            // （前者的 Files 集合查询、后者的逐文件配对都需要 dataPath/范围参数）
-            .let { items -> items + sniffUnknownFiles(validScopes) }
+        val storeItems = rawStore.map { fresh ->
+            // 富化（E34 的消费端）：插件按注册顺序串行富化，失败不拖垮扫描。
+            // 未变项直接沿用基线实例（带上它的富化结果与封面地址）。
+            val prev = baseline[fresh.id]
+            if (prev != null && prev.unchangedFrom(fresh)) {
+                prev
+            } else {
+                // 容器嗅探（§12.4，批次 8）：无扩展名/错扩展名按文件头判容器，
+                // mime 改对才会被引擎的 Extractor 链正确认领
+                sniffMimeCorrection(enrichAll(fresh))
+            }
+        }
+        // 无扩展名文件拾取（Files 集合查询 + 文件头嗅探）——同样支持基线复用
+        val unknownItems = sniffUnknownFiles(validScopes, baseline)
         // L14：MediaStore 跳过隐藏目录（`.` 前缀），这里用 SAF 遍历把其中的媒体补齐。
         // 只补 MediaStore 看不到的那部分——按「相对路径 + 文件名」与已收项去重，
         // 非隐藏文件仍以 MediaStore 为唯一来源，不重复采集。
-        val storePaths = storeItems.asSequence()
-            .mapNotNull { item -> item.folder?.let { "$it/${item.title}" } }
+        // 去重键剥扩展名：无扩展名拾取（`msf-`）的标题已剥过扩展名，隐藏项用的是
+        // 全文件名——不统一口径时同一文件可以同时以两种 id 进库（双份文件的来源之一）。
+        fun dedupKey(item: MediaItem): String? =
+            item.folder?.let { "$it/${item.title.substringBeforeLast('.')}" }
+
+        val storePaths = (storeItems + unknownItems).asSequence()
+            .mapNotNull(::dedupKey)
             .toHashSet()
-        val hiddenItems = queryHiddenDocuments(liveFolders)
+        val hiddenItems = queryHiddenDocuments(liveFolders, baseline)
             .filterNot { item ->
-                val path = item.folder?.let { "$it/${item.title}" }
+                val path = dedupKey(item)
                 path != null && path in storePaths
             }
-            // 富化与 MediaStore 项同链路（短标题/集号对隐藏目录里的剧集一样有用）
-            .map { enrichAll(it) }
+            // 富化与 MediaStore 项同链路（短标题/集号对隐藏目录里的剧集一样有用）；
+            // 复用项是基线**同一实例**（=== 判定），跳过；新增/变更项才走富化
+            .map { item -> if (item === baseline[item.id]) item else enrichAll(item) }
         // 封面并发补齐放在**发布之前**：UI 侧拿到的列表永远是"封面已就绪"的那一份，
         // 不需要两段式刷新，也不会因为某一项封面慢而整页停在占位图。
-        val items = attachCovers(storeItems + hiddenItems)
+        val items = attachCovers((storeItems + unknownItems + hiddenItems).distinctBy { it.id })
+        // [诊断] 发布前自检：同 id 重复会以 Lazy 重复 key 直接打崩 UI（实报闪退），
+        // 这里留一行日志把缺陷暴露在数据层，而不是让它到界面上炸（正常应为零输出）
+        run {
+            val dupKeys = items.groupBy { it.id }.filterValues { it.size > 1 }.keys
+            if (dupKeys.isNotEmpty()) {
+                Log.e(TAG, "[诊断] 发布列表出现重复 id：${dupKeys.take(5)}（共 ${dupKeys.size} 个）")
+            }
+        }
         // §8.3/E11：首次扫描把 DataStore 的断点迁入 Room，随后清旧键
         migrateHistoryOnce(items)
         // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存）。
@@ -266,7 +312,7 @@ class LocalMediaSource(
         // 任一目录被跳过/撤销时结果集不完整，此刻删记录会把整个目录的断点误清；
         // 这批死记录留到下一次完整扫描再清即可，不会误导计数太久。
         if (notes.isEmpty()) {
-            val pruned = history.pruneOrphans(items.map { HistoryEntry.keyOf(it) }.toSet())
+            val pruned = history.pruneOrphans(items.map { HistoryEntry.keyOf(it) }.toSet(), sourceId)
             if (pruned > 0) Log.i(TAG, "孤儿清理（L16）：删除 $pruned 条失效播放历史")
         }
         val summary = LocalScanSummary(
@@ -278,6 +324,9 @@ class LocalMediaSource(
         )
         _lastScan.value = summary
         eventBus.publish(KernelEvent.MediaScanned(sourceId = sourceId, count = items.size))
+        // 落盘基线：内容有变化才写（列表相等是 O(n) 比较，比一次几 MB 的 JSON 写便宜得多）。
+        // 放在发布之后——UI 的刷新不被磁盘 I/O 拖住。
+        if (items != previousList) saveSnapshot(items)
         return ScanResult(
             sourceId = sourceId,
             added = summary.added,
@@ -302,13 +351,133 @@ class LocalMediaSource(
     }
 
     /**
+     * 增量复用判据：文件身份字段全部一致才复用基线实例。
+     *
+     * `lastModifiedSec == 0`（来源没给这个字段，如 Files 集合查询）时跳过该项比较；
+     * `folder` 参与比较——移动文件不改大小与文件名，只有路径变。
+     */
+    private fun MediaItem.unchangedFrom(fresh: MediaItem): Boolean =
+        title == fresh.title &&
+            sizeBytes == fresh.sizeBytes &&
+            folder == fresh.folder &&
+            addedAtMs == fresh.addedAtMs &&
+            (fresh.lastModifiedSec == 0L || lastModifiedSec == fresh.lastModifiedSec)
+
+    // ---- 扫描索引快照（落盘基线：冷启动首帧 + 增量扫描对照组） ----
+
+    /** 恢复上次扫描的落盘快照。只在本进程还没扫过、内存还没有列表时生效（防与并发扫描打架）。 */
+    suspend fun restoreSnapshot() = withContext(dispatchers.io) {
+        if (hasSnapshot || _lastScan.value != null || _media.value.isNotEmpty()) return@withContext
+        val items = runCatching { readSnapshot() }.getOrNull() ?: return@withContext
+        if (_lastScan.value != null || _media.value.isNotEmpty()) return@withContext
+        // [诊断] 快照自检（同"发布前自检"）：正常应为零输出
+        run {
+            val dupKeys = items.groupBy { it.id }.filterValues { it.size > 1 }.keys
+            if (dupKeys.isNotEmpty()) {
+                Log.e(TAG, "[诊断] 快照恢复列表出现重复 id：${dupKeys.take(5)}（共 ${dupKeys.size} 个）")
+            }
+        }
+        _media.value = items
+        hasSnapshot = true
+        Log.i(TAG, "扫描索引快照已恢复：${items.size} 项（冷启动首帧不再等全量扫描）")
+    }
+
+    /** 把当前列表写为下次启动的基线；失败静默——快照是加速增益，不是真相来源 */
+    private fun saveSnapshot(items: List<MediaItem>) {
+        runCatching {
+            val arr = org.json.JSONArray()
+            items.forEach { item ->
+                arr.put(
+                    org.json.JSONObject().apply {
+                        put("id", item.id)
+                        put("sourceId", item.sourceId)
+                        put("title", item.title)
+                        put("uri", item.uri)
+                        put("mimeType", item.mimeType)
+                        put("durationMs", item.durationMs)
+                        put("sizeBytes", item.sizeBytes)
+                        put("lastModifiedSec", item.lastModifiedSec)
+                        put("addedAtMs", item.addedAtMs)
+                        item.coverUri?.let { put("coverUri", it) }
+                        item.folder?.let { put("folder", it) }
+                        put("width", item.width)
+                        put("height", item.height)
+                        item.displayTitle?.let { put("displayTitle", it) }
+                        put("seasonNumber", item.seasonNumber)
+                        put("episodeNumber", item.episodeNumber)
+                        item.videoCodec?.let { put("videoCodec", it) }
+                        put("clipStartUs", item.clipStartUs)
+                        put("clipEndUs", item.clipEndUs)
+                    },
+                )
+            }
+            val payload = org.json.JSONObject()
+                .put("version", SNAPSHOT_VERSION)
+                .put("items", arr)
+                .toString()
+            // 先写临时文件再替换：写一半被进程杀死时旧快照仍完整
+            val tmp = File(snapshotFile.absolutePath + ".tmp")
+            tmp.writeText(payload)
+            if (!tmp.renameTo(snapshotFile)) {
+                snapshotFile.delete()
+                tmp.renameTo(snapshotFile)
+            }
+        }.onFailure { Log.w(TAG, "扫描索引快照写入失败（忽略，不影响本次结果）", it) }
+    }
+
+    /** 读快照；文件缺失/损坏/版本不符返回 null（按"确实还没扫过"处理）。封面指向已删除的缓存文件时置空。 */
+    private fun readSnapshot(): List<MediaItem>? {
+        val file = snapshotFile
+        if (!file.isFile) return null
+        val root = org.json.JSONObject(file.readText())
+        if (root.optInt("version") != SNAPSHOT_VERSION) return null
+        val arr = root.optJSONArray("items") ?: return null
+        val out = ArrayList<MediaItem>(arr.length())
+        for (i in 0 until arr.length()) {
+            val o = arr.optJSONObject(i) ?: continue
+            val id = o.optString("id")
+            val uri = o.optString("uri")
+            if (id.isEmpty() || uri.isEmpty()) continue
+            out += MediaItem(
+                id = id,
+                sourceId = o.optString("sourceId").ifEmpty { sourceId },
+                title = o.optString("title"),
+                uri = uri,
+                mimeType = o.optString("mimeType").ifEmpty { "video/mp4" },
+                durationMs = o.optLong("durationMs"),
+                sizeBytes = o.optLong("sizeBytes"),
+                lastModifiedSec = o.optLong("lastModifiedSec"),
+                addedAtMs = o.optLong("addedAtMs"),
+                coverUri = o.optString("coverUri")
+                    .takeIf { it.isNotEmpty() && File(it).isFile },
+                folder = o.optString("folder").takeIf { it.isNotEmpty() },
+                width = o.optInt("width"),
+                height = o.optInt("height"),
+                displayTitle = o.optString("displayTitle").takeIf { it.isNotEmpty() },
+                seasonNumber = o.optInt("seasonNumber"),
+                episodeNumber = o.optInt("episodeNumber"),
+                videoCodec = o.optString("videoCodec").takeIf { it.isNotEmpty() },
+                clipStartUs = o.optLong("clipStartUs"),
+                clipEndUs = o.optLong("clipEndUs"),
+            )
+        }
+        return out
+    }
+
+    /**
      * 富化链（E34 的消费端）：按注册顺序**串行**执行 `MetadataEnricher`，
      * 后一个看到前一个的输出（契约约定：实现必须幂等）；单个失败按原样跳过。
      */
     private suspend fun enrichAll(item: MediaItem): MediaItem {
         var current = item
         registry.query<MetadataEnricher>().forEach { enricher ->
-            current = runCatching { enricher.enrich(current) }.getOrDefault(current)
+            current = try {
+                enricher.enrich(current)
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                current
+            }
         }
         return current
     }
@@ -327,8 +496,15 @@ class LocalMediaSource(
      */
     private suspend fun attachCovers(items: List<MediaItem>): List<MediaItem> {
         // 音频（`msa-`，含 .cue 分轨）走相册封面 URI，没有可生成的帧缩略图；
-        // 其余项（MediaStore 视频 `ms-` / 隐藏目录文档 `saf-`）缺封面时才补。
-        val pending = items.filter { it.coverUri == null && !it.id.startsWith(AUDIO_ID_PREFIX) }
+        // 其余项（MediaStore 视频 `ms-` / 隐藏目录文档 `saf-`）缺封面、或封面的
+        // 缓存文件已被清掉（清缓存/系统清 cacheDir）时才补——只信 `coverUri != null`
+        // 会让指向已删文件的旧地址永远不重生成。
+        val pending = items.filter {
+            // 先落成本地 val 再判：直接写 `File(it.coverUri)` 时属性链上的可空性
+            // 跨模块（:core:media）不进 Smart Cast，Java 构造器会收到 String? 告警
+            val cover = it.coverUri
+            !it.id.startsWith(AUDIO_ID_PREFIX) && (cover == null || !File(cover).isFile)
+        }
         if (pending.isEmpty()) return items
         val covers = java.util.concurrent.ConcurrentHashMap<String, String>()
         val gate = Semaphore(THUMB_PARALLELISM)
@@ -384,26 +560,26 @@ class LocalMediaSource(
         return folderUriStrs.filterNot { it in persisted }
     }
 
-    /** 添加扫描目录：已存在则直接重扫，否则持久化后立即扫描 */
-    suspend fun addScanFolder(uriStr: String) {
+    /** 添加扫描目录：已存在则直接重扫，否则持久化后立即扫描（[ScanFolderController] 契约） */
+    override suspend fun addScanFolder(uri: String) {
         val current = settings.scanFolderUris.first()
-        if (uriStr !in current) settings.setScanFolders(current + uriStr)
+        if (uri !in current) settings.setScanFolders(current + uri)
         scan()
     }
 
     /**
      * 移除一个扫描目录：释放其持久化授权；仍有其他目录时立即重扫，
-     * 移除最后一个目录时清空媒体列表与缩略图缓存，回到未扫描引导态。
+     * 移除最后一个目录时清空媒体列表、缩略图缓存与落盘快照，回到未扫描引导态。
      * 不删除任何用户文件。
      */
-    suspend fun removeScanFolder(uriStr: String) {
+    override suspend fun removeScanFolder(uri: String) {
         val current = settings.scanFolderUris.first()
-        if (uriStr !in current) return
-        val remaining = current - uriStr
+        if (uri !in current) return
+        val remaining = current - uri
         settings.setScanFolders(remaining)
         runCatching {
             context.contentResolver.releasePersistableUriPermission(
-                uriStr.toUri(),
+                uri.toUri(),
                 Intent.FLAG_GRANT_READ_URI_PERMISSION,
             )
         }
@@ -411,6 +587,10 @@ class LocalMediaSource(
             File(context.cacheDir, "video_thumbs").listFiles()?.forEach { it.delete() }
             _media.value = emptyList()
             _lastScan.value = null
+            // 快照是"已扫描"的落盘证据——最后一个目录都被移除后它必须一起消失，
+            // 否则下次冷启动会把已撤销目录的列表恢复出来
+            hasSnapshot = false
+            snapshotFile.delete()
         } else {
             scan()
         }
@@ -434,6 +614,7 @@ class LocalMediaSource(
      * （不再在进程存活期内无谓持有），回前台重挂并补发一次变更，把后台期间
      * 错过的文件增删扫进来（走同一 2s 去抖通道）。
      */
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
     fun startObserving() {
         if (contentObserver != null) return
         registerObservers()
@@ -813,9 +994,12 @@ class LocalMediaSource(
      * 遍历有 [HIDDEN_WALK_BUDGET] 硬预算：目录树里混进 `node_modules`/`.git` 这类巨型结构
      * 时，不把一次扫描拖成分钟级；超预算即停（fail-open，宁可少收也不卡死）。
      */
-    private fun queryHiddenDocuments(treeUriStrs: List<String>): List<MediaItem> {
+    private fun queryHiddenDocuments(treeUriStrs: List<String>, baseline: Map<String, MediaItem>): List<MediaItem> {
         val out = mutableListOf<MediaItem>()
         var budget = HIDDEN_WALK_BUDGET
+        // 去重：tree 根重叠（父/子目录各自授权）时同一文档会被走到两次——
+        // 此前无判重，同一文件以同一 `saf-` id 进列表两次（双份文件的来源之一）
+        val seen = HashSet<String>()
 
         fun walk(treeUri: Uri, docId: String, inheritedHidden: Boolean) {
             if (budget <= 0) return
@@ -856,6 +1040,15 @@ class LocalMediaSource(
                             if (isJunkSuffix(name)) continue
                             val size = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
                             if (sizeCol >= 0 && size <= 0L) continue
+                            val id = hiddenDocumentId(childDocId)
+                            if (!seen.add(id)) continue
+                            // 未变项复用基线：跳过文件头嗅探（逐文件 I/O）
+                            val lmSec = if (lmCol >= 0) cursor.getLong(lmCol) / 1000 else 0L
+                            val prev = baseline[id]
+                            if (prev != null && prev.sizeBytes == size && prev.lastModifiedSec == lmSec && prev.title == name) {
+                                out += prev
+                                continue
+                            }
                             val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childDocId)
                             // mime 已是 video/*、audio/* 就用它；否则（application/octet-stream
                             // 之类）按文件头嗅探——认不出的直接跳过，不往库里塞"点开必失败"的项
@@ -866,7 +1059,6 @@ class LocalMediaSource(
                                     ?.let { ContainerSniffer.sniff(it) }
                                     ?: continue
                             }
-                            val id = hiddenDocumentId(childDocId)
                             out += MediaItem(
                                 id = id,
                                 sourceId = sourceId,
@@ -875,7 +1067,7 @@ class LocalMediaSource(
                                 mimeType = effectiveMime,
                                 sizeBytes = size,
                                 // SAF 的 LAST_MODIFIED 是毫秒；断点指纹统一按秒（与 MediaStore 同单位）
-                                lastModifiedSec = if (lmCol >= 0) cursor.getLong(lmCol) / 1000 else 0L,
+                                lastModifiedSec = lmSec,
                                 addedAtMs = if (lmCol >= 0) cursor.getLong(lmCol) else 0L,
                                 // 同 queryScope：封面统一由 attachCovers 并发补齐
                                 coverUri = null,
@@ -902,8 +1094,11 @@ class LocalMediaSource(
     /** 缩略图缓存：扫描时落盘为 JPEG，之后封面直接读文件 */
     private fun thumbnailFor(id: Long, videoUri: Uri): String? = runCatching {
         writeThumbnail("$id") {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                context.contentResolver.loadThumbnail(videoUri, Size(480, 270), null)
+            // Q+ 的系统缩略图并非对所有容器都有（部分 OEM 的 AVI/MKV 会抛异常或给 null）——
+            // 此前只兜低版本，失败即永久占位图；这里把抽帧兜底提到两条路共用
+            val bySystem = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                runCatching { context.contentResolver.loadThumbnail(videoUri, Size(480, 270), null) }
+                    .getOrNull()
             } else {
                 @Suppress("DEPRECATION")
                 MediaStore.Video.Thumbnails.getThumbnail(
@@ -911,8 +1106,9 @@ class LocalMediaSource(
                     id,
                     MediaStore.Video.Thumbnails.MINI_KIND,
                     null,
-                ) ?: createFrameFallback(videoUri)
+                )
             }
+            bySystem ?: createFrameFallback(videoUri)
         }
     }.getOrNull()
 
@@ -1018,11 +1214,14 @@ private fun sameContainerFamily(a: String, b: String): Boolean {
  * 根本不可见）——没授予就跳过，整条路径 fail-open。嗅探认不出容器的行不进库：
  * 没有任何 Extractor 认领的文件，塞进库只会变成"点开必失败"的垃圾条目。
  */
-private fun sniffUnknownFiles(scopes: List<ScanScope>): List<MediaItem> {
+private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, MediaItem>): List<MediaItem> {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
     if (!runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)) return emptyList()
     val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
     val out = mutableListOf<MediaItem>()
+    // 去重：目录范围父子重叠（同时授权父目录与子目录）时，同一行会被逐 scope 查两次——
+    // 此前 `out +=` 无判重，同一文件以同一 id 进列表两次（用户实报"扫描会出现双份文件"）
+    val seen = HashSet<String>()
     scopes.forEach { scope ->
         val (scopeSel, scopeArgs) = scopeSelection(
             scope,
@@ -1054,20 +1253,30 @@ private fun sniffUnknownFiles(scopes: List<ScanScope>): List<MediaItem> {
                 val relCol = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
                 while (cursor.moveToNext()) {
                     if (idCol < 0 || nameCol < 0) continue
-                    val id = cursor.getLong(idCol)
-                    val uri = ContentUris.withAppendedId(collection, id).toString()
+                    val id = "msf-${cursor.getLong(idCol)}"
+                    if (!seen.add(id)) continue
+                    val name = cursor.getString(nameCol).orEmpty()
+                    val title = name.substringBeforeLast('.').ifBlank { name }
+                    val size = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
+                    val addedAt = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L
+                    // 未变项（改名/改大小/改加入时间之外都不变）复用基线：跳过文件头读取
+                    val prev = baseline[id]
+                    if (prev != null && prev.title == title && prev.sizeBytes == size && prev.addedAtMs == addedAt) {
+                        out += prev
+                        continue
+                    }
+                    val uri = ContentUris.withAppendedId(collection, cursor.getLong(idCol)).toString()
                     val head = readHead(uri.toUri(), ContainerSniffer.HEAD_BYTES)
                     val mime = head?.let { ContainerSniffer.sniff(it) } ?: continue
                     val dataPath = if (dataCol >= 0) cursor.getString(dataCol).orEmpty() else ""
-                    val name = cursor.getString(nameCol).orEmpty()
                     out += MediaItem(
-                        id = "msf-$id",
+                        id = id,
                         sourceId = sourceId,
-                        title = name.substringBeforeLast('.').ifBlank { name },
+                        title = title,
                         uri = uri,
                         mimeType = mime,
-                        sizeBytes = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L,
-                        addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
+                        sizeBytes = size,
+                        addedAtMs = addedAt,
                         folder = folderOf(
                             dataPath = dataPath,
                             relativePath = if (relCol >= 0) cursor.getString(relCol) else null,
@@ -1195,6 +1404,9 @@ private const val SCAN_WAIT_POLL_MS = 100L
 
 /** A5/P2-2：回前台补扫的最小间隔——比它更短的往返不值得再跑一次全量 MediaStore 查询 */
 private const val MIN_RESCAN_INTERVAL_MS = 30_000L
+
+/** 扫描索引快照的格式版本：字段增删时递增，旧快照按"没有"处理（下轮扫描重建） */
+private const val SNAPSHOT_VERSION = 1
 
 /**
  * 用户授权目录（SAF tree）解析出的扫描范围（E24）。

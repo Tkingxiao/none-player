@@ -49,6 +49,24 @@ class DefaultExtensionRegistryTest {
         assertTrue(registry.query<FakePoint>().isEmpty())
     }
 
+    /**
+     * 同一实例重复注册是幂等的（2026-10-12 release 闪退的契约防线）。
+     *
+     * 当时 R8 类合并把两个扩展接口合到同一个运行时 Class：同一 source 以两个
+     * "接口键"注册进同一个桶，`query<T>()` 返回两份 → 媒体列表整表翻倍 →
+     * Lazy 重复 key 闪退。keep 规则已禁止合并；这份用例把"幂等注册"钉死在契约上，
+     * 无论合并与否，查询结果都不允许同一实例出现两次。
+     */
+    @Test
+    fun `同一实例重复注册只保留一份`() {
+        val registry = DefaultExtensionRegistry()
+        val ext = FakeExtensionA()
+        registry.register(FakePoint::class.java, ext)
+        registry.register(FakePoint::class.java, ext)
+
+        assertEquals(listOf(ext), registry.query<FakePoint>())
+    }
+
     @Test
     fun `observe 立即给出快照并推送增量`() = runTest {
         val registry = DefaultExtensionRegistry()

@@ -66,10 +66,9 @@ internal fun WaveformSeekBar(
     )
     val buffered = bufferedFraction.coerceIn(0f, 1f)
     val playedColor = ink.accent
-    // §5.6 指定值：音频模式的底是封面图（永远是不均匀的亮面），色板的 fgSoft
-    // 压在上面会被封面吃掉，所以这里按规格用白的两个透明度而不是 ink。
-    val idleColor = Color.White.copy(alpha = 0.18f)
-    val bufferedColor = Color.White.copy(alpha = 0.10f)
+    // 跟字色走，不写死白：亮色幕布上白条会消失。透明度只负责「未播放 / 已缓冲」的层次。
+    val idleColor = ink.fg.copy(alpha = 0.28f)
+    val bufferedColor = ink.fg.copy(alpha = 0.16f)
     val haptics = rememberNpHaptics()
 
     Box(

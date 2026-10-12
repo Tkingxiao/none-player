@@ -1,6 +1,9 @@
 package com.noneplayer.plugins.player.ui
 
 import android.content.Context
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.ProcessLifecycleOwner
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.LOCAL_MEDIA_SOURCE_ID
 import com.noneplayer.core.database.HistoryRepository
@@ -15,9 +18,12 @@ import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.VideoPlayerFactory
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -82,8 +88,71 @@ class PlaybackSession(
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private var startJob: Deferred<SessionStart>? = null
+    private var startingItem: MediaItem? = null
+    private val appVisible = MutableStateFlow(true)
+    private val _sleepTimerEndsAtMs = MutableStateFlow(0L)
+    val sleepTimerEndsAtMs: StateFlow<Long> = _sleepTimerEndsAtMs.asStateFlow()
+    private var sleepJob: Job? = null
+
+    fun toggleSleepTimer() {
+        sleepJob?.cancel()
+        if (_sleepTimerEndsAtMs.value > 0L) {
+            _sleepTimerEndsAtMs.value = 0L
+        } else {
+            _sleepTimerEndsAtMs.value = System.currentTimeMillis() + 30 * 60_000L
+            sleepJob = scope.launch {
+                delay(30 * 60_000L)
+                pause()
+                _sleepTimerEndsAtMs.value = 0L
+            }
+        }
+    }
+
+    // Loading belongs to the session: moving its surface from detail to pane must not cancel restoration.
+    internal suspend fun startPlayback(
+        item: MediaItem,
+        restorePosition: Boolean = true,
+        autoPlay: Boolean = true,
+    ): SessionStart {
+        val pending = startJob
+        if (pending?.isActive == true && startingItem?.uri == item.uri && startingItem?.id == item.id) {
+            return pending.await()
+        }
+        pending?.cancel()
+        startingItem = item
+        val job = scope.async {
+            val player = acquire(item.mimeType) ?: return@async SessionStart(accepted = false)
+            ensureSessionPlaying(
+                context, registry, settings, history, player, this@PlaybackSession, item,
+                restorePosition = restorePosition,
+                autoPlay = autoPlay,
+                onSubtitleMatched = { key, hit -> scope.launch { settings.setSubtitleUri(key, hit) } },
+            )
+        }
+        startJob = job
+        return job.await()
+    }
 
     init {
+        scope.launch {
+            // Process STOP is delayed across configuration changes and does not fire for visible PiP.
+            val lifecycle = ProcessLifecycleOwner.get().lifecycle
+            lifecycle.addObserver(LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_START -> appVisible.value = true
+                    Lifecycle.Event.ON_STOP -> {
+                        persistPosition()
+                        appVisible.value = false
+                    }
+                    else -> Unit
+                }
+            })
+            appVisible.value = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+            combine(settings.backgroundPlay, appVisible, _queue) { background, visible, queue ->
+                shouldStopInBackground(background, visible, queue.isNotEmpty())
+            }.distinctUntilChanged().collect { shouldStop -> if (shouldStop) stop() }
+        }
         // §8.3 写入时机：播放中每 5s 落一次断点；暂停/切集/退页另有显式调用。
         // 引擎/队列未就绪时 persistPosition 自行短路，这里不做状态判断之外的事。
         scope.launch {
@@ -126,6 +195,16 @@ class PlaybackSession(
 
     /** 仅听音频模式状态（UI collectAsState 用） */
     val audioOnly: StateFlow<Boolean> = _audioOnly.asStateFlow()
+
+    private val _subtitleOffsetMs = MutableStateFlow(0L)
+    val subtitleOffsetMs: StateFlow<Long> = _subtitleOffsetMs.asStateFlow()
+
+    /** All player surfaces share the session offset; changing presentation must not reset it. */
+    fun setSubtitleOffsetMs(value: Long) {
+        val offset = clampSubtitleOffsetMs(value)
+        _subtitleOffsetMs.value = offset
+        _player.value?.setSubtitleOffsetMs(offset)
+    }
 
     /**
      * 当前条目的**记忆键**（`sourceId:mediaId`，A2-8）；空 = 尚未装载或条目无 id。
@@ -293,6 +372,7 @@ class PlaybackSession(
         engineMimeType = mimeType
         _engineError.value = null
         _player.value = created
+        created.setSubtitleOffsetMs(_subtitleOffsetMs.value)
         return created
     }
 
@@ -376,6 +456,11 @@ class PlaybackSession(
      * 否则通知栏会残留一条"已暂停"的媒体通知——迷你条与通知应当同生命周期。
      */
     fun stop() {
+        sleepJob?.cancel()
+        _sleepTimerEndsAtMs.value = 0L
+        startJob?.cancel()
+        startJob = null
+        startingItem = null
         val p = _player.value
         p?.pause()
         // 清队列前先把当前项断点落盘：周期落点最多差 5s，显式关闭不该丢掉这一截
@@ -386,6 +471,7 @@ class PlaybackSession(
         p?.clearQueue()
         _queue.value = emptyList()
         _index.value = -1
+        setSubtitleOffsetMs(0L)
     }
 
     /**
@@ -422,6 +508,14 @@ class PlaybackSession(
  */
 internal fun mediaMemoryKey(sourceId: String, mediaId: String): String =
     "${sourceId.ifEmpty { LOCAL_MEDIA_SOURCE_ID }}:$mediaId"
+
+internal fun clampSubtitleOffsetMs(value: Long): Long = value.coerceIn(-1_000L, 1_000L)
+
+internal fun shouldStopInBackground(
+    backgroundPlay: Boolean,
+    appVisible: Boolean,
+    hasSession: Boolean,
+): Boolean = hasSession && !appVisible && !backgroundPlay
 
 /**
  * 决定某个媒体此刻该处于哪种呈现模式（E129 / 审查 #1、#2）——纯函数，便于单测。

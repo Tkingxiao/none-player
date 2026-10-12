@@ -18,24 +18,37 @@ import kotlinx.coroutines.flow.MutableStateFlow
  */
 internal object FolderNav {
     private val pending = MutableStateFlow<String?>(null)
+    val pathRequest: kotlinx.coroutines.flow.StateFlow<String?> = pending
+
+    /**
+     * 「打开扫描目录管理面板」的一次性请求（首页点区块的「管理」）。
+     *
+     * 与 [pending] 同机制但独立通道：管理面板是**浮层**不是层级——已经在文件夹 Tab
+     * 时 Tab 切换会被内核短路，此时没有"页面重建"可借力，必须靠这枚值型信号
+     * （时间戳做 key，`LaunchedEffect` 才会重新触发）通知页面把面板打开。
+     */
+    private val manageTick = MutableStateFlow<Long?>(null)
+    val manageRequest: kotlinx.coroutines.flow.StateFlow<Long?> = manageTick
 
     /** 首页请求文件夹 Tab 打开某目录 */
     fun request(path: String) {
+        manageTick.value = null
         pending.value = path
     }
 
     /** 文件夹 Tab 取用一次；取到即清空（同一请求不会被消费两次） */
     fun consume(): String? = pending.value?.also { pending.value = null }
 
-    /**
-     * 丢弃未消费的请求（首页点「管理」时调用）。
-     *
-     * 不丢的话会出现这种情况：先点某个文件夹卡片（请求入队），但 Tab 切换因为
-     * 已经在文件夹 Tab 上而被内核的 `if (currentRoute == route) return` 短路，
-     * 请求就留在队里；用户回到首页点「管理」，进去后被那条**陈旧请求**顶到某个子目录——
-     * "点管理却进了别人的文件夹"。
-     */
-    fun clear() {
+    /** 首页请求打开「扫描目录」管理面板 */
+    fun requestManage() {
+        // 丢弃未消费的目录请求：否则"先点文件夹卡片、再点管理"会把陈旧请求
+        // 带进文件夹 Tab，进去后被那条请求顶到某个子目录（"点管理却进了别人的文件夹"）
         pending.value = null
+        manageTick.value = System.currentTimeMillis()
+    }
+
+    /** 管理面板已打开，请求消费掉（值不匹配时说明已有更新的一次请求，不动它） */
+    fun consumeManage(tick: Long) {
+        if (manageTick.value == tick) manageTick.value = null
     }
 }

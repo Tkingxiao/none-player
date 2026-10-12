@@ -16,6 +16,8 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -55,7 +57,9 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.SolidColor
@@ -442,25 +446,31 @@ fun KernelTabScaffold(
                         // 取窗口宽的 30% 再夹进区间——固定 360dp 在 1280dp 窗口里
                         // 会让列表列显得过窄、播放栏过大，比例失衡。
                         // 那条 480dp 下限优先：窗口不宽时缩列表，不缩画面。
-                        val listWidth = if (paneInUse) {
+                        val targetListWidth =
                             (maxWidth * 0.30f)
                                 .coerceIn(320.dp, 400.dp)
                                 .coerceAtMost((maxWidth - 480.dp).coerceAtLeast(280.dp))
-                        } else {
-                            maxWidth
-                        }
-                        Row(modifier = Modifier.fillMaxSize()) {
+                        val paneProgress by animateFloatAsState(
+                            targetValue = if (paneInUse) 1f else 0f,
+                            // 右栏进出是一次缩放，不是把画面横向拉开。Emphasized 比 Silk 更跟手。
+                            animationSpec = npMotion(Motion.Shared, easing = NpEasing.Emphasized),
+                            label = "playbackPaneWidth",
+                        )
+                        val listWidth = maxWidth + (targetListWidth - maxWidth) * paneProgress
+                        Row(modifier = Modifier.fillMaxSize().clipToBounds()) {
                             navHost(
                                 Modifier
                                     .fillMaxHeight()
                                     .width(listWidth),
                             )
-                            if (pane != null && paneInUse) {
+                            if (pane != null && paneProgress > 0.001f) {
                                 // 硬分割（2026-10-07 用户口径）：内容与右栏之间不做任何
                                 // 渐变过渡——1dp 发丝线 + 两侧同宽留白（pageGutter），
                                 // 右栏右缘同样让出留白、不贴屏幕边缘。
                                 val paneInk = LocalNpInk.current
-                                Row(modifier = Modifier.weight(1f).fillMaxHeight()) {
+                                Row(
+                                    modifier = Modifier.weight(1f).fillMaxHeight().clipToBounds(),
+                                ) {
                                     Box(
                                         modifier = Modifier
                                             .fillMaxHeight()
@@ -472,6 +482,13 @@ fun KernelTabScaffold(
                                         modifier = Modifier
                                             .weight(1f)
                                             .fillMaxHeight()
+                                            .graphicsLayer {
+                                                val scale = 0.86f + 0.14f * paneProgress
+                                                scaleX = scale
+                                                scaleY = scale
+                                                alpha = paneProgress.coerceIn(0f, 1f)
+                                                transformOrigin = TransformOrigin(1f, 0.5f)
+                                            }
                                             .padding(
                                                 start = windowInfo.pageGutter,
                                                 end = windowInfo.pageGutter,
@@ -513,17 +530,19 @@ private const val SHELL_ACCENT_SOFT_ALPHA = 0.16f
 /** M4（§7 场景表）：Tab 图标未选中时的静止缩放，选中后回到 1.0 */
 private const val TAB_ICON_REST_SCALE = 0.9f
 
-/** E128：内容转场的纵深缩放——进出都收向该值（轻量档 / Reduce Motion 下并掉，只留淡入淡出） */
-private const val TAB_CONTENT_SCALE = 0.96f
+/** E128：内容转场的纵深缩放——进出都收向该值（轻量档 / Reduce Motion 下并掉，只留淡入淡出）。
+ * 2026-10-12：0.96 → 0.98——大屏上 4% 缩放边缘位移过百像素，与"移动幅度过大"同族（用户实报）。 */
+private const val TAB_CONTENT_SCALE = 0.98f
 
 /**
- * E128：内容转场的方向视差幅度（dp）——紧凑档（横向底栏）36 / Rail（纵向）28。
+ * E128：内容转场的方向视差幅度（dp）——紧凑档（横向底栏）20 / Rail（纵向）14。
  *
- * 不是随机定的：36dp 在 360dp 宽的手机上约占 10% 页宽（读得出方向），28dp 在
- * 800dp 高的 Rail 窗里约占 3.5%。两者都远小于页宽/页高——§7.2"不做整页滑"仍成立。
+ * 2026-10-12 用户实报"重新进入列表时归位动画移动幅度过大"后收敛：原值 36/28 在
+ * 平板（Rail 纵向）上整页上下跑近 30dp，读起来像页面被抽走又塞回；收敛到
+ * 手机 20dp（页宽 ~5.5%，方向仍可读）、平板 14dp（页高 ~1.7%，止于"轻挪"）。
  */
-private const val TAB_SHIFT_BAR_DP = 36
-private const val TAB_SHIFT_RAIL_DP = 28
+private const val TAB_SHIFT_BAR_DP = 20
+private const val TAB_SHIFT_RAIL_DP = 14
 
 /**
  * 选中胶囊的落点账本（M4「选中胶囊 morph」）。
@@ -713,7 +732,7 @@ private fun NpNavRail(
     // 不上报槽位，所以胶囊永远不会停到它们身上。
     val railLedger = remember { TabSlotLedger() }
     LaunchedEffect(currentRoute) { railLedger.select(currentRoute) }
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxHeight()
             .width(80.dp)
@@ -721,8 +740,10 @@ private fun NpNavRail(
             // 用不上，所以只取它的底——仍经同一个 modifier，不各写一份。
             // 底铺在**这一层**而不是里面的 Row：胶囊要画在玻璃底之上、各项之下。
             .npGlassChrome(ink)
+            .clipToBounds()
             .onGloballyPositioned { railLedger.setHost(it.boundsInRoot().toIntRect()) },
     ) {
+        val compact = maxHeight < 420.dp * LocalDensity.current.fontScale.coerceAtLeast(1f)
         NpTabCapsule(ledger = railLedger, corner = 14.dp)
     Row(
         modifier = Modifier
@@ -732,7 +753,8 @@ private fun NpNavRail(
         Column(
             modifier = Modifier
                 .fillMaxHeight()
-                .padding(vertical = 18.dp),
+                .then(if (compact) Modifier.verticalScroll(rememberScrollState()) else Modifier)
+                .padding(vertical = if (compact) 6.dp else 18.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
@@ -741,7 +763,7 @@ private fun NpNavRail(
             // 标记用**纯黑 / 纯白两套**随深浅主题切换，容器底也从 accent-soft 换成中性：
             // 橙色在本应用里是"选中 / 主操作"的颜色，品牌块再占一支，Rail 上就会出现
             // 两个同等强度的橙色焦点，真正的选中项反而压不住。
-            Box(
+            if (!compact) Box(
                 modifier = Modifier
                     .padding(bottom = 14.dp)
                     .size(44.dp)
@@ -766,11 +788,12 @@ private fun NpNavRail(
                     onClick = { onSelect(tab.route) },
                     accent = accent,
                     muted = muted,
+                    compact = compact,
                     onSlot = { rect -> railLedger.report(tab.route, rect) },
                 )
             }
             // 推到底部的那一项（设置）
-            Box(modifier = Modifier.weight(1f))
+            if (!compact) Box(modifier = Modifier.weight(1f))
             // 设计稿 `.rail` 底部的「主题」按钮（B6）：亮色显示月亮、暗色显示太阳，
             // 点击切换。主题状态由宿主经 [LocalNpThemeToggle] 注入（null 时不渲染）。
             val themeToggle = LocalNpThemeToggle.current
@@ -783,6 +806,7 @@ private fun NpNavRail(
                     onClick = themeToggle.onToggle,
                     accent = accent,
                     muted = muted,
+                    compact = compact,
                 )
             }
             pinned.forEach { tab ->
@@ -794,6 +818,7 @@ private fun NpNavRail(
                     onClick = { onSelect(tab.route) },
                     accent = accent,
                     muted = muted,
+                    compact = compact,
                     onSlot = { rect -> railLedger.report(tab.route, rect) },
                 )
             }
@@ -826,6 +851,7 @@ private fun NpRailItem(
     accent: Color,
     muted: Color,
     onSlot: ((IntRect) -> Unit)? = null,
+    compact: Boolean = false,
 ) {
     val tint by animateColorAsState(
         targetValue = if (selected) accent else muted,
@@ -855,7 +881,7 @@ private fun NpRailItem(
                 indication = null,
                 onClick = onClick,
             )
-            .padding(vertical = 8.dp)
+            .padding(vertical = if (compact) 12.dp else 8.dp)
             .then(
                 if (onSlot == null) {
                     Modifier
@@ -877,7 +903,7 @@ private fun NpRailItem(
                     },
             )
         }
-        Text(
+        if (!compact) Text(
             text = label,
             color = tint,
             fontSize = 11.sp,

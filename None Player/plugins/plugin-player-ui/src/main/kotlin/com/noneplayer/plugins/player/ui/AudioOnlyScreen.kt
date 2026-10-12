@@ -68,10 +68,12 @@ import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npCoverScrim
+import com.noneplayer.core.ui.npInkForBackdrop
 import com.noneplayer.core.ui.npDisplacementAllowed
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.npPressScale
 import com.noneplayer.core.ui.npQuality
+import com.noneplayer.core.ui.npReadableBackdropAlpha
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.VideoPlayer
@@ -105,7 +107,7 @@ fun AudioOnlyScreen(
     speedText: String = "1.0x",
     modifier: Modifier = Modifier,
 ) {
-        val ink = LocalNpInk.current
+    val themeInk = LocalNpInk.current
     // E120：订**位置无关**的摘要，不订 nowPlaying——后者每 250ms 随进度发一次新值，
     // 在页面顶解包等于让整页跟着进度 4/s 重组（实测 39 次/12s：两个 radialGradient、
     // 唱片、6 枚 chip 全部重跑）。进度只在下面的 ProgressBlock 叶子里订引擎的流。
@@ -130,7 +132,7 @@ fun AudioOnlyScreen(
     Box(
         modifier = modifier
             .fillMaxSize()
-            .background(ink.bg),
+            .background(themeInk.bg),
     ) {
         // 封面取色舞台底（§4.7）：先于辉光，辉光在它之上"点亮"顶部。
         AudioModeBackdrop(coverUri = snapshot.coverUri)
@@ -141,11 +143,20 @@ fun AudioOnlyScreen(
                 .height(360.dp)
                 .background(
                     Brush.radialGradient(
-                        colors = listOf(ink.accentSoft, Color.Transparent),
+                        colors = listOf(themeInk.accentSoft, Color.Transparent),
                         radius = 900f,
                     ),
                 ),
         )
+        val readableAlpha = remember(themeInk) { npReadableBackdropAlpha(themeInk) }
+        val coverTone = npCoverScrim(snapshot.coverUri)
+        val backdrop = Color(
+            red = themeInk.bg.red * readableAlpha + coverTone.red * (1f - readableAlpha),
+            green = themeInk.bg.green * readableAlpha + coverTone.green * (1f - readableAlpha),
+            blue = themeInk.bg.blue * readableAlpha + coverTone.blue * (1f - readableAlpha),
+        )
+        val ink = npInkForBackdrop(themeInk, backdrop)
+        Box(Modifier.fillMaxSize().background(themeInk.bg.copy(alpha = readableAlpha)))
         // ==================== 版式块：两条版式共用，差异只在排列与对齐 ====================
 
         // 顶部行：返回 + 标题/来源（设计稿 .audio-top）
@@ -485,7 +496,7 @@ fun AudioOnlyScreen(
                 Text(
                     text = "仅听音频模式 · 画面已关闭以省电",
                     style = com.noneplayer.core.ui.NpMonoSmall,
-                    color = ink.muted.copy(alpha = 0.6f),
+                    color = ink.muted,
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
                         .padding(vertical = 10.dp),
@@ -625,7 +636,7 @@ private fun ToolChip(
             modifier = Modifier
                 .then(if (fill) Modifier.fillMaxWidth() else Modifier)
                 .clip(RoundedCornerShape(NpRadius.chip))
-                .background(if (on) ink.accentSoft else Color.Transparent)
+                .background(if (on) ink.accentSoft else ink.surface.copy(alpha = 0.92f))
                 .border(1.dp, if (on) ink.accentLine else ink.border, RoundedCornerShape(NpRadius.chip))
                 .npPressScale(onClick = onClick, pressedScale = 0.96f)
                 .padding(horizontal = 15.dp, vertical = 9.dp),

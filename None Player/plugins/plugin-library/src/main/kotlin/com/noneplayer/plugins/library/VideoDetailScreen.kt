@@ -67,6 +67,7 @@ import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
 import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
+import com.noneplayer.kernel.ui.api.NpInlinePlayRequest
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -97,6 +98,7 @@ internal fun VideoDetailScreen(
     inlinePlayer: InlinePlaybackProvider?,
     /** 进独占全屏播放页（内嵌控制层的全屏键 / 未注册内嵌实现时的回退） */
     onFullscreen: (MediaItem) -> Unit,
+    onAudioOnly: (MediaItem) -> Unit,
     onSelect: (MediaItem) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -106,20 +108,30 @@ internal fun VideoDetailScreen(
     val topInsetRaw = LocalNpTopBarInset.current
     val topPad = if (topInsetRaw == Dp.Unspecified) 0.dp else topInsetRaw
     val gutter = LocalNpWindowInfo.current.pageGutter
+    val desktopLike = LocalNpWindowInfo.current.isDesktopLike
     // 内嵌播放：详情页里直接开播（封面框就地变播放器）；全屏键才进独占播放页。
     // 会话是同一个——落全屏只续播不重启，退出全屏回详情、画面仍在原处继续。
     // 状态**不按键**：在详情页里切换同文件夹条目时保持"继续播新选的那一集"
     // （与市面播放器的选集行为一致）；离开详情页即随组合销毁复位。
     var inlinePlaying by rememberSaveable { mutableStateOf(false) }
     val inlineAvailable = inlinePlayer != null
+    val paneOccupied = LocalNpPaneOccupied.current
+    val selectEpisode: (MediaItem) -> Unit = { next ->
+        // 右栏或本页内嵌已经在播：点左侧剧集必须换画面，不能只换详情页状态。
+        if (paneOccupied || inlinePlaying) NpInlinePlayRequest.request(next)
+        onSelect(next)
+    }
     fun startPlayback() {
-        if (inlineAvailable) inlinePlaying = true else onFullscreen(item)
+        when {
+            paneOccupied -> NpInlinePlayRequest.request(item)
+            inlineAvailable -> inlinePlaying = true
+            else -> onFullscreen(item)
+        }
     }
     // 右栏接管播放的那一刻，详情页的内嵌态必须复位：否则右栏顶栏的「关闭播放器」
     // 停掉会话后 paneOccupied 翻回 false，这里残留的 inlinePlaying=true 会让封面框
     // 立刻挂上内嵌播放器、把会话**再拉起来**——用户点的可是"关闭"（2026-10-07 实测）。
     // 紧凑/中等档没有右栏（paneOccupied 恒 false），此复位不生效，内嵌行为不变。
-    val paneOccupied = LocalNpPaneOccupied.current
     LaunchedEffect(paneOccupied) {
         if (paneOccupied) inlinePlaying = false
     }
@@ -131,6 +143,7 @@ internal fun VideoDetailScreen(
         0f
     }
     val canResume = resumeMs > 5_000
+    var showDetail by rememberSaveable { mutableStateOf(false) }
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         // 右栏只在**真有内容**时才占位（E129 / 审查 #9）：同文件夹兄弟项不足两条时
@@ -144,11 +157,73 @@ internal fun VideoDetailScreen(
             top = topPad + 12.dp,
             bottom = bottomInset + 28.dp,
         )
-        if (twoPane) {
+        if (siblings.size <= 1 && maxWidth >= 600.dp && !paneOccupied) {
+            // 没有剧集时不要把 16:9 封面拉满整栏——平板上会变成一块空荡的巨幅。
+            Row(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(pad),
+                horizontalArrangement = Arrangement.spacedBy(24.dp),
+            ) {
+                DetailHero(
+                    item = item,
+                    hue = hue,
+                    isAudio = isAudio,
+                    progress = progress,
+                    canResume = canResume,
+                    resumeMs = resumeMs,
+                    navigator = navigator,
+                    inlinePlayer = inlinePlayer,
+                    inlinePlaying = inlinePlaying,
+                    onStartInline = ::startPlayback,
+                    onFullscreen = { onFullscreen(item) },
+                    onAudioOnly = { onAudioOnly(item) },
+                    onOpenInfo = null,
+                    modifier = Modifier.widthIn(max = 420.dp),
+                )
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    DetailMeta(item = item)
+                }
+            }
+        } else if (paneOccupied) {
+            // The shell already owns the video surface; keep this narrow pane focused on episodes.
+            LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = pad) {
+                item(key = "detail-actions") {
+                    Column {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            NpPrimaryButton(
+                                text = if (canResume) "继续观看" else "播放",
+                                icon = NpIcon.Play,
+                                onClick = ::startPlayback,
+                            )
+                            Spacer(Modifier.weight(1f))
+                            NpIconButton(
+                                icon = NpIcon.Headphones,
+                                contentDescription = "仅听音频",
+                                onClick = { onAudioOnly(item) },
+                            )
+                            NpIconButton(
+                                icon = NpIcon.Info,
+                                contentDescription = "视频详情",
+                                onClick = { showDetail = true },
+                            )
+                        }
+                        Spacer(Modifier.height(12.dp))
+                    }
+                }
+                siblingRows(item = item, siblings = siblings, onSelect = selectEpisode)
+            }
+        } else if (twoPane) {
             // E134（用户明确要求）：**剧集列表居左、视频小窗居右**（此前相反）。
             // 视频详情弹成浮窗层小窗口，由播放窗右下角的「详情」按钮打开。
             // rememberSaveable 让弹窗状态跨播放往返保留——进播放页回来不丢。
-            var showDetail by rememberSaveable { mutableStateOf(false) }
             Row(
                 modifier = Modifier
                     .fillMaxSize()
@@ -162,7 +237,7 @@ internal fun VideoDetailScreen(
                         .weight(1f)
                         .fillMaxSize(),
                 ) {
-                    siblingRows(item = item, siblings = siblings, onSelect = onSelect)
+                    siblingRows(item = item, siblings = siblings, onSelect = selectEpisode)
                 }
                 Column(
                     modifier = Modifier
@@ -181,12 +256,10 @@ internal fun VideoDetailScreen(
                         inlinePlaying = inlinePlaying,
                         onStartInline = ::startPlayback,
                         onFullscreen = { onFullscreen(item) },
+                        onAudioOnly = { onAudioOnly(item) },
                         onOpenInfo = { showDetail = true },
                     )
                 }
-            }
-            if (showDetail) {
-                DetailPopup(item = item, onDismiss = { showDetail = false })
             }
         } else {
             // 窄窗：整页一个 Lazy 列表——头部（封面 + 元信息）在前，同文件夹条目按需组合。
@@ -197,6 +270,10 @@ internal fun VideoDetailScreen(
                 contentPadding = pad,
             ) {
                 item(key = "detail-hero") {
+                    Box(
+                        modifier = Modifier.fillMaxWidth(),
+                        contentAlignment = Alignment.TopCenter,
+                    ) {
                     DetailHero(
                         item = item,
                         hue = hue,
@@ -209,9 +286,17 @@ internal fun VideoDetailScreen(
                         inlinePlaying = inlinePlaying,
                         onStartInline = ::startPlayback,
                         onFullscreen = { onFullscreen(item) },
+                        onAudioOnly = { onAudioOnly(item) },
+                        onOpenInfo = { showDetail = true },
+                        modifier = if (desktopLike && siblings.size <= 1) {
+                            Modifier.widthIn(max = 640.dp)
+                        } else {
+                            Modifier
+                        },
                     )
+                    }
                 }
-                item(key = "detail-meta") {
+                if (!desktopLike) item(key = "detail-meta") {
                     Column {
                         Spacer(Modifier.height(22.dp))
                         DetailMeta(item = item)
@@ -221,13 +306,14 @@ internal fun VideoDetailScreen(
                     siblingRows(
                         item = item,
                         siblings = siblings,
-                        onSelect = onSelect,
+                        onSelect = selectEpisode,
                         topSpacing = 22.dp,
                     )
                 }
             }
         }
     }
+    if (showDetail) DetailPopup(item = item, onDismiss = { showDetail = false })
 }
 
 /** 封面 + 主操作：点封面即播；「继续观看」带上断点时刻，播放器仍会把断点还原 */
@@ -244,6 +330,7 @@ private fun DetailHero(
     inlinePlaying: Boolean,
     onStartInline: () -> Unit,
     onFullscreen: () -> Unit,
+    onAudioOnly: () -> Unit,
     /** 详情浮窗入口（null/省略 = 窄窗常显详情，不渲染「详情」键） */
     onOpenInfo: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
@@ -300,6 +387,7 @@ private fun DetailHero(
         }
         Spacer(Modifier.height(14.dp))
         Row(
+            modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -317,20 +405,17 @@ private fun DetailHero(
                     onClick = onStartInline,
                 )
             }
-            if (item.durationMs > 0) {
-                Text(
-                    text = formatTimestamp(item.durationMs),
-                    style = NpMono,
-                    color = ink.muted,
-                )
-            }
+            Spacer(Modifier.weight(1f))
+            NpIconButton(
+                icon = NpIcon.Headphones,
+                contentDescription = "仅听音频",
+                onClick = onAudioOnly,
+            )
             if (onOpenInfo != null) {
                 // 详情浮窗键：与全屏/播放同一行，推到最右（用户要求）
-                Spacer(Modifier.weight(1f))
-                NpPrimaryButton(
-                    text = "详情",
+                NpIconButton(
                     icon = NpIcon.Info,
-                    primary = false,
+                    contentDescription = "视频详情",
                     onClick = onOpenInfo,
                 )
             }

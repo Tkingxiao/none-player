@@ -80,6 +80,13 @@ enum class SortMode(val label: String) {
     SIZE("大小"),
 }
 
+data class LibraryPreferences(
+    val sortMode: SortMode = SortMode.ADDED,
+    val sortAscending: Boolean = false,
+    val gridColumns: Int = 2,
+    val viewStyle: String = "grid",
+)
+
 /**
  * 应用设置仓库——内核级服务，跨插件共享的用户偏好持久化。
  *
@@ -205,6 +212,19 @@ class AppSettings(private val context: Context) {
     }
 
     // ---- 媒体库 ----
+
+    private val _libraryPreferencesSnapshot = MutableStateFlow<LibraryPreferences?>(null)
+    val libraryPreferencesSnapshot: LibraryPreferences? get() = _libraryPreferencesSnapshot.value
+
+    // Publish layout and ordering together so a restored list never renders default preferences first.
+    val libraryPreferences: Flow<LibraryPreferences> = context.dataStore.data.map { prefs ->
+        LibraryPreferences(
+            sortMode = SortMode.entries.firstOrNull { it.name == prefs[KEY_SORT_MODE] } ?: SortMode.ADDED,
+            sortAscending = prefs[KEY_SORT_ASC] ?: false,
+            gridColumns = (prefs[KEY_GRID_COLUMNS]?.toIntOrNull() ?: 2).coerceIn(1, 3),
+            viewStyle = prefs[KEY_LIST_VIEW_STYLE]?.takeIf { it == "list" } ?: "grid",
+        )
+    }.onEach { _libraryPreferencesSnapshot.value = it }
 
     /** 排序方式，默认最新添加 */
     val sortMode: Flow<SortMode> = context.dataStore.data.map { prefs ->
@@ -617,9 +637,9 @@ class AppSettings(private val context: Context) {
         context.dataStore.edit { it[intPreferencesKey("danmaku_density")] = max }
     }
 
-    /** 字号倍率（1.0 = 标准），默认 1.0 */
+    /** 字号倍率（1.0 = 标准），默认 1.0；范围钳制（自定义输入可能落任意值，渲染层按此值直接乘） */
     val danmakuFontScale: Flow<Float> = context.dataStore.data
-        .map { it[stringPreferencesKey("danmaku_font_scale")]?.toFloatOrNull() ?: 1f }
+        .map { it[stringPreferencesKey("danmaku_font_scale")]?.toFloatOrNull()?.coerceIn(0.4f, 3f) ?: 1f }
 
     suspend fun setDanmakuFontScale(scale: Float) {
         context.dataStore.edit { it[stringPreferencesKey("danmaku_font_scale")] = scale.toString() }

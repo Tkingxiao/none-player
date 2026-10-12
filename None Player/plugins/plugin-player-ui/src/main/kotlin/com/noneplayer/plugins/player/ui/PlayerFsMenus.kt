@@ -19,7 +19,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -27,8 +30,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -41,6 +46,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -53,6 +59,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -71,6 +78,7 @@ import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpMediaPalette
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMonoSmall
+import com.noneplayer.core.ui.NpSwitch
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npDisplacementAllowed
@@ -81,6 +89,8 @@ import com.noneplayer.kernel.api.NpChapter
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.NpTrackType
+import com.noneplayer.kernel.api.VideoPlayer
+import com.noneplayer.kernel.ui.api.PlaybackMenuContributor
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -109,7 +119,7 @@ enum class FsMenuPage { MAIN, SPEED, SUBTITLE, AUDIO, PICTURE, CHAPTERS, EPISODE
  * 底栏按钮上方紧挨着进度条，菜单若贴着按钮顶展开会遮住进度条的右段——
  * 用户实报的"选项盖住进度条"在底栏侧的同型问题，这里以参照矩形统一收口。
  */
-class FsMenuAnchor(
+data class FsMenuAnchor(
     val rect: Rect,
     val alignEnd: Boolean = true,
     val preferAbove: Boolean = false,
@@ -127,55 +137,51 @@ fun FsDropdown(
     anchor: FsMenuAnchor,
     onDismiss: () -> Unit,
     /**
-     * 内部子页 key（审查批次 C1）。
+     * 当前子页；过渡中的每个页面由 AnimatedContent 的目标状态独立渲染。
      *
      * 传入后，MAIN → 倍速/字幕/音轨…这类 drill-in 切换会走一段轻量过场，
      * 而不是 `when(page)` 直接换内容。此前面板整体有入场/退场动画，
      * 唯独页与页之间是硬切，用户点"倍速"时内容瞬间跳变。
      *
      * 方向按**子页深度**推断：进子页自右来、回主页自左来；
-     * 同级互换（理论上不会出现）退化为纯淡入淡出。
+     * 同级互换沿用进入子页的方向。
      * 遵守项目既有管道：位移受 [npDisplacementAllowed] 门控，轻量档/Reduce Motion
      * 自动退化成短淡入淡出；时长走 `Field`(150) 与容器同一条速度。
      */
-    pageKey: Any? = null,
-    content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
+    page: FsMenuPage = FsMenuPage.MAIN,
+    content: @Composable ColumnScope.(page: FsMenuPage, dismiss: () -> Unit) -> Unit,
 ) {
     val density = LocalDensity.current
     val screenHeight = LocalConfiguration.current.screenHeightDp.dp
     val screenWidth = LocalConfiguration.current.screenWidthDp.dp
     val gap = 10.dp
     val margin = 12.dp
-    // 向上展开时的"下沿参照"：默认是触发控件顶；给了 aboveLimitRect（进度条）时以它为准，
-    // 菜单整块落在进度条之上，绝不遮住进度条。
-    val aboveEdge = (anchor.aboveLimitRect ?: anchor.rect).top
-    val anchorTop = with(density) { aboveEdge.toDp() }
-    val anchorBottom = with(density) { anchor.rect.bottom.toDp() }
-    // 可用高度按锚点算：向上展开时 = 锚点上方到边距，向下 = 锚点下方到边距。
-    // 菜单超出即内部滚动，永远不会顶到屏幕另一头（旧右抽屉"从顶贯到底"的根因）。
-    // 再压一个 72% 屏幕高上限：向下展开时给底部的进度条/传输键留出可见余量，
-    // 菜单与进度条永不重叠（用户实报的原始问题）。
-    val space = if (anchor.preferAbove) {
-        anchorTop - gap - margin
-    } else {
-        screenHeight - anchorBottom - gap - margin
+    val gapPx = with(density) { gap.roundToPx() }
+    val marginPx = with(density) { margin.roundToPx() }
+    val geometry = with(density) {
+        fsMenuGeometry(
+            window = IntSize(screenWidth.roundToPx(), screenHeight.roundToPx()),
+            anchor = anchor.rect.toMenuIntRect(),
+            aboveLimit = anchor.aboveLimitRect?.top?.roundToInt(),
+            preferAbove = anchor.preferAbove,
+            preferredWidth = 284.dp.roundToPx(),
+            minimumRowHeight = 48.dp.roundToPx(),
+            gap = gapPx,
+            margin = marginPx,
+        )
     }
-    // 审查批次 D4：**去掉 180dp 下限**。旧写法 `minOf(space, 72%).coerceAtLeast(180.dp)`
-    // 在可用空间不足 180dp 时（矮横窗、分屏、桌面自由窗口把窗口压扁）会把菜单强行
-    // 撑到 180dp——它比剩余空间还高，于是必然溢出窗口或盖住锚点/进度条，
-    // 而定位只 clamp 左上角、改不了自身尺寸。空间不够时**就该矮**，靠内部滚动看内容。
-    // 兜底只留一个"至少还能画出一行"的极小值，避免 0 高度导致内容不可见。
-    val maxHeight = minOf(space, screenHeight * 0.72f).coerceAtLeast(48.dp)
-    // 审查批次 D4：宽度同样按真实窗口收敛。固定 284dp 在窄分屏（<308dp）里
-    // 连左右各 12dp 边距都满足不了，定位 clamp 之后菜单会顶到屏幕边缘。
-    val menuWidth = 284.dp.coerceAtMost((screenWidth - margin * 2).coerceAtLeast(160.dp))
+    val maxHeight = with(density) { geometry.maxHeight.toDp() }
+    val menuWidth = with(density) { geometry.width.toDp() }
 
     // M21：锚点在原点（顶栏⋯在上沿、底栏钮在下沿），缩放两个轴一起走才像"从按钮长出来"，
     // 只缩 Y 会读成面板被压扁。轻量档/Reduce Motion 把缩放归零 → 纯淡入淡出。
+    // 用户实报"多功能选项的出现动画看不见"——5% 缩放 + 150ms 淡入读起来是"啪地弹出"；
+    // 入场放大到 10% + 180ms（Panel 档）给出可读的"从按钮长出来"，退场保持 150ms 更快离开。
     val scaleAllowed = npDisplacementAllowed()
-    val scaleFrom = if (scaleAllowed) 0.95f else 1f
+    val scaleFrom = if (scaleAllowed) 0.90f else 1f
     val exitMs = npDuration(Motion.Field)
     val scope = rememberCoroutineScope()
+    val latestDismiss by rememberUpdatedState(onDismiss)
     // 退场由容器撑着：先把 visible 落下、动画跑完才回调真正的 onDismiss。
     var visible by remember { mutableStateOf(false) }
     var exitJob by remember { mutableStateOf<Job?>(null) }
@@ -190,33 +196,42 @@ fun FsDropdown(
             visible = false
             exitJob = scope.launch {
                 delay(exitMs.toLong())
-                onDismiss()
+                latestDismiss()
             }
         }
     }
     val entrance by animateFloatAsState(
         targetValue = if (visible) 1f else scaleFrom,
-        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        animationSpec = if (visible) {
+            npMotion<Float>(Motion.Panel, easing = NpEasing.Snappy)
+        } else {
+            npMotion<Float>(Motion.Field, easing = NpEasing.Snappy)
+        },
         label = "fsMenuScale",
     )
     val layerAlpha by animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
-        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        animationSpec = if (visible) {
+            npMotion<Float>(Motion.Panel, easing = NpEasing.Snappy)
+        } else {
+            npMotion<Float>(Motion.Field, easing = NpEasing.Snappy)
+        },
         label = "fsMenuAlpha",
     )
 
     Popup(
-        popupPositionProvider = remember(anchor) {
+        popupPositionProvider = remember(anchor, geometry.preferAbove, gapPx, marginPx) {
             FsMenuPositionProvider(
                 anchor = anchor,
-                gapPx = with(density) { gap.toPx().roundToInt() },
-                marginPx = with(density) { margin.toPx().roundToInt() },
+                preferAbove = geometry.preferAbove,
+                gapPx = gapPx,
+                marginPx = marginPx,
             )
         },
         onDismissRequest = requestDismiss,
         properties = PopupProperties(focusable = true),
     ) {
-        // 审查批次 C1：子页过场。只在 [pageKey] 真正变化时播，
+        // Each animated page owns its content and scroll position through the transition.
         // 且**不复用容器的入场缩放**——容器那一段是"面板整体从按钮长出来"，
         // 子页切换是"内容往里推进一层"，两者语义不同，叠在一起会读成面板又开了一次。
         val shiftAllowed = npDisplacementAllowed()
@@ -227,7 +242,7 @@ fun FsDropdown(
                 .width(menuWidth)
                 .heightIn(max = maxHeight)
                 .graphicsLayer {
-                    transformOrigin = TransformOrigin(0.5f, if (anchor.preferAbove) 1f else 0f)
+                    transformOrigin = TransformOrigin(0.5f, if (geometry.preferAbove) 1f else 0f)
                     scaleX = entrance
                     scaleY = entrance
                     this.alpha = layerAlpha
@@ -235,26 +250,13 @@ fun FsDropdown(
                 .clip(RoundedCornerShape(16.dp))
                 .background(Color.Black.copy(alpha = 0.88f))
                 .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
-                .verticalScroll(rememberScrollState())
                 .padding(vertical = 6.dp),
         ) {
-            // 上一页 key：用于推断"推进还是返回"，从而决定滑入方向
-            var previousKey by remember { mutableStateOf<Any?>(pageKey) }
-            val forward = remember(pageKey) {
-                val prev = previousKey
-                previousKey = pageKey
-                // 主页 → 子页 = 推进；子页 → 主页 = 返回；首次/同 key = 无方向（纯淡）
-                when {
-                    prev == null && pageKey != null -> true
-                    prev != null && pageKey == null -> false
-                    else -> true
-                }
-            }
             AnimatedContent(
-                targetState = pageKey,
+                targetState = page,
                 transitionSpec = {
                     val shift = if (shiftAllowed) {
-                        if (forward) pageShiftPx else -pageShiftPx
+                        if (targetState == FsMenuPage.MAIN) -pageShiftPx else pageShiftPx
                     } else {
                         0
                     }
@@ -268,8 +270,11 @@ fun FsDropdown(
                             ) { -shift })
                 },
                 label = "fsMenuPage",
-            ) { _ ->
-                Column(content = { content(requestDismiss) })
+            ) { targetPage ->
+                Column(
+                    modifier = Modifier.verticalScroll(rememberScrollState()),
+                    content = { content(targetPage, requestDismiss) },
+                )
             }
         }
     }
@@ -277,6 +282,7 @@ fun FsDropdown(
 
 private class FsMenuPositionProvider(
     private val anchor: FsMenuAnchor,
+    private val preferAbove: Boolean,
     private val gapPx: Int,
     private val marginPx: Int,
 ) : PopupPositionProvider {
@@ -286,25 +292,21 @@ private class FsMenuPositionProvider(
         layoutDirection: LayoutDirection,
         popupContentSize: IntSize,
     ): IntOffset {
-        val x = if (anchor.alignEnd) {
-            anchor.rect.right.roundToInt() - popupContentSize.width
-        } else {
-            anchor.rect.left.roundToInt()
-        }
-        val maxX = (windowSize.width - popupContentSize.width - marginPx).coerceAtLeast(marginPx)
-        val aboveEdge = (anchor.aboveLimitRect ?: anchor.rect).top
-        val y = if (anchor.preferAbove) {
-            aboveEdge.roundToInt() - gapPx - popupContentSize.height
-        } else {
-            anchor.rect.bottom.roundToInt() + gapPx
-        }
-        val maxY = (windowSize.height - popupContentSize.height - marginPx).coerceAtLeast(marginPx)
-        return IntOffset(
-            x.coerceIn(marginPx, maxX),
-            y.coerceIn(marginPx, maxY),
+        return fsMenuPosition(
+            window = windowSize,
+            content = popupContentSize,
+            anchor = anchor.rect.toMenuIntRect(),
+            aboveLimit = anchor.aboveLimitRect?.top?.roundToInt(),
+            alignEnd = anchor.alignEnd,
+            preferAbove = preferAbove,
+            gap = gapPx,
+            margin = marginPx,
         )
     }
 }
+
+private fun Rect.toMenuIntRect() =
+    IntRect(left.roundToInt(), top.roundToInt(), right.roundToInt(), bottom.roundToInt())
 
 // ---- 行/标题件（暗色语言）----
 
@@ -452,6 +454,38 @@ fun FsMenuRow(
     }
 }
 
+/**
+ * 开关行（暗色菜单语言）：左侧文字 + 右侧 NpSwitch；整行可点（等同拨动开关）。
+ * 与 [FsMenuRow] 同 44dp 命中下界，视觉上并入同一列菜单行。
+ */
+@Composable
+fun FsMenuSwitchRow(
+    label: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = NpDimens.touchTarget)
+            .clip(RoundedCornerShape(10.dp))
+            .clickable { onCheckedChange(!checked) }
+            .padding(horizontal = 10.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = label,
+            style = NpTypography.bodyMedium,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        NpSwitch(checked = checked, onCheckedChange = onCheckedChange)
+    }
+}
+
 /** 分区小标题（mono 大写、55% 白） */
 @Composable
 fun FsMenuTitle(text: String) {
@@ -478,6 +512,7 @@ fun FsMenuCaption(text: String) {
 
 /** 滑杆行（亮度/音量）：标签 + 数值 + 滑杆，暗色配色 */
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun FsMenuSlider(
     label: String,
     icon: ImageVector,
@@ -512,6 +547,19 @@ fun FsMenuSlider(
             value = value.toFloat(),
             onValueChange = { onValueChange(it.roundToInt()) },
             valueRange = 0f..100f,
+            thumb = {
+                Box(
+                    Modifier.size(12.dp).clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            },
+            track = { sliderState ->
+                SliderDefaults.Track(
+                    sliderState = sliderState,
+                    drawStopIndicator = null,
+                    thumbTrackGapSize = 0.dp,
+                )
+            },
             colors = SliderDefaults.colors(
                 thumbColor = MaterialTheme.colorScheme.primary,
                 activeTrackColor = MaterialTheme.colorScheme.primary,
@@ -580,14 +628,10 @@ fun FsLoopChips(loopMode: NpLoopMode, onPick: (NpLoopMode) -> Unit) {
  */
 @Composable
 fun FsMainMenuContent(
-    speed: Float,
-    subtitleText: String,
     loopMode: NpLoopMode,
     brightnessPercent: Int,
     volumePercent: Int,
     favorited: Boolean,
-    queueSize: Int,
-    queueIndex: Int,
     hasChapters: Boolean,
     sleepLabel: String,
     sleepActive: Boolean,
@@ -600,6 +644,10 @@ fun FsMainMenuContent(
     onFavorite: () -> Unit,
     onScreenshot: () -> Unit,
     onSleep: () -> Unit,
+    /** 插件贡献的选项行（[PlaybackMenuContributor]，如弹幕开关）；渲染在列表尾部 */
+    contributors: List<PlaybackMenuContributor> = emptyList(),
+    contributorMedia: MediaItem? = null,
+    contributorPlayer: VideoPlayer? = null,
 ) {
     FsMenuHeader(title = "播放选项", onClose = onClose)
     FsMenuTitle("循环模式")
@@ -607,32 +655,6 @@ fun FsMainMenuContent(
     FsMenuTitle("画面与声音")
     FsMenuSlider(label = "亮度", icon = NpIcon.Sun, value = brightnessPercent, onValueChange = onBrightness)
     FsMenuSlider(label = "音量", icon = NpIcon.Sound, value = volumePercent, onValueChange = onVolume)
-    FsMenuTitle("播放")
-    FsMenuRow(
-        label = "播放倍速",
-        value = speedLabel(speed),
-        icon = NpIcon.Speed,
-        active = kotlin.math.abs(speed - 1f) >= 0.001f,
-        chevron = true,
-        onClick = { onPage(FsMenuPage.SPEED) },
-    )
-    FsMenuRow(
-        label = "字幕",
-        value = subtitleText,
-        icon = NpIcon.Subtitle,
-        active = subtitleText != "关闭",
-        chevron = true,
-        onClick = { onPage(FsMenuPage.SUBTITLE) },
-    )
-    if (queueSize > 1) {
-        FsMenuRow(
-            label = "选集",
-            value = "${queueIndex + 1} / $queueSize",
-            icon = NpIcon.QueueMusic,
-            chevron = true,
-            onClick = { onPage(FsMenuPage.EPISODES) },
-        )
-    }
     FsMenuTitle("更多")
     FsMenuRow(label = "音轨", icon = NpIcon.Sound, chevron = true, onClick = { onPage(FsMenuPage.AUDIO) })
     FsMenuRow(label = "画面", icon = NpIcon.AspectRatio, chevron = true, onClick = { onPage(FsMenuPage.PICTURE) })
@@ -653,14 +675,22 @@ fun FsMainMenuContent(
         active = favorited,
         onClick = onFavorite,
     )
+    contributors.sortedBy { it.order }.forEach { contributor ->
+        contributor.RenderRows(
+            dark = true,
+            media = contributorMedia,
+            player = contributorPlayer,
+        )
+    }
 }
 
-/** 微调步进钮（L14）：与档位行分开——它改的是当前值的 ±0.05，不是跳档 */
+/** 微调步进钮（L14）：与档位行分开——它改的是当前值的 ±0.05，不是跳档。
+ * 2026-10-12 用户裁定"两个白色块变小/变窄"：44dp 方块收成 56×34 的窄条。 */
 @Composable
 private fun FsMenuStepButton(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .size(44.dp)
+            .heightIn(min = 34.dp)
             .clip(RoundedCornerShape(NpRadius.button))
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .npClickable(onClick = onClick),
@@ -670,12 +700,20 @@ private fun FsMenuStepButton(label: String, onClick: () -> Unit) {
             text = label,
             style = NpMono,
             color = MaterialTheme.colorScheme.onSurface,
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
         )
     }
 }
 
-/** 倍速页：纵向档位列表（替代横向选择条）+ 0.05 微调行（L14） */
+/**
+ * 倍速页（2026-10-12 用户裁定重排）。
+ *
+ *  - 档位从"十档纵向列表"收成**六档两行 chips**（0.25 / 0.5 / 1 / 1.5 / 2 / 3）——
+ *    原列表把整个菜单占满，用户实报"倍速列表占比过大"；
+ *  - 微调行两侧步进钮收窄，**当前速度居中**（原布局里值紧贴左钮，读起来偏左）。
+ */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun FsSpeedMenuContent(
     speed: Float,
     onPick: (Float) -> Unit,
@@ -685,52 +723,89 @@ fun FsSpeedMenuContent(
     FsMenuBackRow(title = "播放倍速", onBack = onBack)
     // 微调行（L14）：档位表覆盖不到「就要 1.1x」这类手感；两步 = ±0.05，长按不加速
     // （长按加速与 §4.3 的长按 3× boost 语义冲突，这里不做第二套）。
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = NpSpace.sm),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(NpSpace.sm),
+    FlowRow(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = NpSpace.sm),
+        horizontalArrangement = Arrangement.spacedBy(NpSpace.sm, Alignment.CenterHorizontally),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         FsMenuStepButton(label = "-0.05", onClick = { onNudge(-SPEED_FINE_STEP) })
         Text(
             text = speedLabel(speed),
             style = NpMono,
+            textAlign = TextAlign.Center,
             color = if (kotlin.math.abs(speed - 1f) < 0.001f) {
-                MaterialTheme.colorScheme.onSurfaceVariant
+                Color.White
             } else {
                 MaterialTheme.colorScheme.primary
             },
-            modifier = Modifier.weight(1f),
+            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
         )
         FsMenuStepButton(label = "+0.05", onClick = { onNudge(SPEED_FINE_STEP) })
     }
-    SPEED_PRESETS_ALL.forEach { preset ->
-        val on = kotlin.math.abs(preset - speed) < 0.001f
-        FsMenuRow(
-            label = speedLabel(preset),
-            active = on,
-            check = on,
-            onClick = { onPick(preset) },
-        )
+    // 六档 chips：两行三列，占高约为原十档列表的三分之一。
+    Column(
+        modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        val columns = if (LocalDensity.current.fontScale > 1.3f) 2 else 3
+        SPEED_PRESETS.chunked(columns).forEach { rowPresets ->
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                rowPresets.forEach { preset ->
+                    val on = kotlin.math.abs(preset - speed) < 0.001f
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .clip(RoundedCornerShape(11.dp))
+                            .background(
+                                if (on) MaterialTheme.colorScheme.primary else Color.White.copy(alpha = 0.06f),
+                            )
+                            .border(
+                                1.dp,
+                                if (on) Color.Transparent else Color.White.copy(alpha = 0.18f),
+                                RoundedCornerShape(11.dp),
+                            )
+                            .clickable { onPick(preset) }
+                            .padding(vertical = 9.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = speedLabel(preset),
+                            style = NpMono,
+                            color = if (on) MaterialTheme.colorScheme.onPrimary else Color.White,
+                        )
+                    }
+                }
+            }
+        }
     }
     FsMenuCaption("变速保持音调")
 }
 
-/** 字幕页：关闭/内嵌轨/外挂挂载/偏移 */
+/** 字幕页：开关/内嵌轨/外挂挂载/偏移 */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 fun FsSubtitleMenuContent(
     subtitleOn: Boolean,
     subtitleLoaded: Boolean,
     savedSubtitleName: String?,
     textTracks: List<NpTrack>,
     offsetMs: Long,
-    onOff: () -> Unit,
+    onSetEnabled: (Boolean) -> Unit,
     onPickTrack: (NpTrack) -> Unit,
     onMountExternal: () -> Unit,
     onOffset: (Long) -> Unit,
     onBack: () -> Unit,
 ) {
     FsMenuBackRow(title = "字幕", onBack = onBack)
-    FsMenuRow(label = "关闭字幕", check = !subtitleOn, onClick = onOff)
+    // 开关行（2026-10-12 用户裁定："字幕选项里做一个滑块开关"；旧「关闭字幕」行点击
+    // 只走引擎卸载，实报"点击关闭无效"）。开关同时驱动**渲染总开关**
+    // （settings.subtitleEnabled，外挂/内嵌/PGS 一律受它门控）与引擎侧卸载/复原——
+    // 与竖屏「字幕设置」面板的开关同一语义、同一写路径。
+    FsMenuSwitchRow(
+        label = "显示字幕",
+        checked = subtitleOn,
+        onCheckedChange = onSetEnabled,
+    )
     FsMenuRow(
         label = "挂载外挂字幕…",
         check = subtitleLoaded,
@@ -771,15 +846,15 @@ fun FsSubtitleMenuContent(
     }
     // E131：与竖屏「字幕设置」面板统一成**绝对档位**（−1.0s / −0.1s / 0 / +0.1s / +1.0s），
     // 两处语义一致；旧的 ±50/±250ms 累加式会让人算不清当前值。选中档高亮。
-    Row(
+    FlowRow(
         modifier = Modifier.padding(horizontal = 10.dp, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         SUBTITLE_DELAY_STEPS_MS.forEach { step ->
             val selected = step == offsetMs
             Box(
                 modifier = Modifier
-                    .weight(1f)
                     .clip(RoundedCornerShape(9.dp))
                     .background(
                         if (selected) {
@@ -789,7 +864,7 @@ fun FsSubtitleMenuContent(
                         },
                     )
                     .clickable { onOffset(step) }
-                    .padding(vertical = 8.dp),
+                    .padding(horizontal = 8.dp, vertical = 8.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(

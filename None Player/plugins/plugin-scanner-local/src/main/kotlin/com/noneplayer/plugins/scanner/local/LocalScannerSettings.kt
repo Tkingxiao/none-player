@@ -41,7 +41,11 @@ class LocalScannerSettings(private val source: LocalMediaSource) : SettingsProvi
         val scope = rememberCoroutineScope()
         val scanning by source.scanning.collectAsStateWithLifecycle()
         val last by source.lastScan.collectAsStateWithLifecycle()
-        val folderUris by source.settings.scanFolderUris.collectAsStateWithLifecycle(initialValue = emptyList())
+        val folderUris by source.settings.scanFolderUris.collectAsStateWithLifecycle(
+            // 首帧取进程级快照（E105）：初值给 emptyList() 会把"还没读到"当成"确实没配"，
+            // 设置页重进时闪一帧"未选择（选择后才会扫描该目录下的媒体）"
+            initialValue = source.settings.scanFolderUrisSnapshot ?: emptyList(),
+        )
 
         val folderPicker = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocumentTree(),

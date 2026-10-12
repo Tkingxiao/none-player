@@ -21,6 +21,7 @@ class PlayerDeepLinkTemplateTest {
     private fun shape(vararg keys: String) = "noneplayer://player?" + keys.joinToString("&") { "$it={$it}" }
 
     private val emitted = listOf(
+        shape("uri", "title", "mime", "id", "from", "fs", "audio"),
         // 内部导航与详情页/右栏：全量形状
         shape("uri", "title", "mime", "id", "from", "fs"),
         // 通知/锁屏/PiP 回跳（PlaybackService.deepLinkPendingIntent）：只带 uri 与权威 id

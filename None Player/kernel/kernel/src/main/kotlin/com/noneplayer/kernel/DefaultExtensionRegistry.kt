@@ -22,7 +22,15 @@ class DefaultExtensionRegistry : ExtensionRegistry {
     private val extensions = ConcurrentHashMap<Class<*>, MutableStateFlow<List<Any>>>()
 
     override fun <T : ExtensionPoint> register(clazz: Class<T>, extension: T) {
-        synchronized(lock) { flowFor(clazz).update { it + extension } }
+        // 注册**按实例幂等**：同一实例在同一键下重复注册是 no-op，而不是记两遍。
+        // 2026-10-12 release 实报闪退的根因就踩在这条上——R8 类合并把两个扩展接口
+        // 合成同一个运行时 Class，于是 `register(A::class.java, x)` 与
+        // `register(B::class.java, x)` 落进同一个桶，`query<A>()` 返回 x 两份。
+        // keep 规则（app/proguard-rules.pro）已杜绝合并；这里再钉一遍幂等语义：
+        // 查询结果里同一实例永远只出现一次，注册方的重复调用也不再是隐患。
+        synchronized(lock) {
+            flowFor(clazz).update { list -> if (list.any { it === extension }) list else list + extension }
+        }
     }
 
     override fun <T : ExtensionPoint> unregister(clazz: Class<T>, extension: T) {
@@ -43,5 +51,5 @@ class DefaultExtensionRegistry : ExtensionRegistry {
 
     @Suppress("UNCHECKED_CAST")
     private fun <T : ExtensionPoint> castList(clazz: Class<T>, list: List<Any>): List<T> =
-        list.filter { clazz.isInstance(it) }.map { clazz.cast(it) }
+        list.filter { clazz.isInstance(it) }.map { clazz.cast(it) as T }
 }

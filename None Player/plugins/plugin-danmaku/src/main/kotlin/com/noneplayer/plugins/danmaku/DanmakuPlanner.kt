@@ -27,8 +27,6 @@ object DanmakuPlanner {
         val areaFraction: Float,
         /** 滚动速度倍率 */
         val speed: Float,
-        /** 用户字号倍率 */
-        val fontScale: Float,
         /** 同屏密度上限，0 = 不限 */
         val maxOnScreen: Int,
     )
@@ -85,7 +83,10 @@ object DanmakuPlanner {
         }.let { if (config.maxOnScreen > 0) it.takeLast(config.maxOnScreen) else it }
         if (window.isEmpty()) return emptyList()
 
-        val baseTextPx = (laneHeightPx / 1.4f) * config.fontScale
+        // 基准字号从行高反推：行高由 Overlay 按 `画面高 × 0.04 × 倍率 × 1.4` 给出，
+        // 已含用户字号倍率。此前这里再乘一次 config.fontScale，字号被平方放大
+        // 而轨道只乘一次——1.5× 档字高就超过行高了，静默允许时相邻轨道会重叠。
+        val baseTextPx = laneHeightPx / 1.4f
         // 三种模式轨道数一致（同占层内等高轨道）；各模式独立顺序编号 → 取模散轨
         val lanes = maxOf(1, floorDiv(layerHeight, laneHeightPx))
         var scrollNo = 0

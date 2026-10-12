@@ -81,4 +81,92 @@ class FilenameParserTest {
         assertEquals("HEVC", FilenameParser.parse("a 01 x265.mkv")!!.codec)
         assertEquals("AVC", FilenameParser.parse("a 01 h.264.mkv")!!.codec)
     }
+
+    @Test
+    fun `物语标题的括号副标题不会丢失`() {
+        val parsed = FilenameParser.parse("[VCB-Studio] Nekomonogatari (Shiro) [02][Ma10p_1080p][x265_flac].mkv")!!
+        assertEquals("Nekomonogatari Shiro", parsed.title)
+        assertEquals(2, parsed.episode)
+    }
+
+    @Test
+    fun `双语方括号标题都保留`() {
+        val parsed = FilenameParser.parse("[终物语][Owarimonogatari][12][1080p][HEVC].mkv")!!
+        assertEquals("终物语 Owarimonogatari", parsed.title)
+        assertEquals(12, parsed.episode)
+    }
+
+    @Test
+    fun `编码小数与位深不会被当成集号`() {
+        val parsed = FilenameParser.parse("Owarimonogatari - 03 [h.264][10bit].mkv")!!
+        assertEquals("Owarimonogatari", parsed.title)
+        assertEquals(3, parsed.episode)
+    }
+
+    @Test
+    fun `季与集标记一起从标题清理`() {
+        val parsed = FilenameParser.parse("剧集 第二季 第三集.mp4")!!
+        assertEquals("剧集", parsed.title)
+        assertEquals(2, parsed.season)
+        assertEquals(3, parsed.episode)
+    }
+
+    @Test
+    fun `没有扩展名的点分标题不会被截断`() {
+        assertEquals("Show", FilenameParser.parse("Show.S01E02")!!.title)
+        assertEquals(2, FilenameParser.parse("Show.S01E02")!!.episode)
+    }
+
+    @Test fun technicalChannelDimensionsAndChecksumAreNotEpisodes() {
+        val parsed = FilenameParser.parse("Owarimonogatari [07][1920x1080][AAC 2.0][ABCDEF12].mkv")!!
+        assertEquals("Owarimonogatari", parsed.title)
+        assertEquals(7, parsed.episode)
+    }
+
+    @Test fun underscoreCodecTagsStillPublishCodec() {
+        val parsed = FilenameParser.parse("[VCB-Studio] Nekomonogatari [02][x265_flac].mkv")!!
+        assertEquals(2, parsed.episode)
+        assertEquals("HEVC", parsed.codec)
+    }
+
+    @Test fun openingLabelDoesNotExposeSequelNumberAsEpisode() {
+        assertNull(FilenameParser.parse("Show 2 NCOP [1080p].mkv"))
+    }
+
+    @Test fun saioMonogatariKeepsSubtitleAndEpisode() {
+        val cat = FilenameParser.parse(
+            "[SAIO-Raws] Nekomonogatari (Shiro) 01 [BD 1920x1080 HEVC-10bit OPUSx2 ASSx4].mkv",
+        )!!
+        assertEquals("Nekomonogatari Shiro", cat.title)
+        assertEquals(1, cat.episode)
+        assertEquals("HEVC", cat.codec)
+
+        val ended = FilenameParser.parse(
+            "[SAIO-Raws] Owarimonogatari 13 END [BD 1920x1080 HEVC-10bit OPUSx2 ASSx4].mkv",
+        )!!
+        assertEquals("Owarimonogatari", ended.title)
+        assertEquals(13, ended.episode)
+
+        val sequel = FilenameParser.parse(
+            "[SAIO-Raws] Zoku Owarimonogatari 02 [BD 1920x1080 HEVC-10bit OPUSx3 ASSx4].mkv",
+        )!!
+        assertEquals("Zoku Owarimonogatari", sequel.title)
+        assertEquals(2, sequel.episode)
+    }
+
+    @Test fun channelLayoutAndRecapAreNotEpisodes() {
+        val parsed = FilenameParser.parse("终物语 03 AAC5.1.mkv")
+        assertEquals("终物语", parsed?.title)
+        assertEquals(3, parsed?.episode)
+        assertNull(FilenameParser.parse("[SAIO-Raws] Nekomonogatari (Shiro) Recap 01 [BD 1920x1080 HEVC-10bit OPUS ASSx2].mkv")?.episode?.takeIf { it > 0 })
+        assertNull(FilenameParser.parse("[SAIO-Raws] Zoku Owarimonogatari NCED 01 [BD 1920x1080 HEVC-10bit OPUSx2].mkv")?.episode?.takeIf { it > 0 })
+        assertNull(FilenameParser.parse("[SAIO-Raws] Hanamonogatari NCOP [BD 1920x1080 HEVC-10bit OPUS].mkv"))
+    }
+
+    @Test fun hi10pAfterEpisodeDoesNotSwallowTheNumber() {
+        val parsed = FilenameParser.parse("[VCB-Studio] Nekomonogatari Kuro [01][Hi10p_1080p][x264_flac].mkv")!!
+        assertEquals("Nekomonogatari Kuro", parsed.title)
+        assertEquals(1, parsed.episode)
+        assertEquals("AVC", parsed.codec)
+    }
 }

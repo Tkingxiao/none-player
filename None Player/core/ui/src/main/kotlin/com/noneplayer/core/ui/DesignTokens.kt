@@ -187,17 +187,54 @@ object NpDimens {
  * （`ContrastPolicyTest`），所以生产与测试共用这一个函数，公式即规范。
  */
 fun npContrastRatio(fg: Color, bg: Color): Double {
-    fun linear(channel: Float): Double {
-        val c = channel.toDouble()
-        return if (c <= 0.03928) c / 12.92 else Math.pow((c + 0.055) / 1.055, 2.4)
-    }
-    fun luminance(color: Color): Double =
-        0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
-    val a = luminance(fg)
-    val b = luminance(bg)
+    val a = npRelativeLuminance(fg)
+    val b = npRelativeLuminance(bg)
     val hi = maxOf(a, b)
     val lo = minOf(a, b)
     return (hi + 0.05) / (lo + 0.05)
+}
+
+/**
+ * 人眼相对亮度（WCAG）：先把 sRGB 线性化，再按 0.2126 / 0.7152 / 0.0722 加权。
+ * 直接对 gamma 编码的通道加权会在中间调上选错黑白字。
+ */
+fun npRelativeLuminance(color: Color): Double {
+    fun linear(channel: Float): Double {
+        val c = channel.toDouble()
+        return if (c <= 0.04045) c / 12.92 else Math.pow((c + 0.055) / 1.055, 2.4)
+    }
+    return 0.2126 * linear(color.red) + 0.7152 * linear(color.green) + 0.0722 * linear(color.blue)
+}
+
+/**
+ * 按背景的相对亮度选择前景字色。比较的是深色字与浅色字谁的对比度更高，
+ * 不是固定 0.5 阈值——封面偏亮时用深字，偏暗时用浅字。
+ */
+fun npInkForBackdrop(theme: InkTokens, backdrop: Color): InkTokens {
+    val lightText = npContrastRatio(NpInkDark.fg, backdrop)
+    val darkText = npContrastRatio(NpInkLight.fg, backdrop)
+    val source = if (lightText >= darkText) NpInkDark else NpInkLight
+    return if (source.fg == theme.fg && source.muted == theme.muted) theme else theme.copy(
+        fg = source.fg,
+        muted = source.muted,
+    )
+}
+
+/** Bound any cover color by testing the worst (opposite-theme) background after compositing. */
+fun npReadableBackdropAlpha(ink: InkTokens): Float {
+    val worst = if (ink.isDark) Color.White else Color.Black
+    for (step in 0..100) {
+        val alpha = step / 100f
+        val background = Color(
+            ink.bg.red * alpha + worst.red * (1f - alpha),
+            ink.bg.green * alpha + worst.green * (1f - alpha),
+            ink.bg.blue * alpha + worst.blue * (1f - alpha),
+        )
+        if (npContrastRatio(ink.fg, background) >= 7.0 &&
+            npContrastRatio(ink.muted, background) >= 4.5
+        ) return (alpha + 0.02f).coerceAtMost(1f)
+    }
+    return 1f
 }
 
 /**

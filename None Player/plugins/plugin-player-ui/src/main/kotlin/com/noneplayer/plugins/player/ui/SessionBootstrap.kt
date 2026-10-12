@@ -66,7 +66,12 @@ internal suspend fun ensureSessionPlaying(
 ): SessionStart {
     if (!isPlayableUriScheme(item.uri)) return SessionStart(accepted = false)
     player.awaitReady()
-    val sameMedia = player.currentUri.value == item.uri
+    val sameMedia = canReusePlayback(
+        player.currentUri.value,
+        session.queue.value.getOrNull(session.index.value),
+        item,
+        player.state.value,
+    )
     if (!sameMedia) {
         val queue = resolveFolderQueue(registry, item.uri, item.id)
         // 先 id 再 uri（与 E79 同一纪律）：`.cue` 分轨的 N 轨共享同一 uri，
@@ -90,6 +95,8 @@ internal suspend fun ensureSessionPlaying(
         val startMs = if (restorePosition && resumable) saved else 0L
         // 断点经 setQueue 的 startPositionMs 下发（prepare 时套用）——事后 seekTo 在
         // 控制器未就绪时会被丢弃，续播会静默回到 0（模拟器实测）
+        // An item without an external subtitle must not inherit the previous item's file.
+        player.setSubtitle(null)
         session.open(
             item = authoritative ?: item,
             queueOfFolder = queue,
@@ -115,6 +122,7 @@ internal suspend fun ensureSessionPlaying(
                 player.setSubtitle(prepared.uri)
             }
         }
+        player.setTextTracksEnabled(settings.subtitleEnabled.first())
         player.play()
         return SessionStart(accepted = true, resumedFromMs = startMs, subtitleMissing = subtitleMissing)
     } else {
@@ -134,3 +142,16 @@ internal suspend fun ensureSessionPlaying(
 
 /** 断点起播门槛：低于它视为"没看过"，从头播（与历史落盘门槛同为 10s 之一半的宽松档） */
 private const val RESUME_MIN_MS = 5_000L
+
+internal fun canReusePlayback(
+    currentUri: String?,
+    sessionItem: MediaItem?,
+    requestedItem: MediaItem,
+    state: PlaybackState,
+): Boolean {
+    if (state is PlaybackState.Error) return false
+    val queuedMatch = sessionItem?.uri == requestedItem.uri &&
+        (requestedItem.id.isEmpty() || sessionItem.id == requestedItem.id)
+    // A newly mounted pane must not restart a queue still undergoing format probing.
+    return queuedMatch && (currentUri == requestedItem.uri || state == PlaybackState.Buffering)
+}

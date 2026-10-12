@@ -132,6 +132,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var currentArtworkUri: String? = null
     private var subtitleUri: String? = null
     private var mountedSubtitleUri: String? = null
+    private var textTracksEnabled = true
 
     // E39/E41：探测期间的挂起操作与轨道信息
     private var prepareJob: Job? = null
@@ -144,6 +145,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var autoplayNext = true
 
     private var appliedUri: String? = null
+    private var loadPending = false
+    private var currentMediaId: String = ""
+    private var appliedItems: List<MediaItem> = emptyList()
     private var probedContainer: String? = null
     private var probedVideoCodec: String? = null
     private var probedAudioCodec: String? = null
@@ -246,11 +250,27 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                         }
 
                         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                            _currentUri.value = mediaItem?.localConfiguration?.uri?.toString()
+                            if (loadPending) return
+                            val index = c.currentMediaItemIndex
+                            // MediaController's Binder snapshot may omit LocalConfiguration.
+                            // Keep the submitted item's URI/subtitles, and validate its identity.
+                            val localItem = appliedItems.getOrNull(index)
+                                ?.takeIf { it.mediaId == mediaItem?.mediaId }
+                            if (mediaItem != null && localItem == null) return
+                            clearCues()
+                            _currentUri.value = localItem?.localConfiguration?.uri?.toString()
+                            currentMediaUri = _currentUri.value
+                            appliedUri = currentMediaUri
+                            currentMediaId = mediaItem?.mediaId.orEmpty()
+                            mountedSubtitleUri = localItem?.localConfiguration?.subtitleConfigurations
+                                ?.firstOrNull()?.uri?.toString()
+                            subtitleUri = mountedSubtitleUri
                             // 队列下标跟随会话（自动连播推进到下一集时也要更新，
                             // 否则迷你条/选集面板会一直停在旧下标）
-                            val index = c.currentMediaItemIndex
-                            if (index != _currentIndex.value) _currentIndex.value = index
+                            // Clearing the engine after a failed probe is not a queue transition.
+                            if (mediaItem != null && index in _queue.value.indices &&
+                                index != _currentIndex.value
+                            ) _currentIndex.value = index
                         }
 
                         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -274,8 +294,20 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
                         // E1：字幕 Cue 出口——外挂与内嵌轨道统一从这里流向 UI 字幕浮层
                         override fun onCues(cueGroup: CueGroup) {
+                            if (loadPending) return
                             val mapped = cueGroup.cues.map { it.toKernelCue() }
                             pushCues(controller?.currentPosition?.coerceAtLeast(0) ?: 0L, mapped)
+                        }
+
+                        override fun onPositionDiscontinuity(
+                            oldPosition: Player.PositionInfo,
+                            newPosition: Player.PositionInfo,
+                            reason: Int,
+                        ) {
+                            // 同一条目里 seek 后，文本渲染器可能再次吐出与上次相同的 Cue。
+                            // 会话控制器会丢掉重复回调；这里若清空，晚挂字幕就一直空白。
+                            // 换条目的清空仍由 onMediaItemTransition 负责。
+                            if (oldPosition.mediaItemIndex != newPosition.mediaItemIndex) clearCues()
                         }
 
                         // 批次 3：内嵌轨道枚举（音轨/字幕面板的数据源）
@@ -303,6 +335,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     // 会话侧默认"播完自动推进"：连接建立后补发一次当前偏好，
                     // 否则"关闭自动连播"在重建控制器后（换 mime / 重进）会失效
                     sendAutoplayFlag()
+                    setTextTracksEnabled(textTracksEnabled)
                     connected.complete(c)
                     scope.launch { pollPosition(c) }
                 } catch (t: Throwable) {
@@ -363,6 +396,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * 直接进入结构化失败态（省掉 3–8s 白转圈）；探测通过/无结论才装载媒体。
      */
     override fun prepare(uri: String, mimeType: String, title: String, artworkUri: String?) {
+        currentMediaId = ""
         currentMediaUri = uri
         currentMimeType = mimeType
         currentTitle = title
@@ -392,6 +426,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         apply: () -> Unit,
     ) {
         prepareJob?.cancel()
+        loadPending = true
+        appliedUri = null
+        clearCues()
         // 用户已经动手切了，就别再替他猜：预探测和这一次真探测走同一条磁盘通道，
         // 平板实测撞上时单条探测从 589ms 涨到 1799ms——预热反倒拖慢了切换。
         prefetchJob?.cancel()
@@ -406,6 +443,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             if (myGeneration != prepareGeneration) return@launch // 已有更新的装载，丢弃
             when (probe) {
                 is FormatProbe.Result.Unplayable -> {
+                    loadPending = false
                     appliedUri = null
                     probedContainer = probe.failure.container
                     probedVideoCodec = probe.failure.videoCodec
@@ -544,6 +582,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         //
         // 这里对**即将播放的那一项**做探测：不可解则不装载队列，直接落结构化失败态。
         val target = items[safeIndex]
+        setCurrentTarget(target)
         probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
             applyQueue(mediaItemsOf(items), safeIndex, startPositionMs)
         }
@@ -558,6 +597,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         startPositionMs: Long,
     ) {
         val c = controller ?: return
+        // 同 [applyMedia]：任何一次新装载都放下失败闩（旧错误面板不许跨媒体残留）
+        terminalFailure = false
         _queue.value.let { if (it.isNotEmpty()) _currentUri.value = it[safeIndex].uri }
         // 批次 3 修复：队列路径此前从不带 SubtitleConfiguration——字幕记忆/同名挂载
         // 在"进页即 setQueue"的主流程上整体失效（applyMedia 只服务单媒体项路径）。
@@ -576,6 +617,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         } else {
             mediaItems
         }
+        appliedUri = items[safeIndex].localConfiguration?.uri?.toString()
+        appliedItems = items
+        mountedSubtitleUri = subtitle
+        loadPending = false
         c.setMediaItems(items, safeIndex, startPositionMs.coerceAtLeast(0L))
         c.prepare()
         c.play()
@@ -602,6 +647,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         if (index !in items.indices) return
         _currentIndex.value = index
         val target = items[index]
+        subtitleUri = null
+        mountedSubtitleUri = null
+        pendingSeekMs = null
+        setCurrentTarget(target)
         probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
             applyQueue(mediaItemsOf(items), index, 0L)
         }
@@ -616,6 +665,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * 的话，迷你条会把"什么都没装载"画成"快播完了"。
      */
     override fun clearQueue() {
+        prepareJob?.cancel()
+        prefetchJob?.cancel()
+        prepareGeneration++
+        terminalFailure = false
         val c = controller
         runCatching { c?.stop() }
         runCatching { c?.clearMediaItems() }
@@ -627,23 +680,32 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         _bufferedPositionMs.value = 0L
         pendingSeekMs = null
         appliedUri = null
+        appliedItems = emptyList()
+        loadPending = false
+        currentMediaUri = null
+        currentMediaId = ""
+        currentArtworkUri = null
+        currentTitle = ""
+        subtitleUri = null
+        mountedSubtitleUri = null
+        _state.value = PlaybackState.Idle
+        clearCues()
+        _decodeNotice.value = null
     }
 
     override fun playNext() {
-        val c = controller ?: return
-        if (c.hasNextMediaItem()) {
+        val next = _currentIndex.value + 1
+        if (next in _queue.value.indices) {
             NpPerf.begin("nav next")
-            c.seekToNextMediaItem()
-            c.play()
+            selectQueueIndex(next)
         }
     }
 
     override fun playPrevious() {
-        val c = controller ?: return
-        if (c.hasPreviousMediaItem()) {
+        val previous = _currentIndex.value - 1
+        if (previous in _queue.value.indices) {
             NpPerf.begin("nav previous")
-            c.seekToPreviousMediaItem()
-            c.play()
+            selectQueueIndex(previous)
         }
     }
 
@@ -729,7 +791,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val previous = subtitleUri
         subtitleUri = uri
         val media = currentMediaUri ?: return
-        val c = controller ?: return
+        controller ?: return
         when {
             uri == previous -> Unit
             uri == null && mountedSubtitleUri != null ->
@@ -737,9 +799,75 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             uri != null && uri == mountedSubtitleUri ->
                 setTextTracksEnabled(true)
             // 更换字幕文件：唯一需要重建媒体项的分支（探测未完成时由 applyMedia 带上）
-            media == appliedUri -> applyMedia(media)
+            canRemountCurrentItem(media) -> replaceCurrentSubtitle()
             else -> Unit
         }
+    }
+
+    private fun clearCues() {
+        cueHistory.clear()
+        _cues.value = emptyList()
+    }
+
+    private fun setCurrentTarget(item: com.noneplayer.core.media.MediaItem) {
+        currentMediaUri = item.uri
+        currentMediaId = item.id
+        currentMimeType = item.mimeType
+        currentTitle = item.title
+        currentArtworkUri = item.coverUri
+    }
+
+    /** Preserve the actual item, including identity, metadata and CUE clipping. */
+    @OptIn(UnstableApi::class)
+    private fun replaceCurrentSubtitle() {
+        val c = controller ?: return
+        val items = appliedItems
+        if (items.isEmpty()) {
+            currentMediaUri?.let { applyMedia(it) }
+            return
+        }
+        val index = _currentIndex.value.takeIf { it in items.indices }
+            ?: c.currentMediaItemIndex.takeIf { it in items.indices }
+            ?: return
+        val local = items[index]
+        val position = pendingSeekMs ?: c.currentPosition.coerceAtLeast(0L)
+        val playWhenReady = c.playWhenReady
+        val subtitles = subtitleUri?.let { listOf(subtitleConfiguration(it)) }.orEmpty()
+        // 控制器回传的 MediaItem 会丢掉 LocalConfiguration，不能拿它的 mediaId/uri 当闸门。
+        // replaceMediaItem 对当前项的外挂字幕经常不重新挂上；整表 setMediaItems 是
+        // 探测期间挂字幕已经验证过的路径，同时保留队列、mediaId、标题和裁剪窗口。
+        val replacement = local.buildUpon()
+            .setSubtitleConfigurations(subtitles).build()
+        val updated = items.toMutableList().also { it[index] = replacement }
+        appliedItems = updated
+        val mediaUri = local.localConfiguration?.uri?.toString()
+        if (mediaUri != null) {
+            appliedUri = mediaUri
+            currentMediaUri = mediaUri
+        }
+        currentMediaId = local.mediaId
+        c.setMediaItems(updated, index, position.coerceAtLeast(0L))
+        c.prepare()
+        c.playWhenReady = playWhenReady
+        mountedSubtitleUri = subtitleUri
+        setTextTracksEnabled(textTracksEnabled)
+    }
+
+    /**
+     * 晚挂字幕时，控制器侧 URI 和本地提交的 URI 可能只差 `file:/` 与 `file:///`。
+     * 字符串相等会让 [setSubtitle] 直接返回，外挂字幕永远不进当前队列项。
+     */
+    private fun canRemountCurrentItem(media: String): Boolean {
+        if (loadPending || appliedItems.isEmpty()) return false
+        if (sameMediaUri(media, appliedUri)) return true
+        val index = _currentIndex.value.takeIf { it in appliedItems.indices } ?: return false
+        return sameMediaUri(media, appliedItems[index].localConfiguration?.uri?.toString())
+    }
+
+    private fun sameMediaUri(a: String?, b: String?): Boolean {
+        if (a.isNullOrBlank() || b.isNullOrBlank()) return false
+        if (a == b) return true
+        return runCatching { a.toUri() == b.toUri() }.getOrDefault(false)
     }
 
     /**
@@ -747,6 +875,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * 批次 3 起是公开契约：字幕面板的"关闭内嵌字幕"与外挂挂载共用同一开关（E32）。
      */
     override fun setTextTracksEnabled(enabled: Boolean) {
+        textTracksEnabled = enabled
         val c = controller ?: return
         c.trackSelectionParameters = c.trackSelectionParameters
             .buildUpon()
@@ -1048,12 +1177,19 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     @OptIn(UnstableApi::class)
     private fun applyMedia(mediaUri: String) {
         val c = controller ?: return
+        // 失败闩必须随**任何一次新装载**放下（用户实报：看过不可播的视频后换别的视频，
+        // 旧错误面板一直挂着）。闩的本意是"stop+clearMediaItems 之后 Error 不许被
+        // Idle 冲掉"，但此前只在 probeThenLoad 里复位——凡是不经探测的装载路径
+        // （同媒体续播、预载命中、字幕重建之外的直装等）都会带着闩进来：引擎其实
+        // 已经在新视频上正常播放，状态监听却被闩住，UI 停在上一支的 Error 上。
+        terminalFailure = false
         // E74 修复：此前恢复位置只读 c.currentPosition，没有优先消费未落实的
         // pendingSeekMs——几乎同时切字幕与拖动进度条时，字幕触发的媒体项重建会用
         // 稍微过期的位置恢复播放，产生极窄的"位置回退"窗口。
         val position = pendingSeekMs ?: c.currentPosition
         val wasPlaying = c.isPlaying || c.playWhenReady
         val builder = MediaItem.Builder()
+            .setMediaId(currentMediaId)
             .setUri(mediaUri)
             .setMimeType(currentMimeType)
             .apply {
@@ -1091,6 +1227,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             builder.setSubtitleConfigurations(listOf(subtitleConfiguration(sub)))
         }
         val item = builder.build()
+        loadPending = false
         // 队列完整性（E32 后续）：字幕更换需要重建**当前媒体项**（SubtitleConfiguration
         // 烘焙在 MediaItem 里，改不了），但**不能**用 setMediaItem——那是"替换整个队列为
         // 单项"，会把同文件夹队列连同通知栏 ⏮⏭ 一起清掉，连播随即失效。
@@ -1101,11 +1238,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             currentQueueItem?.uri == mediaUri &&
             c.currentMediaItemIndex in 0 until c.mediaItemCount
         if (replaceInPlace) {
+            appliedItems = appliedItems.toMutableList().apply { this[c.currentMediaItemIndex] = item }
             c.replaceMediaItem(c.currentMediaItemIndex, item)
             c.prepare()
             // replaceMediaItem 把位置重置到该项起点，需显式还原（含待落实 seek）
             c.seekTo(position)
         } else {
+            appliedItems = listOf(item)
             c.setMediaItem(item, position)
             c.prepare()
         }
@@ -1116,8 +1255,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         }
         appliedUri = mediaUri
         mountedSubtitleUri = subtitleUri
-        // 媒体项重建后保证文本轨开启（清除态不经此路径，不会被误开）
-        setTextTracksEnabled(true)
+        setTextTracksEnabled(textTracksEnabled)
         if (wasPlaying) c.play()
     }
 

@@ -68,6 +68,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
@@ -145,6 +146,7 @@ import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.PermissionProvider
+import com.noneplayer.kernel.api.ScanFolderController
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
@@ -216,11 +218,22 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // 跨 Tab 跳转通道（首页"文件夹"区块 → 文件夹 Tab）。见 [FolderNav] 与
     // `LocalNpTabSwitcher` 的说明：Tab 路由在内层导航图，拼外层路由会崩。
     val switchTab = LocalNpTabSwitcher.current
-
+    // ---- 扫描目录管理（统一入口）----
+    // 「文件夹管理界面」此前只在设置页深处；本页把它收成一处：文件夹 Tab 根层的
+    // 入口行打开管理面板；首页文件夹区块只浏览目录，不进入管理。
+    var scanFolderSheet by remember { mutableStateOf(false) }
+    // 增删目录的副作用（释放 SAF 授权 / 重扫 / 清列表）归扫描来源所有，
+    // 走能力契约调用；未注册实现时各回调退化为"只改设置 + 重扫"。
+    val scanFolderController = remember {
+        runCatching { kernel.registry.query<ScanFolderController>().firstOrNull() }.getOrNull()
+    }
     // ---- 用户偏好（持久化） ----
-    val sortMode by settings.sortMode.collectAsStateWithLifecycle(SortMode.ADDED)
-    val sortAscending by settings.sortAscending.collectAsStateWithLifecycle(false)
-    val gridColumns by settings.gridColumns.collectAsStateWithLifecycle(2)
+    val libraryPreferences by remember(settings) {
+        settings.libraryPreferences.map { it as com.noneplayer.core.data.LibraryPreferences? }
+    }.collectAsStateWithLifecycle(initialValue = settings.libraryPreferencesSnapshot)
+    val sortMode = libraryPreferences?.sortMode ?: SortMode.ADDED
+    val sortAscending = libraryPreferences?.sortAscending ?: false
+    val gridColumns = libraryPreferences?.gridColumns ?: 2
     // E78 的可空哨兵 + E105 的首帧同步：初值取进程级快照（本进程还没读过时为 null）。
     // 旧写法初值直接给 emptyList()，把"还没读到"当成"确实没配"——而 AnimatedContent
     // 在过渡期会继续渲染旧帧（见 LibraryStage 注释），于是每次切 Tab / 从播放页返回
@@ -230,10 +243,18 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
         .map<List<String>, List<String>?> { it }
         .collectAsStateWithLifecycle(initialValue = settings.scanFolderUrisSnapshot)
     // 设计稿 viewToggle 的 `state.view`：网格 / 列表，跨页面共用并持久化
-    val listViewStyle by settings.listViewStyle.collectAsStateWithLifecycle("grid")
+    val listViewStyle = libraryPreferences?.viewStyle ?: "grid"
     val onViewStyle: (String) -> Unit = { scope.launch { settings.setListViewStyle(it) } }
     // 视图由调用方（Tab）固定：首页 Home 版式、文件夹 Tab 文件夹版式
     val viewMode = forcedView
+    // 首页「管理」→ 文件夹 Tab（已在 Tab 上时切换被短路，靠这枚值型信号开面板）
+    val manageRequest by FolderNav.manageRequest.collectAsStateWithLifecycle()
+    LaunchedEffect(manageRequest, viewMode) {
+        val tick = manageRequest ?: return@LaunchedEffect
+        if (viewMode != LibraryView.FOLDERS) return@LaunchedEffect
+        scanFolderSheet = true
+        FolderNav.consumeManage(tick)
+    }
     // 首屏错峰窗口：**每页取一次**，再发给各区块（首页 rail / 文件夹网格 / 聚合网格）。
     // 放在区块内部取会让"滚动进来的区块"每次都当成首屏，滚动全程都在跑入场动画。
     val staggerWindow = npStaggerWindow(viewMode)
@@ -251,6 +272,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // 详情是**页内状态**而不是路由：Rail 属于 Shell，只有留在 Tab 内，
     // 导航选中态与层级语义才天然正确；rememberSaveable 让它跨播放页往返保留。
     var detailItem by rememberDetailItemState()
+    // 同一部剧里换集：只改高亮和播放队列，不换详情页这个导航态。
+    // 换 detailItem 会让 AnimatedContent / 顶栏把「切集」做成一次界面过渡（文字重影）。
+    var episodeFocus by remember { mutableStateOf<MediaItem?>(null) }
     // 内嵌播放扩展点：详情页里直接开播（封面框就地变播放器），全屏键才进独占播放页。
     // 未注册实现时详情页回退为整页播放——缺插件不该让"播放"这个动作消失。
     val inlinePlayers by remember { kernel.registry.observe<InlinePlaybackProvider>() }
@@ -262,7 +286,12 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val inlinePlayer = if (paneOccupied) null else inlinePlayers.firstOrNull()
     /** 点视频的落点分派：类 PC 先看详情；其余形态保持"直接进播放页" */
     val openDetailOrPlayer: (MediaItem) -> Unit = { item ->
-        if (windowInfo.isDesktopLike) detailItem = item else openPlayer(navigator, item)
+        if (windowInfo.isDesktopLike) {
+            episodeFocus = null
+            detailItem = item
+        } else {
+            openPlayer(navigator, item)
+        }
     }
 
     // ---- 媒体数据（扩展点聚合） ----
@@ -296,14 +325,26 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // E78：**必须等媒体数据真正加载完再校验**——未加载时树必然是空的，
     // 此时校验等于用"还没读到"冒充"已不存在"，会清掉刚恢复的层级状态。
     LaunchedEffect(selectedFolder, folderRoot, mediaLoaded) {
+        // 首页刚请求打开的路径还没被本页消费时，树可能还对不上——这时清掉
+        // 会把用户点的文件夹打回根层（根层第一行就是「扫描目录 / 管理」）。
+        if (FolderNav.pathRequest.value != null) return@LaunchedEffect
         if (mediaLoaded && selectedFolder != null && currentFolder == null) selectedFolder = null
     }
 
     // 首页"文件夹"区块请求打开某个目录 → 本页（文件夹 Tab）接住并进入该层。
     // 只在文件夹视图下消费：首页那次点击已经切了 Tab，这里补上"打开哪一层"。
-    LaunchedEffect(viewMode, folderRoot, mediaLoaded) {
+    val folderRequest by FolderNav.pathRequest.collectAsStateWithLifecycle()
+    LaunchedEffect(viewMode, folderRequest, mediaLoaded, folderRoot) {
         if (viewMode != LibraryView.FOLDERS || !mediaLoaded) return@LaunchedEffect
-        FolderNav.consume()?.let { path -> selectedFolder = path }
+        val path = folderRequest ?: return@LaunchedEffect
+        // 树里还没有这一层就先留着请求，别消费完再被上面的失效守卫清回根层。
+        if (path.isNotBlank() && folderRoot.findByPath(path) == null) return@LaunchedEffect
+        FolderNav.consume()?.let { consumed ->
+            detailItem = null
+            aggregate = null
+            episodeFocus = null
+            selectedFolder = consumed.takeIf { it.isNotBlank() }
+        }
     }
 
     // "我的"页「最近播放 · 全部」请求打开播放历史聚合 → 首页接住。
@@ -355,9 +396,18 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
             }.isSuccess
             if (granted) {
                 scope.launch {
-                    val current = settings.scanFolderUris.first()
-                    settings.setScanFolders(current + uri.toString())
-                    sources.filter { it.isAvailable() }.forEach { it.scan() }
+                    val uriStr = uri.toString()
+                    val controller = scanFolderController
+                    if (controller != null) {
+                        // 契约实现（扫描插件）自带判重与"持久化后立即扫描"语义
+                        controller.addScanFolder(uriStr)
+                    } else {
+                        // 降级：只改设置 + 重扫。判重口径与 scanner.addScanFolder 一致——
+                        // 重复添加同一目录会让扫描范围重叠（双份文件的历史来源）
+                        val current = settings.scanFolderUris.first()
+                        if (uriStr !in current) settings.setScanFolders(current + uriStr)
+                        sources.filter { it.isAvailable() }.forEach { it.scan() }
+                    }
                 }
             } else {
                 android.widget.Toast.makeText(
@@ -368,10 +418,92 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
             }
         }
     }
+    // 移除扫描目录：走契约（释放授权 + 重扫 / 清列表）；降级路径补做释放授权
+    val removeScanFolder: (String) -> Unit = { uriStr ->
+        scope.launch {
+            val controller = scanFolderController
+            if (controller != null) {
+                controller.removeScanFolder(uriStr)
+            } else {
+                releasePersistedTree(context, uriStr)
+                settings.setScanFolders(settings.scanFolderUris.first() - uriStr)
+                sources.filter { it.isAvailable() }.forEach { it.scan() }
+            }
+        }
+    }
+
     var requestedScan by remember { mutableStateOf(false) }
     fun scanAll() {
         scope.launch {
             sources.filter { it.isAvailable() }.forEach { it.scan() }
+        }
+    }
+
+    // ---- 长按菜单「删除」（删除设备上的文件）----
+    // R+ 走 MediaStore.createDeleteRequest：系统弹出自己的确认框，用户确认才删——
+    // 破坏性动作的最后一道门在系统手里，应用侧没有"悄悄删"的路径。
+    // 结果无论成败都做一次重扫（增量对比，没变则零写盘）。
+    val deleteLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartIntentSenderForResult(),
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            android.widget.Toast.makeText(context, "已删除", android.widget.Toast.LENGTH_SHORT).show()
+        }
+        scanAll()
+    }
+    val requestDelete: (MediaItem) -> Unit = { item ->
+        val uri = runCatching { item.uri.toUri() }.getOrNull()
+        val isDocument = item.id.startsWith("saf-")
+        when {
+            uri == null || uri.scheme == null -> android.widget.Toast.makeText(
+                context,
+                "无法解析该条目的地址，删除已取消",
+                android.widget.Toast.LENGTH_SHORT,
+            ).show()
+
+            // SAF 文档项：没有系统级删除确认流程；目录为只读授权时会失败并如实告知
+            isDocument -> scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching {
+                        android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri)
+                    }.isSuccess
+                }
+                android.widget.Toast.makeText(
+                    context,
+                    if (ok) "已删除" else "删除失败：该目录为只读授权，无法删除其中的文件",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+                if (ok) scanAll()
+            }
+
+            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R -> runCatching {
+                val request = android.provider.MediaStore.createDeleteRequest(
+                    context.contentResolver,
+                    listOf(uri),
+                )
+                deleteLauncher.launch(
+                    androidx.activity.result.IntentSenderRequest.Builder(request.intentSender).build(),
+                )
+            }.onFailure {
+                android.widget.Toast.makeText(
+                    context,
+                    "无法发起删除：${it.message ?: "系统拒绝了请求"}",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+            }
+
+            // API 26–29：没有系统确认流程，直接删除；失败如实告知
+            else -> scope.launch {
+                val ok = withContext(Dispatchers.IO) {
+                    runCatching { context.contentResolver.delete(uri, null, null) }.isSuccess
+                }
+                android.widget.Toast.makeText(
+                    context,
+                    if (ok) "已删除" else "删除失败：没有删除该文件的权限",
+                    android.widget.Toast.LENGTH_LONG,
+                ).show()
+                if (ok) scanAll()
+            }
         }
     }
 
@@ -404,19 +536,18 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // 不靠"假转 1 秒"——扫描失败/无目录时也会按时收（超时兜底）
     var refreshing by remember { mutableStateOf(false) }
     val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
-    val topBarInset = LocalNpTopBarInset.current
-    val pullIndicatorTop = if (topBarInset == Dp.Unspecified) 8.dp else topBarInset + 8.dp
     val eventBus = remember { kernel.services.get<EventBus>() }
     val haptics = rememberNpHaptics()
 
     // 详情页跟随队列：引擎推进播放项（自动连播 / 通知栏 ⏭）时，右栏画面已经换集，
     // 详情页若还停在播完的那一集，标题/继续观看/同文件夹列表全都对不上画面。
     // 只在**同一文件夹**内跟随——用户看着 A 的详情、后台在放 B 的队列时不应被拽走。
-    LaunchedEffect(detailItem?.id, detailItem?.folder) {
+    LaunchedEffect(detailItem?.folder) {
         val folder = detailItem?.folder ?: return@LaunchedEffect
         eventBus.subscribe<KernelEvent.PlaybackStarted>().collect { event ->
             val next = sortedItems.firstOrNull { it.id == event.mediaId && it.folder == folder }
-            if (next != null && next.id != detailItem?.id) detailItem = next
+            // 跟集只改高亮，不替换 detailItem——那是详情页的导航锚点。
+            if (next != null && next.id != episodeFocus?.id) episodeFocus = next
         }
     }
 
@@ -471,9 +602,10 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val subtitle: String
     when {
         detailItem != null -> {
+            val shown = episodeFocus?.takeIf { it.folder == detailItem!!.folder } ?: detailItem!!
             // 顶栏标题直接用视频名（卡片同款展示名），不再写死「视频详情」
-            title = detailItem!!.cardTitle
-            subtitle = detailItem!!.folder?.takeIf { it.isNotBlank() } ?: "本地视频"
+            title = shown.cardTitle
+            subtitle = shown.folder?.takeIf { it.isNotBlank() } ?: "本地视频"
         }
         aggregate != null -> {
             val meta = aggregateMeta(aggregate!!)
@@ -518,8 +650,23 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                     title = title,
                     subtitle = subtitle,
                     compact = compact,
+                    titleStyle = when {
+                        // 平板文件夹名用 22sp 会顶满顶栏（用户实报「标题文字过大」）
+                        viewMode == LibraryView.FOLDERS && !compact -> NpTypography.titleMedium
+                        viewMode == LibraryView.FOLDERS || detailItem != null -> NpTypography.titleLarge
+                        else -> null
+                    },
+                    titleKey = when {
+                        detailItem != null -> "detail:${detailItem!!.folder ?: detailItem!!.id}"
+                        viewMode == LibraryView.FOLDERS -> "folder:${selectedFolder ?: ""}"
+                        aggregate != null -> "agg:$aggregate"
+                        else -> null
+                    },
                     onBack = when {
-                        detailItem != null -> ({ detailItem = null })
+                        detailItem != null -> ({
+                            detailItem = null
+                            episodeFocus = null
+                        })
                         aggregate != null -> ({ aggregate = null })
                         viewMode == LibraryView.FOLDERS && selectedFolder != null -> ({
                             selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
@@ -539,6 +686,14 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                 )
                             }
                             // 设计稿 topbar 搜索钮常驻（空库也应能进搜索页看引导）
+                            if (viewMode == LibraryView.FOLDERS && selectedFolder == null && aggregate == null) {
+                                NpIconButton(
+                                    icon = NpIcon.Folder,
+                                    contentDescription = "管理扫描目录",
+                                    onClick = { scanFolderSheet = true },
+                                    size = if (compact) 40.dp else 44.dp,
+                                )
+                            }
                             NpIconButton(
                                 icon = NpIcon.Search,
                                 contentDescription = "搜索",
@@ -552,6 +707,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                 )
             },
         ) { contentModifier ->
+            val topBarInset = LocalNpTopBarInset.current
+            val pullIndicatorTop = if (topBarInset == Dp.Unspecified) 8.dp else topBarInset + 8.dp
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
                 PullToRefreshBox(
                     isRefreshing = refreshing,
@@ -584,6 +741,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                         }
                         val folders = folderUris
                         val stage = when {
+                            libraryPreferences == null -> LibraryStage.Loading
                             detailItem != null -> LibraryStage.Detail(detailItem!!)
                             sources.isEmpty() -> LibraryStage.NoSource
                             missingPermission -> LibraryStage.NoPermission
@@ -601,11 +759,12 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                         val stageShiftAllowed = npDisplacementAllowed()
                         AnimatedContent(
                             targetState = stage,
+                            contentKey = { if (it is LibraryStage.Detail) "detail" else it },
                             // 层级前进/后退带 8dp 方向位移（"读得出方向"的最小量），同级切换只交叉淡入；
                             // 位移在轻量档 / Reduce Motion 下并掉（§9.6）。
                             transitionSpec = {
                                 val forward = targetState.rank > initialState.rank
-                                val shift = if (stageShiftAllowed) {
+                                val shift = if (stageShiftAllowed && targetState.rank != initialState.rank) {
                                     if (forward) stageShiftPx else -stageShiftPx
                                 } else { 0 }
                                 (fadeIn(tween(stageFadeMs, easing = NpEasing.Silk)) +
@@ -618,7 +777,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                             // 详情页（平板横屏）：整块内容区替换为视频详情，Rail 与选中态不变。
                             // 同文件夹列表与播放器队列用同一个比较器，顺序与"下一集"一致。
                         is LibraryStage.Detail -> {
-                                val detail = stageValue.item
+                                val anchor = stageValue.item
+                                val detail = episodeFocus?.takeIf { it.folder == anchor.folder } ?: anchor
                                 val siblings = remember(detail.id, detail.folder, sortedItems) {
                                     val folder = detail.folder
                                     if (folder.isNullOrBlank()) {
@@ -639,7 +799,12 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                     inlinePlayer = inlinePlayer,
                                     // ⛶ = 明确的全屏意图：独占播放页只有沉浸一种（假全屏已删除）
                                     onFullscreen = { openPlayer(navigator, it, immersive = true) },
-                                    onSelect = { detailItem = it },
+                                    onAudioOnly = { openPlayer(navigator, it, audioOnly = true) },
+                                    onSelect = { next ->
+                                        // 切集是播放动作，不是打开另一页。锚点 detailItem 保持不动，
+                                        // 否则整页 AnimatedContent 会把列表文字淡出再淡入（重影）。
+                                        episodeFocus = next
+                                    },
                                 )
                             }
 
@@ -751,9 +916,8 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                     FolderNav.request(it.path)
                                     switchTab("folders")
                                 },
-                                onManageFolders = {
-                                    // 管理 = 文件夹 Tab 根层：只切 Tab，不请求任何子目录
-                                    FolderNav.clear()
+                                onBrowseFolders = {
+                                    FolderNav.request("")
                                     switchTab("folders")
                                 },
                             )
@@ -829,6 +993,23 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                 } else {
                     null
                 },
+                // 「删除」= 删除设备上的文件（用户裁定）：R+ 由系统确认框把关，删完自动重扫
+                onDelete = {
+                    contextMenu = null
+                    requestDelete(menuItem)
+                },
+            )
+        }
+
+        // 扫描目录管理面板（统一入口：文件夹 Tab 根层入口行 / 首页区块「管理」）
+        if (scanFolderSheet) {
+            ScanFolderSheet(
+                folders = folderUris ?: emptyList(),
+                scanning = refreshing,
+                onDismiss = { scanFolderSheet = false },
+                onPickFolder = { folderPicker.launch(null) },
+                onRemoveFolder = removeScanFolder,
+                onRescan = ::refresh,
             )
         }
 
@@ -964,7 +1145,7 @@ private fun HomeView(
     onOpen: (MediaItem) -> Unit,
     onMore: (String) -> Unit,
     onOpenFolder: (FolderNode) -> Unit,
-    onManageFolders: () -> Unit,
+    onBrowseFolders: () -> Unit,
 ) {
     val gutter = if (compact) 14.dp else 20.dp
     val progressMap = LocalPlaybackProgress.current
@@ -1026,13 +1207,13 @@ private fun HomeView(
             item(key = "folders") {
                 HomeBlock(
                     title = "文件夹",
-                    actionLabel = "管理",
+                    actionLabel = "查看全部",
                     gutter = gutter,
                     showTopDivider = hasContinue || hasRecent,
                     // 「管理」= 去文件夹 Tab 的**根层**（管理全部目录），
                     // 而不是"打开第一个文件夹"——那是上一版的实现，
                     // 点"管理"结果进了某个具体目录，用户找不到"管理"这件事。
-                    onMore = onManageFolders,
+                    onMore = onBrowseFolders,
                 ) {
                     FolderRailOrGrid(
                         folders = folders,
@@ -1512,8 +1693,8 @@ private fun FolderBrowser(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
-        // E134：内容区不再有 listhead / hero 两层头部——层名、路径与计数都在顶栏
-        // （用户实报"两个返回键"与"统计框占位过大"，见标题块与 FolderHead 的删除注记）。
+        // 扫描目录管理不放在列表第一行：点首页文件夹进来时，这一行会让整页看起来像
+        // 「管理文件夹」。入口改到文件夹根层顶栏的文件夹图标。
         if (noSubfolders) {
             item(key = "hint", span = { GridItemSpan(maxLineSpan) }) {
                 Text(
@@ -1558,14 +1739,33 @@ private fun FolderBrowser(
         // 首屏读起来是两组同时弹出来，而不是一条连续的错峰。
         // 视频组从 `node.children.size` 接着数，整屏才是 0,1,2,… 的单一序列。
         val videoStaggerBase = node.children.size
-        gridItemsIndexed(node.children, key = { _, child -> "folder:${child.path}" }) { index, child ->
-            NpFolderCard(
+        gridItemsIndexed(
+            node.children,
+            key = { _, child -> "folder:${child.path}" },
+            span = { _, _ -> GridItemSpan(if (viewStyle == "list") maxLineSpan else 1) },
+        ) { index, child ->
+            val folderModifier = Modifier
+                .animateItem(fadeInSpec = itemFade, placementSpec = null, fadeOutSpec = itemFade)
+                .npStaggeredEntry(index, staggerWindow)
+            if (viewStyle == "list") {
+                NpOptRow(
+                    text = child.name,
+                    onClick = { onOpenFolder(child) },
+                    modifier = folderModifier,
+                    leading = {
+                        Icon(NpIcon.Folder, contentDescription = null, tint = ink.muted)
+                    },
+                    trailing = {
+                        Text("${child.totalCount} 项", style = NpMonoSmall, color = ink.muted)
+                        Icon(NpIcon.ChevronRight, contentDescription = null, tint = ink.muted)
+                    },
+                )
+            } else {
+                NpFolderCard(
                 name = child.name,
                 countLabel = "${child.totalCount} 项",
                 onClick = { onOpenFolder(child) },
-                modifier = Modifier
-                    .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
-                    .npStaggeredEntry(index, staggerWindow),
+                modifier = folderModifier,
                 cover = {
                     FolderCover(
                         node = child,
@@ -1573,6 +1773,7 @@ private fun FolderBrowser(
                     )
                 },
             )
+            }
         }
         if (viewStyle == "list") {
             gridItemsIndexed(
@@ -1585,7 +1786,7 @@ private fun FolderBrowser(
                     compact = compact,
                     onOpen = onOpenVideo,
                     modifier = Modifier
-                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .animateItem(fadeInSpec = itemFade, placementSpec = null, fadeOutSpec = itemFade)
                         .npStaggeredEntry(videoStaggerBase + index, staggerWindow),
                 )
             }
@@ -1599,7 +1800,7 @@ private fun FolderBrowser(
                     onOpen = onOpenVideo,
                     showFolderTag = true,
                     modifier = Modifier
-                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .animateItem(fadeInSpec = itemFade, placementSpec = null, fadeOutSpec = itemFade)
                         .npStaggeredEntry(videoStaggerBase + index, staggerWindow),
                 )
             }
@@ -2150,7 +2351,7 @@ private fun AggregateList(
                     compact = compact,
                     onOpen = onOpen,
                     modifier = Modifier
-                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .animateItem(fadeInSpec = itemFade, placementSpec = null, fadeOutSpec = itemFade)
                         .npStaggeredEntry(index, staggerWindow),
                 )
             }
@@ -2164,7 +2365,7 @@ private fun AggregateList(
                     onOpen = onOpen,
                     showFolderTag = true,
                     modifier = Modifier
-                        .animateItem(fadeInSpec = itemFade, fadeOutSpec = itemFade)
+                        .animateItem(fadeInSpec = itemFade, placementSpec = null, fadeOutSpec = itemFade)
                         .npStaggeredEntry(index, staggerWindow),
                 )
             }
@@ -2311,6 +2512,7 @@ internal fun openPlayer(
     item: MediaItem,
     fromStart: Boolean = false,
     immersive: Boolean = false,
+    audioOnly: Boolean = false,
 ) {
     fun enc(value: String) = android.net.Uri.encode(value, "")
     navigator.navigate(
@@ -2320,7 +2522,8 @@ internal fun openPlayer(
             "&id=${enc(item.id)}" +
             // § 长按菜单「从头播放」：不恢复断点（路由参数带默认值，属契约增量）
             (if (fromStart) "&from=start" else "") +
-            (if (immersive) "&fs=1" else ""),
+            (if (immersive) "&fs=1" else "") +
+            (if (audioOnly) "&audio=1" else ""),
     )
 }
 
@@ -2349,9 +2552,39 @@ private fun sortedMediaItems(
 ): List<MediaItem> = items.sortedWith(mediaComparator(sortMode, ascending))
 
 /**
+ * 排序结果的**跨重组缓存**（用户实报"每次从其他界面切过来都会出现从默认排序
+ * 重排到选中排序的动画"的修复）。
+ *
+ * 背景：> [SYNC_SORT_LIMIT] 的列表异步排序，`remember` 的作用域随页面卸载一起丢——
+ * 每次重进页面 `asyncSorted` 初值都是 null，于是先渲一帧**原序占位**、排完再换。
+ * 换的那一帧里 `animateItem` 会把整屏条目从原序"搬"到选中序，读起来就是每次
+ * 切页都重放一遍重排动画。缓存按 (items, mode, ascending) 记住上一次的结果：
+ * 命中即首帧就按选中排序渲染，动画没有素材。
+ *
+ * 单线程访问（组合期与 LaunchedEffect 续体都在主线程），不需要同步。
+ */
+private object MediaSortCache {
+    private var items: List<MediaItem>? = null
+    private var mode: SortMode? = null
+    private var ascending = false
+    private var result: List<MediaItem>? = null
+
+    fun get(items: List<MediaItem>, mode: SortMode, ascending: Boolean): List<MediaItem>? =
+        result?.takeIf { this.items == items && this.mode == mode && this.ascending == ascending }
+
+    fun put(items: List<MediaItem>, mode: SortMode, ascending: Boolean, result: List<MediaItem>) {
+        this.items = items
+        this.mode = mode
+        this.ascending = ascending
+        this.result = result
+    }
+}
+
+/**
  * E20：排序离主线程。此前 `remember(items, …)` 在组合期全量排序，列表上千时
  * 每次增删/换档都在主线程卡一帧。现在小列表维持同步（行为不变），大列表先给
- * 原序占位、`Dispatchers.Default` 排完再替换——占位帧只在超限列表上出现一次。
+ * 缓存顺序（若有）再在 `Dispatchers.Default` 排完替换——**没有缓存时才**退到
+ * 原序占位一帧（首开/数据变化的那次）。
  */
 @Composable
 private fun rememberSortedMediaItems(
@@ -2361,16 +2594,23 @@ private fun rememberSortedMediaItems(
 ): List<MediaItem> {
     val small = items.size <= SYNC_SORT_LIMIT
     val syncSorted = if (small) {
-        remember(items, sortMode, ascending) { sortedMediaItems(items, sortMode, ascending) }
+        remember(items, sortMode, ascending) {
+            sortedMediaItems(items, sortMode, ascending)
+                .also { MediaSortCache.put(items, sortMode, ascending, it) }
+        }
     } else {
         items
     }
-    var asyncSorted by remember(items, sortMode, ascending) { mutableStateOf<List<MediaItem>?>(null) }
+    var asyncSorted by remember(items, sortMode, ascending) {
+        mutableStateOf(MediaSortCache.get(items, sortMode, ascending))
+    }
     LaunchedEffect(items, sortMode, ascending) {
         if (!small) {
-            asyncSorted = withContext(Dispatchers.Default) {
+            val sorted = withContext(Dispatchers.Default) {
                 sortedMediaItems(items, sortMode, ascending)
             }
+            MediaSortCache.put(items, sortMode, ascending, sorted)
+            asyncSorted = sorted
         }
     }
     return asyncSorted ?: syncSorted

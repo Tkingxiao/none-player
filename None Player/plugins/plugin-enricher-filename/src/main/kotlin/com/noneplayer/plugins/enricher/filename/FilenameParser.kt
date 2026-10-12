@@ -35,9 +35,22 @@ internal object FilenameParser {
     private val EP_MARK = Regex("(?i)(?:^|[\\s._-])(?:ep|e)\\.?[\\s._-]?(\\d{1,3})(?=$|[\\s._-])")
     private val TAIL_NUMBER = Regex("(?:^|[\\s._-]+)(\\d{1,3})(?=$|[\\s._-])")
     private val CODEC = Regex(
-        "(?i)\\b(hevc|h\\.?265|x265|avc|h\\.?264|x264|av1|vp9|vc-?1|divx|xvid|mpeg-?2|wmv3)\\b",
+        "(?i)(?<![a-z0-9])(hevc|h\\.?265|x265|avc|h\\.?264|x264|av1|vp9|vc-?1|divx|xvid|mpeg-?2|wmv3)(?![a-z0-9])",
     )
     private val SEPARATORS = Regex("[._]+")
+    private val TECHNICAL_DETAIL = Regex("(?i)(\\d{3,4}x\\d{3,4}|[0-9a-f]{8}|[12567]\\.\\d)")
+    /** 声道布局 `5.1` / `AAC5.1`：必须在把 `.` 拍成空格之前删掉，否则尾数会变成集号 1。 */
+    private val CHANNEL_LAYOUT = Regex("(?i)(?<![0-9])[1-8]\\.\\d(?![0-9])")
+    /** `OPUSx2` / `ASSx4` / `HEVC-10bit` 这种粘在一起的技术标签。 */
+    private val COMPOUND_TECHNICAL = Regex(
+        "(?i)^(hevc|avc|h\\.?26[45]|x26[45]|av1|vp9|opus|aac|flac|ac3|eac3|dts|ass|ssa|srt|pgs)" +
+            "([._-]?\\d{0,2}bit|x\\d{1,2})?$",
+    )
+    private val MEDIA_EXTENSION = Regex("(?i)\\.(mkv|mp4|avi|mov|webm|m4v|ts|m2ts|mp3|flac|wav|m4a|ogg)$")
+    /** 整段方括号是发布组（`[SAIO-Raws]` / `[字幕组]`），不是标题。 */
+    private val RELEASE_GROUP = Regex(
+        "(?i).*(字幕组|raws|subs|vcb[- ]studio|airota|subsplease|erai[- ]raws).*|^(?i)group$",
+    )
 
     /** 折叠多余空白：每个条目的富化都要走两次，提到常量（E121） */
     private val COLLAPSE_WS = Regex("\\s{2,}")
@@ -46,74 +59,82 @@ internal object FilenameParser {
     private val TITLE_NOISE = Regex(
         "(?i)^(\\d{3,4}[pi]|4k|8k|hd|fhd|uhd|web-?dl|webrip|web|blu-?ray|bd(rip)?|hdtv|dvdrip|" +
             "remux|x26[45]|h\\.?26[45]|hevc|avc|av1|vp9|aac|ac3|eac3|dts(-hd)?|flac|mp3|" +
-            "10bit|8bit|hdr|sdr|proper|repack|v\\d+|cn|chs|cht|双语|简繁|中字)$",
+            "(ma)?10p|hi10p|hi444p|10bit|8bit|hdr|sdr|proper|repack|v\\d+|cn|chs|cht|双语|简繁|中字|" +
+            "简体|繁体|简中|繁中|gb|big5|jpsc|end|mp4|mkv|avi)$",
     )
 
     fun parse(rawName: String): Parsed? {
-        val base = rawName.substringBeforeLast('.', rawName).trim()
+        val base = rawName.replace(MEDIA_EXTENSION, "").trim()
         if (base.isEmpty()) return null
+        val prepared = CHANNEL_LAYOUT.replace(base, " ")
 
         // 拍平串：括号/分隔符 → 空格（组内文本保留，`[02]` 的编号才看得见）
-        val flat = base.replace(ANY_BRACKET_OR_PAREN, " ")
+        val bracketClean = BRACKET_GROUP.replace(prepared) { match ->
+            val label = match.value.trim('[', ']')
+            if (RELEASE_GROUP.matches(label) || isTechnicalTag(label)) " " else " $label "
+        }
+        val flat = CODEC.replace(bracketClean, " ")
+            .replace(ANY_BRACKET_OR_PAREN, " ")
             .replace(SEPARATORS, " ")
+            .split(' ')
+            .filterNot { TITLE_NOISE.matches(it) }
+            .joinToString(" ")
             .replace(COLLAPSE_WS, " ")
             .trim()
 
         // 编码先从原始串取（`[HEVC]` 就在方括号里）
-        val codec = CODEC.find(base)?.value?.let(::canonicalCodec)
+        val codec = CODEC.find(prepared)?.value?.let(::canonicalCodec)
 
         var season = 0
         var episode = 0
-        var matchedText: String? = null
+        val matchedRanges = mutableListOf<IntRange>()
         SXXEXX.find(flat)?.let {
             season = it.groupValues[1].toIntOrNull() ?: 0
             episode = it.groupValues[2].toIntOrNull() ?: 0
-            matchedText = it.value
+            matchedRanges += it.range
         }
         if (season == 0) {
             SEASON_CJK.find(flat)?.let {
                 season = parseNumber(it.groupValues[1]) ?: 0
-                matchedText = it.value
+                matchedRanges += it.range
             }
         }
         if (episode == 0) {
             EPISODE_CJK.find(flat)?.let {
                 episode = parseNumber(it.groupValues[1]) ?: 0
-                matchedText = it.value
+                matchedRanges += it.range
             }
         }
         if (episode == 0) {
             EP_MARK.find(flat)?.let {
                 episode = it.groupValues[1].toIntOrNull() ?: 0
-                matchedText = it.value
+                matchedRanges += it.range
             }
         }
-        if (episode == 0 && season == 0) {
-            // 末尾独立编号（"标题 - 01" / "标题 05"）：1–3 位，避开 1080/2024 这类四位数字。
-            // 必须取**最后一个**命中——"Rock 2 04" 里 2 与 04 都是合法的独立数字段，
-            // 只有末尾那个才是集号（取第一个会把年份/序号中段当成集号）。
-            TAIL_NUMBER.findAll(flat).lastOrNull()?.let {
+        if (episode == 0) {
+            // 末尾独立编号（"标题 - 01" / "标题 05" / "第二季 03"）：1–3 位，避开 1080/2024。
+            // 必须取**最后一个**命中——"Rock 2 04" 里只有末尾那个才是集号。
+            // 季号已经命中时仍要扫：`终物语 第二季 03` 不能把 03 留在标题里。
+            // Recap/NCOP 前面的数字不是正片集号。
+            TAIL_NUMBER.findAll(flat).lastOrNull()
+                ?.takeIf { flat.substring(it.range.last + 1).trim(' ', '-', '_', '.').isEmpty() }
+                ?.takeUnless { isNonEpisodeTail(flat, it.range.first) }
+                ?.let {
                 episode = it.groupValues[1].toIntOrNull() ?: 0
-                matchedText = it.value
+                matchedRanges += it.range
             }
         }
 
-        if (episode == 0 && season == 0 && codec == null) return null
+        // 只有编码、没有集号/季号：不要改写标题。否则 `[01]` 被后面的 Hi10p/OPUSx2
+        // 挡住时会把整条技术串当成标题，卡片一行省略后名字显示不全、集数也丢了。
+        if (episode == 0 && season == 0) return null
 
-        // 标题主路径：去掉开头的方括号组（字幕组命名的惯例位置）与其余方括号组，
-        // 再扣掉命中的编号，最后滤标签词
-        var source = dropLeadingBracketGroup(base).replace(BRACKET_GROUP, " ")
-        val hit = matchedText?.trim()?.trim('-', '—', '·', '_', '.')
-        if (!hit.isNullOrBlank()) source = source.replaceFirst(hit, " ")
-        var title = buildTitle(source)
-
-        // 回退：文件名几乎全是方括号组 → 用组内文本（丢掉第一个组、命中的编号与标签词）
-        if (title.isBlank()) {
-            val groups = BRACKET_GROUP.findAll(base).map { it.value.trim('[', ']') }.toList()
-            title = buildTitle(
-                groups.drop(1).filterNot { it == hit }.joinToString(" "),
-            )
+        // Remove exactly the matched spans: replacing "2" globally can corrupt the title itself.
+        var source = flat
+        for (range in matchedRanges.sortedByDescending { it.first }) {
+            source = source.replaceRange(range, " ")
         }
+        val title = buildTitle(source)
         return Parsed(
             // 什么都拼不出来（整个文件名就是 `[01]`）时保留原名，别造空标题
             title = title.ifBlank { base },
@@ -123,9 +144,22 @@ internal object FilenameParser {
         )
     }
 
-    /** 名字以 `[` 开头时丢掉第一对方括号（惯例上那里是字幕组名，不是标题） */
-    private fun dropLeadingBracketGroup(s: String): String =
-        if (s.startsWith('[')) s.replaceFirst(BRACKET_GROUP, " ") else s
+    private val TAG_SPLIT = Regex("[\\s_,._-]+")
+    private val NON_EPISODE_WORD = Regex("(?i)(recap|ncop|nced|menu|pv|cm|trailer|preview|ova|oad|sp)")
+
+    /** 尾号紧挨着 Recap/NCOP 时不是正片集号（否则总集篇会和第 1 集抢同一个角标）。 */
+    private fun isNonEpisodeTail(flat: String, numberStart: Int): Boolean {
+        val before = flat.substring(0, numberStart).trim()
+        val word = before.substringAfterLast(' ')
+        return NON_EPISODE_WORD.matches(word)
+    }
+
+    private fun isTechnicalToken(token: String): Boolean =
+        TITLE_NOISE.matches(token) || TECHNICAL_DETAIL.matches(token) || COMPOUND_TECHNICAL.matches(token)
+
+    private fun isTechnicalTag(label: String): Boolean =
+        label.split(TAG_SPLIT).filter { it.isNotBlank() }
+            .let { parts -> parts.isNotEmpty() && parts.all(::isTechnicalToken) }
 
     /** 归一空白 + 去掉标签词 + 修剪残留分隔符 */
     private fun buildTitle(raw: String): String = raw

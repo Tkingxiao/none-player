@@ -63,16 +63,23 @@ class LocalScannerPlugin : StartupTaskPlugin {
         registry.register(SettingsProvider::class.java, LocalScannerSettings(source))
         // 批次 7「插件清缓存」：缩略图缓存的清理入口交给插件管理页
         registry.register(CacheProvider::class.java, source)
+        // 媒体库页的「文件夹管理」界面经由它增删扫描目录：释放持久授权、重扫、
+        // 移除最后一个目录时清列表——副作用归来源所有，UI 不直接改 DataStore。
+        // 注意：它使 source 以多个接口键注册——`app/proguard-rules.pro` 的
+        // "扩展点接口禁止 R8 类合并"keep 列表必须涵盖本接口（2026-10-12 闪退根因，
+        // 注册表按 Class 分桶，合并后即双份注册）。
+        registry.register(com.noneplayer.kernel.api.ScanFolderController::class.java, source)
     }
 
     /**
      * 首扫走**有界启动预算**（内核侧 [com.noneplayer.kernel.api.StartupTaskPlugin] 契约）：
-     * 观察者先挂上（它必须早于任何一次扫描回调），扫描本体交给内核的启动任务通道——
-     * 扫得快就带着媒体列表进首页，扫得慢就先出骨架、内容随后补齐。
-     * 旧实现在 `onStart()` 里同步扫完才置 Running，用户要盯着启动画面等完整个扫描。
+     * 观察者先挂上（它必须早于任何一次扫描回调），**先恢复上次扫描的落盘快照**——
+     * 大库冷启动时媒体列表首帧即有内容，扫描退居后台做增量刷新
+     * （旧行为是"不加载好不进去"：一整轮全量扫描完成前，媒体库页只有占位/空态）。
      */
     override fun startup(scope: CoroutineScope): Deferred<Unit> = scope.async {
         source.startObserving()
+        source.restoreSnapshot()
         onStart()
     }
 

@@ -4,6 +4,7 @@ import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.api.PluginMarker
 import com.noneplayer.kernel.api.register
+import com.noneplayer.kernel.ui.api.PlaybackMenuContributor
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
 import com.noneplayer.kernel.ui.api.SettingsProvider
 
@@ -16,7 +17,8 @@ import com.noneplayer.kernel.ui.api.SettingsProvider
  * ① 三格式解析（[DanmakuParsers]）＋ ② 同名匹配（[DanmakuLocator]）＋
  * ③ 设置区块（[DanmakuSettingsSection]）＋ ④ 渲染层（[DanmakuOverlay]，
  * `PlaybackOverlay` 挂载，DanmakuPlanner 纯函数摆位 + 单 Canvas 绘制）＋
- * ⑤ 「弹」pill 开关/状态入口 + SAF 手动选择 ＋ ⑥ 内嵌弹幕轨 cue 通路
+ * ⑤ 开关与来源管理（[DanmakuMenuContributor]，经 `PlaybackMenuContributor`
+ * 挂进播放器「播放选项」表）＋ ⑥ 内嵌弹幕轨 cue 通路
  * （已知限制见 [DanmakuOverlay] 类注）。
  */
 @PluginMarker
@@ -29,6 +31,10 @@ class DanmakuPlugin : Plugin {
     override suspend fun onInstall(registry: ExtensionRegistry) {
         registry.register(SettingsProvider::class.java, DanmakuSettingsSection())
         registry.register(PlaybackOverlay::class.java, DanmakuOverlay())
+        // 弹幕开关进播放器「播放选项」表（2026-10-12 用户裁定）。
+        // 新增扩展点接口必须同步 app/proguard-rules.pro 的 keep，否则 release 下
+        // R8 接口合并会让注册落进同一个桶（历史上真实翻过一次）。
+        registry.register(PlaybackMenuContributor::class.java, DanmakuMenuContributor())
     }
 
     override suspend fun onStart() = Unit

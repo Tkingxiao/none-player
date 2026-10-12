@@ -9,7 +9,6 @@ class DanmakuPlannerTest {
     private val config = DanmakuPlanner.Config(
         areaFraction = 0.5f,
         speed = 1f,
-        fontScale = 1f,
         maxOnScreen = 0,
     )
 

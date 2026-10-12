@@ -4,6 +4,8 @@ import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.app.Activity
+import android.app.PictureInPictureParams
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import androidx.activity.ComponentActivity
@@ -86,6 +88,33 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         deepLinkIntents.trySend(intent)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 回到前台时卸掉比例参数。只在播放选项里手动进小窗才重新发布。
+        if (!isInPictureInPictureMode) disarmPictureInPicture()
+    }
+
+    override fun onUserLeaveHint() {
+        // 底部上滑回桌面不是进小窗。不调用 enterPictureInPictureMode。
+        disarmPictureInPicture()
+        super.onUserLeaveHint()
+    }
+
+    /**
+     * 系统（以及部分 OEM 的手势回桌面）请求进画中画时会走到这里。
+     * 返回 true 表示「已经处理」且我们不进入——小窗只允许播放菜单里的手动入口。
+     */
+    override fun onPictureInPictureRequested(): Boolean = true
+
+    private fun disarmPictureInPicture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || isInPictureInPictureMode) return
+        runCatching {
+            setPictureInPictureParams(
+                PictureInPictureParams.Builder().setAutoEnterEnabled(false).build(),
+            )
+        }
     }
 
     /**

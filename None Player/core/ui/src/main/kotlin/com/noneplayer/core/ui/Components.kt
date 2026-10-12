@@ -17,6 +17,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
@@ -600,7 +601,14 @@ fun NpSwitch(
             .size(width = NpDimens.switchWidth, height = NpDimens.switchHeight)
             .clip(RoundedCornerShape(NpRadius.chip))
             .background(track)
-            .npClickable(enabled = enabled) { onCheckedChange(!checked) },
+            .toggleable(
+                value = checked,
+                enabled = enabled,
+                role = Role.Switch,
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onValueChange = onCheckedChange,
+            ),
     ) {
         Box(
             modifier = Modifier
@@ -973,6 +981,12 @@ fun NpAppTopBar(
     modifier: Modifier = Modifier,
     subtitle: String? = null,
     compact: Boolean = false,
+    titleStyle: androidx.compose.ui.text.TextStyle? = null,
+    /**
+     * 同一页里换标题（切集）时保持这个 key，文字立刻更新，不做淡入淡出。
+     * 换页（key 变了）才走原来的 fade-through，避免两个长标题叠在一起。
+     */
+    titleKey: String? = null,
     onBack: (() -> Unit)? = null,
     trailing: @Composable () -> Unit = {},
 ) {
@@ -996,24 +1010,30 @@ fun NpAppTopBar(
                 tint = ink.fg,
             )
         }
-        // 标题/副题随页内态或路由变化：**淡变**而不是瞬时跳字。
-        // 背景（2026-10-08 走查）：库页的正文已经交叉淡入，标题却先一步跳变，
-        // 读起来是"两段动作"；两者同节拍才叫衔接完整。只做 alpha——同字号、单行、
-        // 左对齐，不动布局（轻量档/Reduce Motion 下本来也没有可并的位移）。
+        // 标题/副题随页内态或路由变化：**fade-through**（先出后进）而不是瞬时跳字，
+        // 也不是交叉淡入——两个长文件夹名在半透明里叠着走，用户实报"覆盖跳变，难看且不优雅"
+        // （2026-10-12）；把进场延迟到退场结束后，同一节拍读起来是"旧名退干净、新名再出来"。
+        // 只做 alpha——同字号、单行、左对齐，不动布局（轻量档/Reduce Motion 下本来也没有可并的位移）。
         val titleFadeMs = npDuration(Motion.NavFade)
+        val titleExitMs = npDuration(Motion.NavExit)
         Column(modifier = Modifier.weight(1f)) {
             AnimatedContent(
-                targetState = title to subtitle,
+                targetState = titleKey ?: title,
                 transitionSpec = {
-                    fadeIn(tween(titleFadeMs, easing = NpEasing.Silk)) togetherWith
-                        fadeOut(tween(titleFadeMs, easing = NpEasing.SilkExit))
+                    fadeIn(
+                        tween(
+                            titleFadeMs,
+                            delayMillis = titleExitMs,
+                            easing = NpEasing.Silk,
+                        ),
+                    ) togetherWith fadeOut(tween(titleExitMs, easing = NpEasing.SilkExit))
                 },
                 label = "npTopBarTitle",
-            ) { (t, sub) ->
+            ) {
                 Column {
                     Text(
-                        text = t,
-                        style = if (compact) {
+                        text = title,
+                        style = titleStyle ?: if (compact) {
                             NpTypography.displayLarge.copy(fontSize = NpTypography.headlineMedium.fontSize)
                         } else {
                             NpTypography.displayLarge
@@ -1022,9 +1042,9 @@ fun NpAppTopBar(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (!compact && sub != null && sub.isNotEmpty()) {
+                    if (!compact && subtitle != null && subtitle.isNotEmpty()) {
                         Text(
-                            text = sub,
+                            text = subtitle,
                             style = NpTypography.bodySmall,
                             color = ink.muted,
                             maxLines = 1,

@@ -15,9 +15,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.ui.LocalNpInk
@@ -30,6 +36,9 @@ import com.noneplayer.core.ui.npGlassSurface
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.DetailPaneProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
+import com.noneplayer.kernel.ui.api.NpInlinePlayRequest
+import kotlinx.coroutines.flow.filterNotNull
+import coil.compose.AsyncImage
 
 /**
  * 类 PC 右栏的**内联播放栏**（§8.2 路径 A）。
@@ -40,8 +49,7 @@ import com.noneplayer.kernel.ui.api.LocalKernel
  *
  * 渲染直接复用 [InlinePlayerSurface]（详情页内嵌播放的同一份实现）：
  * 装载走同一条 `ensureSessionPlaying` 链（同文件夹队列 / 断点 / 字幕记忆 / 倍速），
- * 控制层同样是"播放暂停 + 进度 + 时间 + 全屏"四件——**不另起一份播放器**，
- * 两处各写一份必然漂移。
+ * 控制层、播放选项与仅音频入口复用同一份实现，不另起一份播放器。
  *
  * 点「全屏」导航到独占播放页：会话已在播同一媒体，落页只续播不重启（B1 语义），
  * 与迷你条点回播放页走的是同一条深链参数形态（uri/title/mime/id 齐全）。
@@ -74,7 +82,28 @@ class PlaybackPaneChrome : DetailPaneProvider {
     @Composable
     override fun Render(navigator: Navigator, modifier: Modifier) {
         val session = sessionOf()
-        val snapshot = session.nowPlayingSummary.collectAsStateWithLifecycle().value ?: return
+        LaunchedEffect(session) {
+            NpInlinePlayRequest.flow.filterNotNull().collect { tick ->
+                val item = tick.first.item
+                val queue = session.queue.value
+                val index = queue.indexOfFirst { it.id.isNotEmpty() && it.id == item.id }
+                    .takeIf { it >= 0 }
+                    ?: queue.indexOfFirst { it.uri == item.uri }
+                if (index >= 0) {
+                    // 同一文件夹里换集：直接跳队列，不要整表重新 prepare。
+                    // 先切换再消费，效应被取消时请求还在，下一次组合能重放。
+                    session.selectQueueIndex(index)
+                } else {
+                    session.startPlayback(item)
+                }
+                if (tick.first.audioOnly) session.setAudioOnly(true)
+                NpInlinePlayRequest.consume(tick)
+            }
+        }
+        val currentSnapshot = session.nowPlayingSummary.collectAsStateWithLifecycle().value
+        var lastSnapshot by remember { mutableStateOf<NowPlaying?>(null) }
+        SideEffect { if (currentSnapshot != null) lastSnapshot = currentSnapshot }
+        val snapshot = currentSnapshot ?: lastSnapshot ?: return
         val ink = LocalNpInk.current
         Column(
             modifier = modifier
@@ -116,6 +145,16 @@ class PlaybackPaneChrome : DetailPaneProvider {
                 Spacer(modifier = Modifier.width(NpSpace.lg))
             }
             Box(modifier = Modifier.weight(1f)) {
+                if (currentSnapshot == null) {
+                    // Exit keeps only a static cover. Never remount a stopped playback surface.
+                    AsyncImage(
+                        model = snapshot.coverUri,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    return@Box
+                }
                 // E101：走"只接管画面"的入口——右栏挂载不得改写播放状态
                 // （用户在播放页暂停后退回浏览态，暂停必须保持；结束态也不退位）。
                 surface.InlinePlayerAttached(

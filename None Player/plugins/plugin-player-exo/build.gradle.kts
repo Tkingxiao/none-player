@@ -9,6 +9,7 @@ android {
 
     defaultConfig {
         minSdk = 26
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -38,6 +39,8 @@ dependencies {
     // FFmpeg 扩展渲染器（NextRenderersFactory）+ DecoderManager：硬解优先、硬解不支持时软解兜底
     implementation(libs.nextlib.media3ext)
     implementation(libs.kotlinx.coroutines.core)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 
     // 编译期插件发现：由 kernel-ksp 生成 ExoPlayerPluginIndex
     ksp(project(":kernel:kernel-ksp"))

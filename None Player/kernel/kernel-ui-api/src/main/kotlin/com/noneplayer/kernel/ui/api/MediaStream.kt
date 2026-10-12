@@ -35,14 +35,37 @@ fun rememberMediaItems(): List<MediaItem>? {
         )
     val initial = remember(sources) {
         val snapshots = sources.map { it.mediaSnapshot() }
-        if (sources.isNotEmpty() && snapshots.all { it != null }) snapshots.filterNotNull().flatten()
-        else null
+        if (sources.isNotEmpty() && snapshots.all { it != null }) {
+            // 首帧值走与 collect 路径同一条合并口径（含契约键去重，见下方合并注释）
+            snapshots.filterNotNull().flatten().distinctBy { it.sourceId to it.id }
+        } else {
+            null
+        }
     }
     val state by remember(sources) {
         if (sources.isEmpty()) {
             flowOf<List<MediaItem>?>(null)
         } else {
-            combine(sources.map { it.observeMedia() }) { lists -> lists.flatMap { it } }
+            // 合并 + **按契约键去重**：`MediaItem.id` 的语义就是"来源内唯一"（跨来源以
+            // sourceId + id 区分），UI 的 Lazy 列表也以 `"$sourceId:$id"` 为 key。
+            // 合并结果若出现同键两条，下层必然有缺陷，但**列表键冲突会直接把进程打崩**
+            // （用户实报 release 扫描完成后闪退，栈即 Lazy 重复 key）——这里以数据层的
+            // 契约为据去重：展示正确性由契约保证，缺陷用日志暴露（Log.e 带着重复键，
+            // 排障时一眼可见），而不是让 UI 崩。
+            combine(sources.map { it.observeMedia() }) { lists ->
+                val merged = lists.flatMap { it }
+                val deduped = merged.distinctBy { it.sourceId to it.id }
+                if (deduped.size != merged.size) {
+                    val dupKeys = merged.groupBy { "${it.sourceId}:${it.id}" }
+                        .filterValues { it.size > 1 }
+                        .keys
+                    android.util.Log.e(
+                        "MediaStream",
+                        "媒体合并列表出现重复键（已按契约去重）：${dupKeys.take(5)}（共 ${dupKeys.size} 个键）",
+                    )
+                }
+                deduped
+            }
         }
     }.collectAsStateWithLifecycle(initialValue = initial)
     return state

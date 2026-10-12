@@ -114,6 +114,25 @@ class HistoryPolicyTest {
     // ---- A1-3 断点失效校验 ----
 
     @Test
+    fun `local scan cannot prune another sources history or favorites`() {
+        val keys = listOf("local:1", "remote:1", "local-extra:2", "local:3")
+        assertEquals(listOf("local:3"), HistoryRepository.orphanKeys(keys, setOf("local:1"), "local"))
+        assertEquals(
+            listOf("local:1", "local:3"),
+            HistoryRepository.orphanKeys(keys, emptySet(), "local"),
+        )
+    }
+
+    @Test
+    fun `source names with sql wildcard characters are matched literally`() {
+        val keys = listOf("disk_1:4", "diskX1:4", "disk_1:5")
+        assertEquals(
+            listOf("disk_1:5"),
+            HistoryRepository.orphanKeys(keys, setOf("disk_1:4"), "disk_1"),
+        )
+    }
+
+    @Test
     fun `指纹一致时断点可信`() {
         assertTrue(HistoryRepository.breakpointIntact(100L, 20L, 100L, 20L))
     }

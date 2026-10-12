@@ -36,6 +36,7 @@ dependencies {
     // M2 共享封面：飞行帧要渲染与卡片同一张封面（与 plugin-library 同一个 Coil，不增体积）
     implementation(libs.coil.compose)
     implementation(libs.androidx.activity.compose)
+    implementation(libs.androidx.lifecycle.process)
 
     // 编译期插件发现：由 kernel-ksp 生成 PlayerUiPluginIndex
     ksp(project(":kernel:kernel-ksp"))

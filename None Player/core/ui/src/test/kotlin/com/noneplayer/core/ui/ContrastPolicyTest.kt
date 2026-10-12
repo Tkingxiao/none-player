@@ -13,6 +13,23 @@ import org.junit.Test
  */
 class ContrastPolicyTest {
 
+    @Test
+    fun audioBackdropIsReadableOnEveryCoverBrightness() {
+        for (ink in listOf(NpInkLight, NpInkDark)) {
+            val alpha = npReadableBackdropAlpha(ink)
+            for (level in 0..255) {
+                val cover = level / 255f
+                val background = Color(
+                    ink.bg.red * alpha + cover * (1f - alpha),
+                    ink.bg.green * alpha + cover * (1f - alpha),
+                    ink.bg.blue * alpha + cover * (1f - alpha),
+                )
+                assertRatio("audio primary", ink.fg, background, 7.0)
+                assertRatio("audio secondary", ink.muted, background, 4.5)
+            }
+        }
+    }
+
     private fun ratio(fg: Color, bg: Color): Double = npContrastRatio(fg, bg)
 
     private fun assertRatio(what: String, fg: Color, bg: Color, min: Double) {

@@ -33,8 +33,15 @@ internal object PinyinSearch {
         null
     }
 
-    /** 转写结果缓存：扫描库越大同一标题被反复匹配的次数越多 */
-    private val cache = LruCache<String, String?>(512)
+    /**
+     * 转写结果缓存：扫描库越大同一标题被反复匹配的次数越多。
+     *
+     * 缓存**不放 null**（android.util.LruCache 拒收 null 值，put 直接抛 NPE——
+     * 用户实报"搜索输入数字会崩溃"：纯数字/纯符号标题（"2024"、"1080"、"[01]"）
+     * 转写后剥掉非字母变空串，result 为 null 时旧代码照样 put 出去）。
+     * "不可转写"改用空串哨兵缓存，读侧映射回 null。
+     */
+    private val cache = LruCache<String, String>(512)
 
     /** 拼音串归一用的两条模式：提到常量，键入路径上每次 cache miss 都各编译一次太亏（E121） */
     private val NON_ALPHA = Regex("[^a-z ]")
@@ -43,14 +50,14 @@ internal object PinyinSearch {
     /** 标题 → "ai qing" 形态拼音；不可转写（无 ICU / 异常）返回 null */
     fun toPinyin(text: String): String? {
         val source = icuSource ?: return null
-        cache.get(text)?.let { return it }
+        cache.get(text)?.let { return it.ifEmpty { null } }
         val result = runCatching { source.transliterate(text) }.getOrNull()
             ?.lowercase()
             ?.replace(NON_ALPHA, "")
             ?.replace(MULTI_SPACE, " ")
             ?.trim()
             ?.ifEmpty { null }
-        cache.put(text, result)
+        cache.put(text, result ?: "")
         return result
     }
 

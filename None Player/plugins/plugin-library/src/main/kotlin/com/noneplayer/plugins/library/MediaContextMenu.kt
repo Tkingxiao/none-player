@@ -86,26 +86,41 @@ internal fun MediaContextMenu(
     onToggleFavorite: () -> Unit,
     /** null = 不显示「详情」（当前仅类 PC 形态有详情页） */
     onDetail: (() -> Unit)?,
+    /**
+     * 「删除」（删除设备上的文件；确认流程由系统对话框把关）。
+     * null = 不显示——宿主未接删除链路时不摆一个点了没反应的条目。
+     */
+    onDelete: (() -> Unit)? = null,
 ) {
     val ink = LocalNpInk.current
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
-    // M21：锚定菜单从**靠锚点的那角**长出来（下方展开=左上角）。缩放只有 5%，
-    // 少数翻到上方的卡片读起来差别在 1dp 内，不值得为它把定位结果回灌到组合期。
+    // M21：锚定菜单从**靠锚点的那角**长出来（下方展开=左上角）。
+    // 用户实报"长按选项的出现动画看不见"——5% 缩放 + 150ms 淡入读起来就是"啪地弹出来"。
+    // 入场改成 0.90 → 1 + 180ms（Panel 档）：从锚点角"长出来"的方向感一眼可读；
+    // 退场保持 150ms（退场要更快离开，§3.9）。
     val scaleAllowed = npDisplacementAllowed()
-    val scaleFrom = if (scaleAllowed) 0.95f else 1f
+    val scaleFrom = if (scaleAllowed) 0.90f else 1f
     val exitMs = npDuration(Motion.Field)
     var visible by remember { mutableStateOf(false) }
     var exitJob by remember { mutableStateOf<Job?>(null) }
     LaunchedEffect(Unit) { visible = true }
     val entrance by animateFloatAsState(
         targetValue = if (visible) 1f else scaleFrom,
-        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        animationSpec = if (visible) {
+            npMotion<Float>(Motion.Panel, easing = NpEasing.Snappy)
+        } else {
+            npMotion<Float>(Motion.Field, easing = NpEasing.Snappy)
+        },
         label = "mediaContextMenuScale",
     )
     val layerAlpha by animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
-        animationSpec = npMotion<Float>(Motion.Field, easing = NpEasing.Snappy),
+        animationSpec = if (visible) {
+            npMotion<Float>(Motion.Panel, easing = NpEasing.Snappy)
+        } else {
+            npMotion<Float>(Motion.Field, easing = NpEasing.Snappy)
+        },
         label = "mediaContextMenuAlpha",
     )
     // 每一项都先退场再执行：父级回调一律把 contextMenu 置空，直接调会让 Popup 当场卸载。
@@ -219,6 +234,23 @@ internal fun MediaContextMenu(
                     },
                 )
             }
+            // 「删除」压轴且用危险色：删除设备文件是破坏性动作，与上面一组操作
+            // 用一条发丝线隔开（用户实报"长按多功能选项没有删除"）
+            if (onDelete != null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                        .height(1.dp)
+                        .background(ink.border),
+                )
+                ContextMenuRow(
+                    icon = NpIcon.Trash,
+                    label = "删除",
+                    danger = true,
+                    onClick = withDismiss(onDelete),
+                )
+            }
         }
     }
 }
@@ -229,6 +261,8 @@ private fun ContextMenuRow(
     label: String,
     onClick: () -> Unit,
     active: Boolean = false,
+    /** 破坏性条目（删除）：图标走 danger 色，其余样式不变——行内次要提示，不铺红底 */
+    danger: Boolean = false,
 ) {
     val ink = LocalNpInk.current
     NpOptRow(
@@ -239,7 +273,11 @@ private fun ContextMenuRow(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = if (active) ink.accent else ink.fg.copy(alpha = 0.8f),
+                tint = when {
+                    danger -> ink.danger
+                    active -> ink.accent
+                    else -> ink.fg.copy(alpha = 0.8f)
+                },
                 modifier = Modifier.size(18.dp),
             )
         },

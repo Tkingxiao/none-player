@@ -17,7 +17,7 @@ import com.noneplayer.kernel.ui.api.ScreenProvider
 class PlayerScreenProvider : ScreenProvider {
 
     override val route: String =
-        "player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}"
+        "player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}&audio={audio}&pip={pip}"
 
     // 深链带全量可选参数（都有 defaultValue，query 参数可省略）：
     // 只声明 uri 的话，外部传入的 id/title/mime 会被导航静默丢弃——
@@ -30,6 +30,7 @@ class PlayerScreenProvider : ScreenProvider {
     // 通知/锁屏/PiP 回跳的深链正是这个形状（服务侧只带 uri 与 id）。
     override val deepLinks: List<String> =
         listOf(
+            "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}&audio={audio}",
             "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}",
             "noneplayer://player?uri={uri}&id={id}",
             "noneplayer://player?uri={uri}",
@@ -47,6 +48,8 @@ class PlayerScreenProvider : ScreenProvider {
                 navArgument("from") { type = NavType.StringType; defaultValue = "" },
                 // 「全屏进来」标记（详情页/右栏内嵌播放的 ⛶）：1 = 落地即沉浸（§14 #16）
                 navArgument("fs") { type = NavType.StringType; defaultValue = "" },
+                navArgument("audio") { type = NavType.StringType; defaultValue = "" },
+                navArgument("pip") { type = NavType.StringType; defaultValue = "" },
             ),
             // E26：deepLinks 声明必须真正进入导航图，否则 Manifest 注册了 scheme
             // 也落不到本页面（此前该属性在内核中从未被消费）
@@ -60,6 +63,8 @@ class PlayerScreenProvider : ScreenProvider {
                 navigator = navigator,
                 fromStart = entry.arguments?.getString("from") == "start",
                 immersiveEntry = entry.arguments?.getString("fs") == "1",
+                audioOnlyEntry = entry.arguments?.getString("audio") == "1",
+                manualPipEntry = entry.arguments?.getString("pip") == "1",
             )
         }
     }

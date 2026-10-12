@@ -224,6 +224,14 @@ object NpIcon {
         stroke("NpSubtitle", "M5 5h14a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM10 10a2.5 2.5 0 0 0 0 4M16 10a2.5 2.5 0 0 0 0 4")
     }
 
+    /** 弹幕：气泡 + 两行飞过的文字（与 [Subtitle] 的"框内字幕"区分开） */
+    val Danmaku: ImageVector by lazy {
+        stroke(
+            "NpDanmaku",
+            "M6 5h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-6l-5 4v-4H6a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2zM8 9h8M8 12h5",
+        )
+    }
+
     val Expand: ImageVector by lazy {
         stroke("NpExpand", "M4 9V5a1 1 0 0 1 1-1h4M20 9V5a1 1 0 0 0-1-1h-4M4 15v4a1 1 0 0 0 1 1h4M20 15v4a1 1 0 0 1-1 1h-4")
     }

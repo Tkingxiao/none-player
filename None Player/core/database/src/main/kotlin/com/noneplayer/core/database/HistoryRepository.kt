@@ -200,10 +200,11 @@ class HistoryRepository(context: Context) {
      *
      * @return 删除的**历史**行数（不含收藏）
      */
-    suspend fun pruneOrphans(validKeys: Set<String>): Int {
-        val historyOrphans = orphanKeys(dao.allHistoryKeys(), validKeys)
+    suspend fun pruneOrphans(validKeys: Set<String>, sourceId: String): Int {
+        require(sourceId.isNotBlank()) { "Orphan cleanup requires a source namespace" }
+        val historyOrphans = orphanKeys(dao.allHistoryKeys(), validKeys, sourceId)
         historyOrphans.chunked(DELETE_CHUNK).forEach { dao.deleteHistoryKeys(it) }
-        val favoriteOrphans = orphanKeys(dao.allFavoriteKeys(), validKeys)
+        val favoriteOrphans = orphanKeys(dao.allFavoriteKeys(), validKeys, sourceId)
         favoriteOrphans.chunked(DELETE_CHUNK).forEach { dao.deleteFavoriteKeys(it) }
         return historyOrphans.size
     }
@@ -291,8 +292,13 @@ class HistoryRepository(context: Context) {
         }
 
         /** 纯函数（可单测）：库里存在、但本次扫描结果里没有的键（孤儿） */
-        fun orphanKeys(existing: Collection<String>, valid: Set<String>): List<String> =
-            existing.filterNot { it in valid }
+        fun orphanKeys(
+            existing: Collection<String>,
+            valid: Set<String>,
+            sourceId: String? = null,
+        ): List<String> = existing.filter {
+            (sourceId == null || it.startsWith("$sourceId:")) && it !in valid
+        }
 
         /**
          * 纯函数（可单测）：断点是否还落在**同一个文件**上（A1-3）。

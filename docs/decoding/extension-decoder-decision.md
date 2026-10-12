@@ -1,24 +1,35 @@
-# 扩展解码器（decoder_* / FFmpeg）引入决策（E44，批次 8）
+# 解码链与扩展依赖记录
 
-> 决策：**默认不内置**。本文是按 §12.2 代价表给出的正式决策记录，"评估后出决策文档（默认不内置）"即此件。
+核对：2026-10-12。修正旧稿“默认不内置FFmpeg”“无视频软解”的过时结论。
 
-## 结论
+## 当前实现
 
-| 选项 | 决策 | 依据 |
-| --- | --- | --- |
-| media3 官方扩展（decoder_av1 / vp9 / opus / flac / midi） | **不引入** | ① 均未发布到 Google Maven（官方 README 明示，ExoPlayer issue 2781）→ 需 clone 整仓 + NDK r26b+ 自建，构建链成本永久化；② 本项目 minSdk 26 的目标设备基本都有这些编码的平台解码器，扩展只惠及极旧机型；③ 每个 ABI 一份 .so，包体收益比为负 |
-| FFmpeg 扩展（音频专用 `FfmpegAudioRenderer`） | **不内置；保留为未来可选插件**（`plugin-player-ffmpeg`，EXTENSION_RENDERER_MODE_ON 排平台之后兜底） | ① 它是 §12.1 ③ 表中 AC-3/E-AC3/DTS/TrueHD/ALAC 的**唯一**正当解法（家庭影院片源"有声无画变无音"）；② 但 AC-3/E-AC3/DTS 仍在专利池——本项目（个人 / 非商用 / LGPL 路线）引入即踩合规线（P0-2 专利评估对 VC-1/WMV2 已实测不过，同类风险）；③ 项目已内置 NextLib（`FfmpegLibrary`）作为**解码查询**与若干软解通道（AV1/MPEG-1/2 视频兜底），纯音频扩展的增量收益主要剩 DTS/TrueHD 两类，属低频场景 |
-| 视频软解（`decoder_ffmpeg` 的视频面 / `ExperimentalFfmpegVideoRenderer`） | **明确不做** | media3 无视频软解通道是既定事实（§12.1 ②）：官方 FFmpeg 扩展对视频 MIME 返回 `FORMAT_UNSUPPORTED_TYPE`，`ExperimentalFfmpegVideoRenderer` 源码自述 under development and not yet functional。RMVB/WMV/VC-1 的"体面失败 + 转码指引 + 外唤"路线（批次 0 已落地）继续有效 |
+依据版本目录、NpRenderersFactory、PlaybackService、FormatProbe：
 
-## 引入 FFmpeg 音频扩展时的前置清单（供未来翻案用）
+1. Media3 `1.11.1` 平台MediaCodec。
+2. NextLib `1.11.1-0.16.0` 的NextRenderersFactory，包含FFmpeg音视频扩展，不只是查询。
+3. Media3Avi `2.7.1` AVI extractor与末端BitmapFactoryVideoRenderer（MJPEG）。
 
-1. **裁剪编解码表**：只编 AC-3/E-AC3/DTS/TrueHD/ALAC 对应解码器，`FfmpegLibrary` 的全表几十 MB 会把 APK 拖爆；
-2. **按 ABI 拆分** + 16KB page 对齐（与 E36 的 AGP/NDK 版本矩阵核对，media3 扩展 1.5.0 起支持 16KB）；
-3. **注册顺序**：`DefaultRenderersFactory.setEnableDecoderFallback(true)` + `EXTENSION_RENDERER_MODE_ON`（绝不 PREFER 抢硬解）——本仓库探测链已按此顺序写死（`FormatProbe` 三链一致），插件必须复用同序；
-4. **法务确认**（商用前）：LGPL 动态链接合规 + AC-3/DTS 专利授权；
-5. **探测一致性回归**：`FormatProbe.ffmpegSupports` 已覆盖 `FfmpegLibrary.supportsFormat`，新库换入后跑 `QpelCodecProbeTest`/`FormatProbeDecisionTest` 防止"探测说不支持、播放能解"的自相矛盾。
+硬件优先开启为ON，关闭为PREFER；影响新服务播放器构建，不是运行期热切换。
+setEnableDecoderFallback不保证平台认领但初始化失败时跨任意软解渲染器。
+探测与播放使用同源extractor并查平台/FFmpeg/MJPEG能力，声明支持不等于首帧实测。
 
-## 实证存档
+## 边界
 
-- 构建能力证明：FFmpeg 6.0 + NDK 27.2 双 ABI 最小构建（只开 wmv2/vc1）一次走通、16KB 对齐、模拟器 `System.load` 5/5 PASS（2026-10-02，`D:\Code\Player\.audit\ffmpeg\`，gitignored）——"能不能编"不是问题，"该不该进库"才是决策点；
-- 专利红线：VC-1/WMV2 在 MPEG LA 池，P0-2 评估 🟠 不通过（§0 已记账）。
+- 容器、编码、profile/level及设备输出分别验证，不能只按扩展名称“全支持”。
+- NextLib编解码表和ABI以实际AAR/native构建为准，不根据FFmpeg总体能力承诺。
+- WMV/VC1/ASP不能推断有软解兜底，需验证结构化失败及恢复。
+- bitmap字幕与ASS富文本分别检查解码出口/渲染契约，不泛称PGS/VobSub不支持。
+- 未依赖HLS/DASH/RTSP source模块，不声明网络协议支持。
+
+## 合规待核
+
+NextLib依赖标注GPL-3.0，FFmpeg构建许可证及链接/分发义务须核对。
+商用、源代码义务、专利区域与时点需专业评估，本文不作法律认证。
+旧“专利红线”“仅旧机受益”推断删除，它们不能由代码或模拟器推出。
+依赖升级同步核对版本/ABI/16KB/API及许可材料。
+
+## 验收
+
+FormatProbeDecisionTest、native-load插桩及格式矩阵，存probe/首帧/seek/音轨/失败恢复证据。
+模拟器不替代真机HDR/直通/温控/专有解码器验收。
