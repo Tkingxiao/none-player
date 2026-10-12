@@ -440,7 +440,16 @@ fun KernelTabScaffold(
                 //
                 // `LocalNpPaneOccupied` 必须包住 **navHost**（不只是右栏）：页面里的
                 // 内联画面要靠它让位，一台播放器只有一个输出 Surface。
-                CompositionLocalProvider(LocalNpPaneOccupied provides paneInUse) {
+                val paneProgress by animateFloatAsState(
+                    targetValue = if (paneInUse) 1f else 0f,
+                    // 右栏进出是一次缩放，不是把画面横向拉开。Emphasized 比 Silk 更跟手。
+                    animationSpec = npMotion(Motion.Shared, easing = NpEasing.Emphasized),
+                    label = "playbackPaneWidth",
+                )
+                // 收起动画没走完之前，详情页仍按「右栏占着画面」排版。
+                // 否则 ✕ 的同一帧就会在左侧冒出封面，画面先跳到左边再弹回右边。
+                val detailPaneOccupied = paneInUse || paneProgress > 0.04f
+                CompositionLocalProvider(LocalNpPaneOccupied provides detailPaneOccupied) {
                     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                         // §8.1 类 PC 行：列表 320–400、播放 ≥480。
                         // 取窗口宽的 30% 再夹进区间——固定 360dp 在 1280dp 窗口里
@@ -450,12 +459,6 @@ fun KernelTabScaffold(
                             (maxWidth * 0.30f)
                                 .coerceIn(320.dp, 400.dp)
                                 .coerceAtMost((maxWidth - 480.dp).coerceAtLeast(280.dp))
-                        val paneProgress by animateFloatAsState(
-                            targetValue = if (paneInUse) 1f else 0f,
-                            // 右栏进出是一次缩放，不是把画面横向拉开。Emphasized 比 Silk 更跟手。
-                            animationSpec = npMotion(Motion.Shared, easing = NpEasing.Emphasized),
-                            label = "playbackPaneWidth",
-                        )
                         val listWidth = maxWidth + (targetListWidth - maxWidth) * paneProgress
                         Row(modifier = Modifier.fillMaxSize().clipToBounds()) {
                             navHost(
@@ -483,11 +486,12 @@ fun KernelTabScaffold(
                                             .weight(1f)
                                             .fillMaxHeight()
                                             .graphicsLayer {
-                                                val scale = 0.86f + 0.14f * paneProgress
+                                                // 在右栏自己的框里缩小，锚点靠右，避免收起时被拉到左封面。
+                                                val scale = 0.72f + 0.28f * paneProgress
                                                 scaleX = scale
                                                 scaleY = scale
                                                 alpha = paneProgress.coerceIn(0f, 1f)
-                                                transformOrigin = TransformOrigin(1f, 0.5f)
+                                                transformOrigin = TransformOrigin(1f, 0.45f)
                                             }
                                             .padding(
                                                 start = windowInfo.pageGutter,

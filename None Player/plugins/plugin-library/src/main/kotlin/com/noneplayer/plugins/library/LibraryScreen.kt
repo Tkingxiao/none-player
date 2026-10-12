@@ -131,7 +131,6 @@ import com.noneplayer.core.ui.npAnchor
 import com.noneplayer.core.ui.npClickable
 import com.noneplayer.core.ui.npItemFadeSpec
 import com.noneplayer.core.ui.npPressScale
-import com.noneplayer.core.ui.npMaskFadeEdges
 import com.noneplayer.core.ui.npStaggeredEntry
 import com.noneplayer.core.ui.npStaggerWindow
 import com.noneplayer.core.ui.rememberNpAnchorHolder
@@ -1296,11 +1295,9 @@ private fun FolderRailOrGrid(
         )
     }
     if (compact) {
-        val ink = LocalNpInk.current
         // §20.3 余量②：紧凑档横排也接首屏错峰（窗口在本函数取一次 = 整个文件夹区块一次）
         val staggerWindow = npStaggerWindow()
         LazyRow(
-            modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
             contentPadding = PaddingValues(horizontal = gutter),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
@@ -1397,11 +1394,8 @@ private fun MediaRail(
     staggerWindow: Long,
     onOpen: (MediaItem) -> Unit,
 ) {
-    val ink = LocalNpInk.current
     val gutter = if (compact) 14.dp else 20.dp
-    // 右栏占位时右端贴着栏边界，渐隐带会被读成"半透明过渡"——只保留左端（§4.5）
     LazyRow(
-        modifier = Modifier.npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
         contentPadding = PaddingValues(horizontal = gutter, vertical = 2.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {

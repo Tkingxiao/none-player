@@ -1066,6 +1066,8 @@ fun PlayerScreen(
     // ---- 设计稿播放器交互面（sheet / 仅听音频 / 循环模式）----
     val ink0 = LocalNpInk.current
     val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
+    // 仅听页的系统返回也离开播放页。后注册，优先于「横屏先退全屏」。
+    BackHandler(enabled = audioOnly && !stageLocked) { navigator.popBackStack() }
     val loopMode by session.loopMode.collectAsStateWithLifecycle()
     var speedPickerVisible by remember { mutableStateOf(false) }
     // 双击步长（L14）：设置页可改，默认 10s（批次 2 的既有手感）
@@ -1765,6 +1767,7 @@ fun PlayerScreen(
                             pictureSheetVisible -> pictureSheetVisible = false
                             fileInfoVisible -> fileInfoVisible = false
                             moreSheetVisible -> moreSheetVisible = false
+                            audioOnly -> navigator.popBackStack()
                             else -> exitFullscreenOrLeave()
                         }
                         true
@@ -1792,7 +1795,8 @@ fun PlayerScreen(
             // 覆盖所有形态；「切回视频」回到当前形态的播放版式
             AudioOnlyScreen(
                 session = session,
-                onBack = { toggleAudioOnlyWithMemory() },
+                // 返回上一页。切回全屏视频是「切回视频」的事，返回键不该做这个。
+                onBack = navigator::popBackStack,
                 favorited = favorited,
                 onToggleFavorite = { toggleFavorite() },
                 onOpenSpeed = { speedPickerVisible = !speedPickerVisible },

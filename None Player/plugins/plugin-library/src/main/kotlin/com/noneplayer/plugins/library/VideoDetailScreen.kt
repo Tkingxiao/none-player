@@ -158,13 +158,21 @@ internal fun VideoDetailScreen(
             bottom = bottomInset + 28.dp,
         )
         if (siblings.size <= 1 && maxWidth >= 600.dp && !paneOccupied) {
-            // 没有剧集时不要把 16:9 封面拉满整栏——平板上会变成一块空荡的巨幅。
+            // 与多剧集同一侧：详情在左、画面在右。封面若放在左边，右栏点 ✕ 收起时
+            // 画面会先跳到左封面再弹回右边。
             Row(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(pad),
-                horizontalArrangement = Arrangement.spacedBy(24.dp),
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
             ) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                ) {
+                    DetailMeta(item = item)
+                }
                 DetailHero(
                     item = item,
                     hue = hue,
@@ -178,16 +186,19 @@ internal fun VideoDetailScreen(
                     onStartInline = ::startPlayback,
                     onFullscreen = { onFullscreen(item) },
                     onAudioOnly = { onAudioOnly(item) },
-                    onOpenInfo = null,
-                    modifier = Modifier.widthIn(max = 420.dp),
+                    onOpenInfo = { showDetail = true },
+                    modifier = Modifier.weight(1.05f),
                 )
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    DetailMeta(item = item)
-                }
+            }
+        } else if (paneOccupied && siblings.size <= 1) {
+            // 右栏已经在播：左边只留详情，不要再挂一个会在关闭时闪到左侧的封面。
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(pad)
+                    .verticalScroll(rememberScrollState()),
+            ) {
+                DetailMeta(item = item)
             }
         } else if (paneOccupied) {
             // The shell already owns the video surface; keep this narrow pane focused on episodes.
@@ -445,13 +456,21 @@ private fun DetailMeta(
 
     Column(modifier = modifier) {
         Text(
-            // E42：与卡片同一套展示名（富化出短标题就用它，否则退回整条文件名）
-            text = item.cardTitle,
+            // 详情里用文件原名，不换富化短标题，也不截成三行。
+            text = item.title.ifBlank { item.cardTitle },
             style = NpTypography.headlineSmall,
             color = ink.fg,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
         )
+        item.folder?.takeIf { it.isNotBlank() }?.let { path ->
+            Text(
+                text = path,
+                style = NpMonoSmall,
+                color = ink.muted,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+            )
+        }
         if (meta.isNotEmpty()) {
             Text(
                 text = meta.joinToString("  ·  "),
@@ -461,7 +480,6 @@ private fun DetailMeta(
             )
         }
         Spacer(Modifier.height(14.dp))
-        DetailInfoRow("所在文件夹", item.folder?.takeIf { it.isNotBlank() } ?: "—")
         if (item.width > 0 && item.height > 0) {
             DetailInfoRow("分辨率", "${item.width} × ${item.height}")
         }
@@ -521,11 +539,8 @@ private fun SiblingRow(
 ) {
     val ink = LocalNpInk.current
     NpOptRow(
-        // 短标题 + 集号：同名剧集（"剧集 · 第 2 集" / "剧集 · 第 10 集"）才分得清
-        text = listOfNotNull(
-            sibling.cardTitle.ifBlank { sibling.uri.substringAfterLast('/') },
-            sibling.episodeLabel,
-        ).joinToString(" · "),
+        // 左边剧集用文件原名。富化短标题和「第 N 集」是解析结果，不是文件名。
+        text = sibling.title.ifBlank { sibling.uri.substringAfterLast('/') },
         selected = current,
         onClick = { if (!current) onSelect(sibling) },
         leading = {
