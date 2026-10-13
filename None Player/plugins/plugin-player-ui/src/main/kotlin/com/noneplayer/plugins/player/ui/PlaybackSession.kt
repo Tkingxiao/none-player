@@ -8,6 +8,8 @@ import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.LOCAL_MEDIA_SOURCE_ID
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.kind
 import com.noneplayer.core.media.NpDecoding
 import com.noneplayer.core.media.cardTitle
 import com.noneplayer.kernel.api.EventBus
@@ -32,6 +34,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -114,10 +117,13 @@ class PlaybackSession(
         item: MediaItem,
         restorePosition: Boolean = true,
         autoPlay: Boolean = true,
+        audioOnlyMode: Boolean? = null,
     ): SessionStart {
         val pending = startJob
         if (pending?.isActive == true && startingItem?.uri == item.uri && startingItem?.id == item.id) {
-            return pending.await()
+            val result = pending.await()
+            if (result.accepted && audioOnlyMode != null) setAudioOnly(audioOnlyMode)
+            return result
         }
         pending?.cancel()
         startingItem = item
@@ -127,6 +133,7 @@ class PlaybackSession(
                 context, registry, settings, history, player, this@PlaybackSession, item,
                 restorePosition = restorePosition,
                 autoPlay = autoPlay,
+                audioOnlyMode = audioOnlyMode,
                 onSubtitleMatched = { key, hit -> scope.launch { settings.setSubtitleUri(key, hit) } },
             )
         }
@@ -168,10 +175,16 @@ class PlaybackSession(
             combine(settings.autoplayNext, _player) { autoplay, player -> autoplay to player }
                 .collect { (autoplay, player) -> player?.setAutoplayNext(autoplay) }
         }
-        // §9.4「播放中自动降一档」的输入。此前这条管道是**空转的**：主题层的
-        // `forPlayback()` 与 `autoMotionQuality(decodingVideo)` 都写好了，但 app 侧
-        // 拿不到会话，只能恒传 false，于是解码期的装饰动画从来没降过档。
-        // 判据是"视频正在播"：仅听音频态没有视频解码器在跑，不该拿它去削别的动画。
+        observeDecodingVideo()
+    }
+
+    // §9.4「播放中自动降一档」的输入。此前这条管道是**空转的**：主题层的
+    // `forPlayback()` 与 `autoMotionQuality(decodingVideo)` 都写好了，但 app 侧
+    // 拿不到会话，只能恒传 false，于是解码期的装饰动画从来没降过档。
+    // 判据是"视频正在播"：仅听音频态没有视频解码器在跑，不该拿它去削别的动画。
+    // flatMapLatest 仍是实验 API；init 块不能挂注解，故下沉到这里单独 opt-in。
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeDecodingVideo() {
         scope.launch {
             combine(_player.flatMapLatest { it?.state ?: flowOf(PlaybackState.Idle) }, _audioOnly) { state, audioOnly ->
                 state == PlaybackState.Playing && !audioOnly
@@ -192,6 +205,7 @@ class PlaybackSession(
      * 也杜绝了"页内两处各写一份、漂一份"的老问题。
      */
     private val _audioOnly = MutableStateFlow(false)
+    private var audioModeRevision = 0L
 
     /** 仅听音频模式状态（UI collectAsState 用） */
     val audioOnly: StateFlow<Boolean> = _audioOnly.asStateFlow()
@@ -225,10 +239,29 @@ class PlaybackSession(
 
     /** 置位并写 per-media 记忆（§5.1 恢复路径重复写同值 = 幂等，不多一条语义） */
     fun setAudioOnly(value: Boolean) {
-        _audioOnly.value = value
+        audioModeRevision++
+        val item = _queue.value.getOrNull(_index.value)
+        val target = resolveAudioOnlyMode(value, item?.kind == MediaKind.AUDIO)
+        _audioOnly.value = target
+        player?.setVideoTracksEnabled(!target)
         val key = currentMediaKey
         if (key.isNotEmpty()) {
-            scope.launch { settings.setAudioOnlyPreferred(key, value) }
+            scope.launch { settings.setAudioOnlyPreferred(key, target) }
+        }
+    }
+
+    private fun restoreAudioMode(item: MediaItem, restoredMode: Boolean? = null) {
+        val revision = ++audioModeRevision
+        _audioOnly.value = resolveAudioOnlyMode(restoredMode, item.kind == MediaKind.AUDIO)
+        player?.setVideoTracksEnabled(!_audioOnly.value)
+        if (restoredMode != null || item.id.isEmpty()) return
+        scope.launch {
+            val stored = settings.audioOnlyPreference(mediaMemoryKey(item.sourceId, item.id)).first()
+            val current = _queue.value.getOrNull(_index.value)
+            if (revision == audioModeRevision && current?.id == item.id && current.uri == item.uri) {
+                _audioOnly.value = resolveAudioOnlyMode(stored, item.kind == MediaKind.AUDIO)
+                player?.setVideoTracksEnabled(!_audioOnly.value)
+            }
         }
     }
 
@@ -258,6 +291,7 @@ class PlaybackSession(
                 .collect { idx ->
                     if (idx != _index.value && idx in _queue.value.indices) {
                         _index.value = idx
+                        restoreAudioMode(_queue.value[idx])
                         // 引擎推进（自动连播 / 通知栏 ⏭）也广播给全仓库：
                         // 详情页等 UI 侧订阅方靠它把"正在看的条目"跟上队列，
                         // 否则右栏已在放下一集、详情页还停在播完的那一集。
@@ -276,8 +310,15 @@ class PlaybackSession(
      */
     private val _player = MutableStateFlow<VideoPlayer?>(null)
 
-    /** 已创建引擎对应的 mimeType，用于判断能否复用 */
-    private var engineMimeType: String? = null
+    /**
+     * 已创建引擎的**身份**（[com.noneplayer.kernel.api.PlayerEngineProvider.engineId]）。
+     *
+     * 复用判据必须是引擎身份而不是 mimeType 字符串：同一个 exo 引擎既接 `video/mp4`
+     * 也接 `video/x-matroska`，按字符串比会在换集（容器不同）时误判成"换代"——
+     * 释放旧实例 + 重建 MediaController + 重连会话，几秒全落在用户等的那段时间里。
+     * 引擎内部本来就按**每个条目各自的 mimeType** 选解封装器，无需换代。
+     */
+    private var engineId: String? = null
 
     /** 当前引擎实例（供播放页直接驱动） */
     val player: VideoPlayer? get() = _player.value
@@ -354,7 +395,11 @@ class PlaybackSession(
      */
     fun acquire(mimeType: String): VideoPlayer? {
         val existing = _player.value
-        if (existing != null && engineMimeType == mimeType) return existing
+        // 目标 mimeType 归哪个引擎：同引擎（哪怕容器不同）直接复用既有实例
+        val targetEngineId = runCatching { factory.engineIdFor(mimeType) }.getOrNull()
+        if (existing != null && targetEngineId != null && targetEngineId == engineId) {
+            return existing
+        }
         existing?.release()
         val created = runCatching { factory.create(context, mimeType) }
             .onFailure { _engineError.value = it.message ?: it.javaClass.simpleName }
@@ -364,15 +409,16 @@ class PlaybackSession(
             // nowPlaying 会继续订阅一个已释放的控制器（位置/状态冻在最后一帧、
             // 迷你条像卡住），player getter 也会把死对象交给 UI。会话回到"无引擎"干净态。
             _player.value = null
-            engineMimeType = null
+            engineId = null
             _queue.value = emptyList()
             _index.value = -1
             return null
         }
-        engineMimeType = mimeType
+        engineId = targetEngineId
         _engineError.value = null
         _player.value = created
         created.setSubtitleOffsetMs(_subtitleOffsetMs.value)
+        created.setVideoTracksEnabled(!_audioOnly.value)
         return created
     }
 
@@ -388,12 +434,14 @@ class PlaybackSession(
          *  它由引擎在 prepare 时套用，不依赖"控制器已连接"这一时序假设
          *  （单独的 seekTo 在控制器未就绪时会被静默丢弃，模拟器实测续播丢失）。 */
         startPositionMs: Long = 0L,
+        audioOnlyMode: Boolean? = null,
     ) {
         // 无引擎：会话保持干净（不动队列/下标），原因已写入 engineError 由 UI 呈现
         val player = acquire(item.mimeType) ?: return
         val (list, index) = resolveQueueStart(queueOfFolder, item)
         _queue.value = list
         _index.value = index
+        restoreAudioMode(list[index], audioOnlyMode)
         player.setQueue(list, index, startPositionMs.coerceAtLeast(0L))
         events.publish(KernelEvent.PlaybackStarted(list[index].id))
         // play_count 在"进入某项播放"时 +1（周期/暂停落点不算，避免被落点次数灌水）
@@ -441,7 +489,10 @@ class PlaybackSession(
         // 切集前把**离开的那一项**的进度落盘——否则从选集/底栏跳集会把断点丢掉
         // （页退落盘只记得住当前项）。
         persistPosition()
-        _index.value = index
+        if (_index.value != index) {
+            _index.value = index
+            restoreAudioMode(_queue.value[index])
+        }
         _player.value?.selectQueueIndex(index)
         events.publish(KernelEvent.PlaybackStarted(_queue.value[index].id))
     }
@@ -471,6 +522,8 @@ class PlaybackSession(
         p?.clearQueue()
         _queue.value = emptyList()
         _index.value = -1
+        audioModeRevision++
+        _audioOnly.value = false
         setSubtitleOffsetMs(0L)
     }
 
@@ -520,12 +573,7 @@ internal fun shouldStopInBackground(
 /**
  * 决定某个媒体此刻该处于哪种呈现模式（E129 / 审查 #1、#2）——纯函数，便于单测。
  *
- * 语义就一句：**有记忆用记忆，没记忆按媒体类型给默认**。
- *
- * ① **没记过**（[storedPreference] 为 null）→ 落**媒体类型默认值**：音频默认仅听，
- *    不再以视频舞台 + 空画面出现（审查 #1）；
- * ② **记过 `false`** → 就是 `false`。`false` 与"没记过"必须分开，否则"上一个媒体
- *    停在仅听"会一路带进下一个媒体（审查 #2）——这正是旧实现只在 `true` 时置位的病根。
+ * Pure audio always uses audio mode. Video restores its preference, defaulting to video.
  *
  * **默认值不需要记忆键**：`storedPreference` 传 null 时这条同样给出类型默认，于是
  * "深链没带 id"的入口（外部 ACTION_VIEW / 通知回跳）也能拿到正确形态——那一路没有键
@@ -539,7 +587,7 @@ internal fun shouldStopInBackground(
 internal fun resolveAudioOnlyMode(
     storedPreference: Boolean?,
     isAudioMedia: Boolean,
-): Boolean = storedPreference ?: isAudioMedia
+): Boolean = isAudioMedia || storedPreference == true
 
 /**
  * 队列定位（E18 提纯为普通函数以便单测）：**先 id 再 uri**——来源重扫后

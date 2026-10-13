@@ -24,7 +24,7 @@ class LibraryTabProvider : TabProvider {
     override val tabId: String = "library"
     override val label: String = "首页"
     override val icon: Any = NpIcon.Home
-    override val selectedIcon: Any? = NpIcon.HomeFill
+    override val selectedIcon: Any = NpIcon.HomeFill
     override val order: Int = 10
     override val route: String = "home"
     override val deepLinks: List<String> = listOf("noneplayer://library")
@@ -44,7 +44,7 @@ class FoldersTabProvider : TabProvider {
     override val tabId: String = "folders"
     override val label: String = "文件夹"
     override val icon: Any = NpIcon.Folder
-    override val selectedIcon: Any? = NpIcon.FolderFill
+    override val selectedIcon: Any = NpIcon.FolderFill
     override val order: Int = 20
     override val route: String = "folders"
     override val deepLinks: List<String> = emptyList()

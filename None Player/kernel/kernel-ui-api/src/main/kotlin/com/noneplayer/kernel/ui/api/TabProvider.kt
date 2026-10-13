@@ -1,6 +1,5 @@
 package com.noneplayer.kernel.ui.api
 
-import com.noneplayer.kernel.api.ExtensionPoint
 
 /**
  * 底部标签栏扩展点——插件向主界面贡献一个顶层 Tab（B 站式信息架构）。

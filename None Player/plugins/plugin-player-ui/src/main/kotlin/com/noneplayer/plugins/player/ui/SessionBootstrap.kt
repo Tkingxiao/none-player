@@ -5,6 +5,8 @@ import androidx.core.net.toUri
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.kind
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.VideoPlayer
@@ -27,6 +29,15 @@ internal data class SessionStart(
      * 用户只看到"没有字幕"，以为是自己没挂上（L7）。
      */
     val subtitleMissing: Boolean = false,
+    /**
+     * 本次装载**权威条目**的封面地址（来自同文件夹队列，`null` = 队列里没找到本项）。
+     *
+     * 播放页此前在装载**之前**自己再查一次封面：`resolveCoverUri` 会为拿一张图把整个
+     * 媒体来源快照拉一遍再线性找 id——而队列解析已经把同一份快照拉过一次了。两趟全量
+     * 扫描串在"点播放 → 出画"之间，是长片/大文件夹起播慢的一环。封面本就不是出画
+     * 所需（只在播放结束画面当海报用），改由这里随装载结果回传，装载链只扫一遍。
+     */
+    val coverUri: String? = null,
 )
 
 /**
@@ -62,6 +73,7 @@ internal suspend fun ensureSessionPlaying(
      * 默认 true 保迷你条 / 详情页内嵌的既有语义不变。
      */
     autoPlay: Boolean = true,
+    audioOnlyMode: Boolean? = null,
     onSubtitleMatched: ((mediaKey: String, uri: String) -> Unit)? = null,
 ): SessionStart {
     if (!isPlayableUriScheme(item.uri)) return SessionStart(accepted = false)
@@ -97,11 +109,19 @@ internal suspend fun ensureSessionPlaying(
         // 控制器未就绪时会被丢弃，续播会静默回到 0（模拟器实测）
         // An item without an external subtitle must not inherit the previous item's file.
         player.setSubtitle(null)
+        val mode = resolveAudioOnlyMode(
+            audioOnlyMode ?: keyedItem.takeIf { it.id.isNotEmpty() }?.let {
+                settings.audioOnlyPreference(mediaMemoryKey(it.sourceId, it.id)).first()
+            },
+            keyedItem.kind == MediaKind.AUDIO,
+        )
         session.open(
             item = authoritative ?: item,
             queueOfFolder = queue,
             startPositionMs = startMs,
+            audioOnlyMode = mode,
         )
+        if (audioOnlyMode != null) session.setAudioOnly(mode)
         player.setSpeed(settings.playbackSpeed.first())
         var subtitleMissing = false
         // A2-8：字幕记忆的键与 Room 的 media_key 同约定（`sourceId:mediaId`），
@@ -124,8 +144,15 @@ internal suspend fun ensureSessionPlaying(
         }
         player.setTextTracksEnabled(settings.subtitleEnabled.first())
         player.play()
-        return SessionStart(accepted = true, resumedFromMs = startMs, subtitleMissing = subtitleMissing)
+        return SessionStart(
+            accepted = true,
+            resumedFromMs = startMs,
+            subtitleMissing = subtitleMissing,
+            // 队列解析已经握着权威条目，封面随它回传——播放页不必再全库扫一遍
+            coverUri = (authoritative ?: item).coverUri,
+        )
     } else {
+        if (audioOnlyMode != null) session.setAudioOnly(audioOnlyMode)
         // 会话里已经是同一个媒体（从迷你条/内嵌播放器点回来）。
         // **已播完的必须从头起**：media3 在 STATE_ENDED 上 `play()` 是空操作，
         // 不退位就永远停在结束画面——用户看到"点进来没反应"。

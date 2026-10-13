@@ -69,8 +69,6 @@ class PluginMarkerProcessor(
     }
 
     private fun validatePluginClass(clazz: KSClassDeclaration): Boolean {
-        val name = clazz.qualifiedName?.asString() ?: clazz.simpleName.asString()
-
         if (clazz.classKind != ClassKind.CLASS || clazz.modifiers.contains(Modifier.ABSTRACT)) {
             logger.error("@PluginMarker 只能标注在具体类上（不能是接口、object 或抽象类）", clazz)
             return false

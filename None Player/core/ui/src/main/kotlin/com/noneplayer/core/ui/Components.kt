@@ -1,5 +1,6 @@
 package com.noneplayer.core.ui
 
+import android.annotation.SuppressLint
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -976,6 +977,7 @@ fun NpPageScaffold(
  * 再加一行 13sp 统计只会把首屏内容往下推，而统计值在内容里也能看到。
  */
 @Composable
+@SuppressLint("UnusedContentLambdaTargetStateParameter")
 fun NpAppTopBar(
     title: String,
     modifier: Modifier = Modifier,
@@ -1014,6 +1016,9 @@ fun NpAppTopBar(
         // 也不是交叉淡入——两个长文件夹名在半透明里叠着走，用户实报"覆盖跳变，难看且不优雅"
         // （2026-10-12）；把进场延迟到退场结束后，同一节拍读起来是"旧名退干净、新名再出来"。
         // 只做 alpha——同字号、单行、左对齐，不动布局（轻量档/Reduce Motion 下本来也没有可并的位移）。
+        // 内容 lambda 读实时 `title` 而不是 targetState 形参是有意的（见函数上的 @SuppressLint）：
+        // [titleKey] 恒定时（同页切集）要求"即时换字、不动画"，而 targetState 只带 key，形参给不出文案。
+        // 代价是退场帧会先变成新文案再淡出——进场延迟已把两帧错开时间，不会叠字。
         val titleFadeMs = npDuration(Motion.NavFade)
         val titleExitMs = npDuration(Motion.NavExit)
         Column(modifier = Modifier.weight(1f)) {
@@ -1042,7 +1047,7 @@ fun NpAppTopBar(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (!compact && subtitle != null && subtitle.isNotEmpty()) {
+                    if (!compact && !subtitle.isNullOrEmpty()) {
                         Text(
                             text = subtitle,
                             style = NpTypography.bodySmall,

@@ -1,7 +1,6 @@
 package com.noneplayer.kernel
 
 import android.os.Build
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -35,11 +34,8 @@ import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.kernel.api.Navigator
-import com.noneplayer.kernel.api.Plugin
 import com.noneplayer.kernel.ui.api.ABOUT_ROUTE
-import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
-import com.noneplayer.kernel.ui.api.SETTINGS_ROUTE
 import com.noneplayer.kernel.ui.api.ScreenProvider
 import androidx.compose.ui.res.stringResource
 import com.noneplayer.core.ui.LocalNpTopBarInset

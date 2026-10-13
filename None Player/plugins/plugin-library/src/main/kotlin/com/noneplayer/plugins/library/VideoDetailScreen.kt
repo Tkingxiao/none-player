@@ -49,7 +49,6 @@ import com.noneplayer.core.ui.NpCoverBox
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMediaColor
-import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpOptRow
 import com.noneplayer.core.ui.NpPrimaryButton
@@ -346,7 +345,6 @@ private fun DetailHero(
     onOpenInfo: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
-    val ink = LocalNpInk.current
     Column(modifier = modifier) {
         val inline = inlinePlayer != null && inlinePlaying
         if (inline) {

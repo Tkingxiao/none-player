@@ -2,9 +2,11 @@ package com.noneplayer.plugins.player.ui
 
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -70,32 +72,34 @@ import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npCoverScrim
 import com.noneplayer.core.ui.npInkForBackdrop
 import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.ui.npDuration
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.npPressScale
 import com.noneplayer.core.ui.npQuality
 import com.noneplayer.core.ui.npReadableBackdropAlpha
 import com.noneplayer.kernel.api.NpLoopMode
-import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.plugins.player.ui.controls.WaveformSeekBar
+import kotlinx.coroutines.delay
 
 /**
  * 仅听音频整屏页（设计稿 `.audio`，CSS 538-594 / JS enterAudio-renderAudio 1575-1642）——
  * 网易云式"只听不看"形态：辉光 + 旋转黑胶 + 落针唱臂 + 控制排 + 工具 chips。
  *
- * **两条版式**（形态判定一律走 [LocalNpWindowInfo]，§13.2）：
- * - 竖窗：设计稿原样的纵排，整页可滚。
- * - 横窗（手机横置 / 平板横屏）：黑胶在左、内容在右的两栏，整页**不滚**——
+ * **两条版式**按实际内容区域约束分派，整屏和内嵌右栏共用：
+ * - 窄栏或竖窗：纵排，整页可滚。
+ * - 足够宽的横向区域：黑胶在左、内容在右的两栏，整页**不滚**——
  *   纵排那一列约 800dp，压进 400dp 出头的横向窗口会把播放键推出屏幕。
  *
- * **省电语义**：进入本页后播放页不再组合 VideoStage（SurfaceView 从树上消失，
- * media3 无渲染面即停止视频输出，音频照常走后台服务）。
+ * **省电语义**：进入本页后不再组合 VideoStage；会话禁用视频轨道，
+ * TextureView 与视频解码退出，音频照常走后台服务。
  */
 @Composable
 fun AudioOnlyScreen(
     session: PlaybackSession,
     onBack: () -> Unit,
+    onReturnToVideo: (() -> Unit)? = null,
     favorited: Boolean = false,
     onToggleFavorite: () -> Unit = {},
     onOpenSpeed: () -> Unit = {},
@@ -103,8 +107,8 @@ fun AudioOnlyScreen(
     speedPickerVisible: Boolean = false,
     onPickSpeed: (Float) -> Unit = {},
     onOpenEpisodes: () -> Unit = {},
-    onOpenEqualizer: () -> Unit = {},
     speedText: String = "1.0x",
+    embedded: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
     val themeInk = LocalNpInk.current
@@ -122,18 +126,24 @@ fun AudioOnlyScreen(
         NpLoopMode.SHUFFLE -> NpIcon.Sort
         NpLoopMode.ALL -> NpIcon.Sound
     }
-    // 形态判定单点消费（§13.2）：本页只问"窗口横向吗、是不是类 PC"，不自读屏幕尺寸做档位
+    // 窗口档位只决定整屏边距与圆盘上限；版式由实际容器尺寸决定。
     val windowInfo = LocalNpWindowInfo.current
     // 进度（§5.6）：音频模式的主视觉换成装饰波形——同一文件任何时候形状一致，
     // 但比一根细线更像"这里有一段内容"。视频页仍用 §5.4 的实线条，
     // 波形放在画面上会误导"这是音频文件"。
     val quality = npQuality()
 
-    Box(
+    BoxWithConstraints(
         modifier = modifier
             .fillMaxSize()
             .background(themeInk.bg),
     ) {
+        val horizontalLayout = maxWidth >= 640.dp && maxWidth > maxHeight
+        val compactWidth = maxWidth < 380.dp
+        val contentInset = if (embedded || compactWidth) 16.dp else 26.dp
+        val discLimit = if (embedded) minOf(258.dp, maxHeight * 0.32f) else 258.dp
+        val portraitDiscSize = minOf(maxWidth * 0.64f, discLimit)
+        val safeInsets = if (embedded) Modifier else Modifier.safeDrawingPadding()
         // 封面取色舞台底（§4.7）：先于辉光，辉光在它之上"点亮"顶部。
         AudioModeBackdrop(coverUri = snapshot.coverUri)
         // 径向 accent 辉光（设计稿 .audio .glow：120%×55% at 50% 2%）
@@ -171,11 +181,11 @@ fun AudioOnlyScreen(
             ) {
                 NpIconButton(
                     icon = NpIcon.ArrowLeft,
-                    contentDescription = "切回视频",
+                    contentDescription = "返回",
                     onClick = onBack,
                     tint = ink.fg,
                 )
-                Column {
+                Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "正在播放",
                         style = NpTypography.titleSmall,
@@ -185,6 +195,8 @@ fun AudioOnlyScreen(
                         text = (snapshot.item.folder ?: "本地音乐") + " · 音频",
                         style = com.noneplayer.core.ui.NpMonoSmall,
                         color = ink.muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
@@ -199,7 +211,7 @@ fun AudioOnlyScreen(
             ) {
                 Text(
                     text = snapshot.title.removeSuffix(".mp3").removeSuffix(".flac").removeSuffix(".m4a"),
-                    style = NpTypography.titleLarge,
+                    style = if (embedded) NpTypography.titleMedium else NpTypography.titleLarge,
                     color = ink.fg,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -209,6 +221,9 @@ fun AudioOnlyScreen(
                     text = "未知艺术家 · " + (snapshot.item.folder ?: "本地音乐"),
                     style = NpTypography.bodyMedium,
                     color = ink.muted,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = if (startAligned) TextAlign.Start else TextAlign.Center,
                     modifier = Modifier.padding(top = 6.dp),
                 )
             }
@@ -245,7 +260,7 @@ fun AudioOnlyScreen(
                     icon = NpIcon.SkipPrevious,
                     contentDescription = "上一首",
                     onClick = { session.previous() },
-                    size = 56.dp,
+                    size = if (compactWidth) 48.dp else 56.dp,
                     iconSize = 26.dp,
                     tint = ink.fg,
                     enabled = snapshot.hasPrevious,
@@ -277,7 +292,7 @@ fun AudioOnlyScreen(
                     icon = NpIcon.SkipNext,
                     contentDescription = "下一首",
                     onClick = { session.next() },
-                    size = 56.dp,
+                    size = if (compactWidth) 48.dp else 56.dp,
                     iconSize = 26.dp,
                     tint = ink.fg,
                     enabled = snapshot.hasNext,
@@ -297,7 +312,16 @@ fun AudioOnlyScreen(
         // [fillChips]：横窗给 true——设计稿 `.tool-chip{width:100%;justify-content:center}`
         // 是"胶囊铺满格、内容居中"。竖窗沿用既成的"胶囊按内容收、格内居中"，不动它。
         @Composable
+        @OptIn(ExperimentalFoundationApi::class)
         fun ToolChips(modifier: Modifier = Modifier, fillChips: Boolean = false) {
+            val speedMenu = remember { BringIntoViewRequester() }
+            val speedMenuDuration = npDuration(Motion.Field)
+            LaunchedEffect(speedPickerVisible) {
+                if (speedPickerVisible) {
+                    delay(speedMenuDuration.toLong())
+                    speedMenu.bringIntoView()
+                }
+            }
             Column(
                 modifier = modifier,
                 verticalArrangement = Arrangement.spacedBy(10.dp),
@@ -314,13 +338,17 @@ fun AudioOnlyScreen(
                         fill = fillChips,
                         modifier = Modifier.weight(1f),
                     )
-                    ToolChip(
-                        icon = NpIcon.Film,
-                        label = "切回视频",
-                        onClick = onBack,
-                        fill = fillChips,
-                        modifier = Modifier.weight(1f),
-                    )
+                    if (onReturnToVideo != null) {
+                        ToolChip(
+                            icon = NpIcon.Film,
+                            label = "切回视频",
+                            onClick = onReturnToVideo,
+                            fill = fillChips,
+                            modifier = Modifier.weight(1f),
+                        )
+                    } else {
+                        Spacer(modifier = Modifier.weight(1f))
+                    }
                 }
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -344,22 +372,6 @@ fun AudioOnlyScreen(
                         modifier = Modifier.weight(1f),
                     )
                 }
-                // 均衡器（A2-11 / 设计文档 §15.4：仅听页是它唯一的入口落点——
-                // 调的是声音，正该在"只听不看"这一页调）
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    ToolChip(
-                        icon = NpIcon.Sound,
-                        label = "均衡器",
-                        onClick = onOpenEqualizer,
-                        fill = fillChips,
-                        modifier = Modifier.weight(1f),
-                    )
-                    // 与上面几行同格宽，保持 2 列网格的右列不塌
-                    Spacer(modifier = Modifier.weight(1f))
-                }
                 // 倍速选择条：与播放页同一交互（点钮 → 钮下列表），不走底部弹层
                 // M21：锚在钮上的紧凑菜单走 `Field`；默认的 fadeIn()/fadeOut() 是 150ms
                 // LinearOutSlowIn，和其余钮上菜单不同曲线，同屏会读出两种"出现"的节奏。
@@ -382,14 +394,14 @@ fun AudioOnlyScreen(
                     SpeedChoiceRow(
                         speed = speed,
                         onPick = onPickSpeed,
-                        modifier = Modifier.padding(top = 10.dp),
+                        modifier = Modifier.padding(top = 10.dp).bringIntoViewRequester(speedMenu),
                     )
                 }
             }
         }
 
         // ==================== 版式分派（§13.2 单点判定）====================
-        if (windowInfo.isLandscape) {
+        if (horizontalLayout) {
             // 横窗（手机横置全屏 / 平板横屏 / 类 PC）：**黑胶在左、内容在右**，整页不滚。
             // 竖窗那一列约 800dp，压进 400dp 出头的横向窗口会把播放键顶出屏幕外，
             // 所以横窗的预算换着花：圆盘吃可用高度，右栏只放内容本身。
@@ -398,10 +410,10 @@ fun AudioOnlyScreen(
             Column(
                 modifier = Modifier
                     .fillMaxSize()
-                    .safeDrawingPadding()
-                    .padding(horizontal = windowInfo.pageGutter, vertical = NpSpace.xs),
+                    .then(safeInsets)
+                    .padding(horizontal = if (embedded) 16.dp else windowInfo.pageGutter, vertical = NpSpace.xs),
             ) {
-                HeaderRow()
+                if (!embedded) HeaderRow()
                 BoxWithConstraints(modifier = Modifier.fillMaxWidth().weight(1f)) {
                     // 圆盘三条上限：可用高度（别顶穿窗口）、宽度的 42%（给右栏留够）、
                     // 设计稿 258（类 PC 窗口高，放到 300 也不显空）。
@@ -453,7 +465,7 @@ fun AudioOnlyScreen(
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             TransportRow(
-                                arrangement = Arrangement.spacedBy(NpSpace.md, Alignment.Start),
+                                arrangement = Arrangement.SpaceEvenly,
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             // chips 仍是设计稿的 2 列网格（max 420），不摊成一行四枚。
@@ -473,10 +485,10 @@ fun AudioOnlyScreen(
                     .fillMaxSize()
                     // 安全区在滚动之外（§8.5）：内容滚到边缘时被状态栏/手势条裁住，
                     // 而不是从底下透出来压在系统栏上
-                    .safeDrawingPadding()
+                    .then(safeInsets)
                     .verticalScroll(rememberScrollState()),
             ) {
-                HeaderRow()
+                if (!embedded) HeaderRow() else Spacer(Modifier.height(12.dp))
                 // 黑胶（设计稿 .vinyl：min(258px,64vw)，22s 匀速）
                 VinylDisc(
                     coverUri = snapshot.coverUri,
@@ -484,35 +496,38 @@ fun AudioOnlyScreen(
                     isPlaying = isPlaying,
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
-                        .fillMaxWidth(0.64f)
-                        .widthIn(max = 258.dp),
+                        .size(portraitDiscSize),
                 )
                 InfoBlock(
                     startAligned = false,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 12.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset, vertical = 12.dp),
                 )
                 // 歌词带占位（真 .lrc 解析后置；P3）。只在竖窗出现：横窗的垂直预算
                 // 要留给控制排与工具 chips，这一行是装饰性的空位
-                Text(
+                if (!embedded) Text(
                     text = "仅听音频模式 · 画面已关闭以省电",
                     style = com.noneplayer.core.ui.NpMonoSmall,
                     color = ink.muted,
                     modifier = Modifier
                         .align(Alignment.CenterHorizontally)
-                        .padding(vertical = 10.dp),
+                        .padding(horizontal = contentInset, vertical = 10.dp),
+                    textAlign = TextAlign.Center,
                 )
                 AudioProgressRow(
                     player = player,
                     mediaKey = HistoryEntry.keyOf(snapshot.item),
                     durationMs = snapshot.durationMs,
                     barCount = quality.waveformBars,
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset),
                 )
                 TransportRow(
-                    arrangement = Arrangement.spacedBy(18.dp, Alignment.CenterHorizontally),
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 18.dp),
+                    arrangement = Arrangement.SpaceEvenly,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset, vertical = 18.dp),
                 )
-                ToolChips(modifier = Modifier.fillMaxWidth().padding(horizontal = 26.dp, vertical = 4.dp))
+                ToolChips(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset, vertical = 4.dp),
+                    fillChips = embedded,
+                )
                 Spacer(modifier = Modifier.height(32.dp))
             }
         }
@@ -836,6 +851,7 @@ private fun AudioProgressRow(
     val ink = LocalNpInk.current
     val positionMs by player.positionMs.collectAsStateWithLifecycle()
     val bufferedMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
+    var previewPositionMs by remember(mediaKey, durationMs) { mutableStateOf<Long?>(null) }
     Column(modifier = modifier) {
         WaveformSeekBar(
             mediaKey = mediaKey,
@@ -843,6 +859,7 @@ private fun AudioProgressRow(
             positionMs = positionMs,
             bufferedFraction = if (durationMs > 0) bufferedMs.toFloat() / durationMs else 0f,
             barCount = barCount,
+            onPreviewPosition = { previewPositionMs = it },
             onSeek = { player.seekTo(it) },
         )
         Row(
@@ -850,7 +867,7 @@ private fun AudioProgressRow(
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
             Text(
-                text = formatTimestamp(positionMs),
+                text = formatTimestamp(previewPositionMs ?: positionMs),
                 style = com.noneplayer.core.ui.NpMonoSmall,
                 color = ink.muted,
             )

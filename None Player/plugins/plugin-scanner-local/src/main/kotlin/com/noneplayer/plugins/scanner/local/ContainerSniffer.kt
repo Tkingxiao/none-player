@@ -49,7 +49,7 @@ internal object ContainerSniffer {
             // 裸 0x47 开头也可能是别的二进制；要求至少见到同步字节对，短文件退而求其次
             if (head.size >= 189) return "video/mp2t"
         }
-        val magic4 = if (head.size >= 4) head.decodeToString(0, 4) else ""
+        val magic4 = head.decodeToString(0, 4) // 入口 26 行已保证 head.size >= 4
         return when {
             magic4 == "OggS" -> "audio/ogg"
             magic4 == "fLaC" -> "audio/flac"

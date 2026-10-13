@@ -6,7 +6,6 @@ import android.app.RemoteAction
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
-import android.graphics.Bitmap
 import android.graphics.Point
 import android.media.AudioManager
 import android.os.Build
@@ -31,21 +30,18 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
-import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -58,13 +54,11 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
@@ -78,14 +72,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -107,12 +99,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.graphicsLayer
@@ -124,7 +114,6 @@ import androidx.compose.ui.input.key.isShiftPressed
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -141,7 +130,6 @@ import androidx.compose.ui.util.lerp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.graphics.createBitmap
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -173,7 +161,6 @@ import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEyebrow
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpHaptic
-import com.noneplayer.core.ui.NpOptRow
 import com.noneplayer.core.ui.NpQuickTile
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSheet
@@ -196,15 +183,12 @@ import com.noneplayer.core.ui.npQuality
 import com.noneplayer.core.ui.npItemFadeSpec
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.rememberNpHaptics
-import com.noneplayer.core.ui.rememberReduceMotion
 import com.noneplayer.core.ui.npPressScale
 import com.noneplayer.core.ui.npTouchTarget
 import com.noneplayer.core.ui.rememberNpToastState
 import com.noneplayer.kernel.api.ExtensionRegistry
-import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.Navigator
-import com.noneplayer.kernel.api.NpChapter
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.NpTrackType
@@ -220,6 +204,7 @@ import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.PlaybackContext
 import com.noneplayer.kernel.ui.api.PlaybackMenuContributor
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
+import com.noneplayer.kernel.ui.api.NpPlayerPaneMotion
 import com.noneplayer.plugins.player.ui.controls.NpSeekBar
 import com.noneplayer.plugins.player.ui.controls.StatusClockBattery
 import com.noneplayer.plugins.player.ui.gesture.GESTURE_INDICATOR_HOLD_MS
@@ -232,7 +217,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -243,6 +227,9 @@ import kotlin.math.roundToInt
 
 /** User-selected six presets, shared by compact and fullscreen menus. */
 internal val SPEED_PRESETS = listOf(0.25f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f)
+
+/** 竖屏未全屏：倍速钮上方只弹这五档。横屏菜单才给 3x 和微调。 */
+internal val SPEED_PORTRAIT_PRESETS = listOf(0.25f, 0.5f, 1.0f, 1.5f, 2.0f)
 
 /** 微调步进与合法区间（L14：0.05 一档；上限 4x 与长按 boost 的 3x 留余量） */
 internal const val SPEED_FINE_STEP = 0.05f
@@ -438,7 +425,7 @@ fun PlayerScreen(
      * 假全屏（横窗版式 + 系统栏可见的中间态）已删除：全屏只有沉浸一种（2026-10-07）。
      */
     immersiveEntry: Boolean = false,
-    audioOnlyEntry: Boolean = false,
+    audioOnlyEntry: Boolean? = null,
     manualPipEntry: Boolean = false,
 ) {
     val kernel = LocalKernel.current
@@ -454,6 +441,7 @@ fun PlayerScreen(
     val backgroundPlay by settings.backgroundPlay.collectAsStateWithLifecycle(initialValue = true)
     val keepScreenOn by settings.keepScreenOn.collectAsStateWithLifecycle(initialValue = true)
     val gesturesEnabled by settings.gesturesEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
     // 手势反馈胶囊（"亮度 62%" / "音量 40%" / "快进 10 秒"）
     var gestureHint by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(gestureHint) {
@@ -520,6 +508,7 @@ fun PlayerScreen(
     val coverMorphMs = npDuration(Motion.Shared)
     val coverFadeMs = npDuration(Motion.ReduceFade)
     var stageRectInWindow by remember { mutableStateOf<Rect?>(null) }
+    val surfaceViewRef = remember { mutableStateOf<TextureView?>(null) }
     LaunchedEffect(coverTakeoff) {
         coverTakeoff ?: return@LaunchedEffect
         coverFlight.snapTo(0f)
@@ -563,7 +552,7 @@ fun PlayerScreen(
     // 准备播放：等会话就绪。
     // B1 修复：会话已在播同一视频（后台播放中重进）时仅续播——
     // 禁止用过期断点 prepare/seek 覆盖会话里更新的进度。
-    LaunchedEffect(uri) {
+    LaunchedEffect(uri, audioOnlyEntry) {
         // E57 修复：深链 `noneplayer://player?uri=...` 对外暴露（BROWSABLE），任何
         // 第三方 App 都能携带任意 uri 唤起本页。此前该值未经任何 scheme 校验就直接送进
         // ContentResolver.query 与播放引擎——scheme 白名单是信任边界的第一道闸。
@@ -574,23 +563,25 @@ fun PlayerScreen(
             mediaOpened = true
             return@LaunchedEffect
         }
-        // 1) 解析展示名与封面（同一协程内先于装载，保证通知拿到元数据）
+        // 1) 解析展示名（同一协程内先于装载，保证通知拿到元数据）
         val resolvedTitle = title.ifBlank { resolveDisplayName(context, uri) }
         displayTitle = resolvedTitle
         // 深链（无 id、无 mime）时补查 MediaStore 的真实 MIME，供页头容器名显示（§7.4）
         if (mediaId.isEmpty()) resolvedMimeType = resolveMimeType(context, uri)
-        val cover = resolveCoverUri(kernel.registry, mediaId)
-        artworkUri = cover
         // 2) 装载并起播——与「内嵌播放器」共用同一条链（SessionBootstrap）：
         //    队列 / 断点 / 字幕记忆 / 倍速的语义只有一处，避免两处漂移。
+        //
+        // 封面不再在装载**之前**单独查：`resolveCoverUri` 会把整个媒体来源快照拉一遍
+        // 再线性找 id，而下面的装载链为了解析同文件夹队列已经拉过同一份快照——两趟全量
+        // 扫描串在"点播放 → 出画"之间。封面只在播放结束画面当海报用，不是出画所需，
+        // 改由装载结果回传（见 SessionStart.coverUri）。
         val started = session.startPlayback(
             item = MediaItem(
                 id = mediaId,
                 sourceId = "",
                 title = resolvedTitle,
                 uri = uri,
-                mimeType = mimeType,
-                coverUri = cover,
+                mimeType = resolvedMimeType ?: mimeType,
             ),
             restorePosition = !fromStart,
             // E104：进播放页不再无条件起播——**会话是真相，页面只是显示它**。
@@ -599,7 +590,11 @@ fun PlayerScreen(
             // （不同媒体 / 新会话，那条分支照旧 play）。此前"进页一律 play()"与类 PC
             // 右栏的被动语义正好相反，来回按 F/⛶ 会读成"暂停只在浏览侧有效"。
             autoPlay = fromStart,
+            audioOnlyMode = audioOnlyEntry,
         )
+        // 封面：装载链从权威队列项带回；拿不到（会话已在播同一媒体 / 队列里没有本项）
+        // 才回退自查——此时**已经在播**，这一趟扫描不挡出画。
+        artworkUri = started.coverUri ?: resolveCoverUri(kernel.registry, mediaId)
         // 只有真的从断点起播才提示（从头播放/会话本来就在播同一媒体都不会走到这里）
         if (started.resumedFromMs > 0L) resumeNoticeMs = started.resumedFromMs
         // L7：记忆里的外挂字幕打不开（文件被移走 / 授权失效）时说一声——
@@ -757,6 +752,13 @@ fun PlayerScreen(
      */
     fun exitFullscreenOrLeave() {
         if (orientationLock != OrientationLock.Landscape) {
+            if (isDesktopLike && !session.audioOnly.value && !screenshotBlocked) {
+                val bounds = stageRectInWindow
+                val frame = runCatching { surfaceViewRef.value?.bitmap }.getOrNull()
+                if (bounds != null && frame != null) {
+                    NpPlayerPaneMotion.returnToPane(player.currentUri.value ?: uri, frame, bounds)
+                }
+            }
             navigator.popBackStack()
             return
         }
@@ -821,7 +823,7 @@ fun PlayerScreen(
     fun toggleFullscreen() {
         when {
             !isFullscreen -> setFullscreen(true)
-            isDesktopLike -> navigator.popBackStack()
+            isDesktopLike -> exitFullscreenOrLeave()
             else -> requestExitFullscreen()
         }
         controlsVisible = true
@@ -1034,7 +1036,7 @@ fun PlayerScreen(
         derivedStateOf {
             val pending = pendingSeekMsState.value
             when {
-                userDraggingState.value -> dragPositionMsState.value
+                userDraggingState.value -> dragPositionMsState.floatValue
                 pending != null && abs(positionState.value - pending) > 1_500 -> pending.toFloat()
                 else -> positionState.value.coerceAtMost(durationState.value).toFloat()
             }
@@ -1065,7 +1067,9 @@ fun PlayerScreen(
 
     // ---- 设计稿播放器交互面（sheet / 仅听音频 / 循环模式）----
     val ink0 = LocalNpInk.current
-    val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
+    val sessionAudioOnly by session.audioOnly.collectAsStateWithLifecycle()
+    val audioOnly = sessionAudioOnly || currentItem?.kind == MediaKind.AUDIO ||
+        (!mediaOpened && (audioOnlyEntry == true || mimeType.startsWith("audio/")))
     // 仅听页的系统返回也离开播放页。后注册，优先于「横屏先退全屏」。
     BackHandler(enabled = audioOnly && !stageLocked) { navigator.popBackStack() }
     val loopMode by session.loopMode.collectAsStateWithLifecycle()
@@ -1080,7 +1084,6 @@ fun PlayerScreen(
     // 所有"弹层开关"集中在这里，收口函数与新增状态都在同一处可见。
     var audioTrackSheetVisible by remember { mutableStateOf(false) }
     var pictureSheetVisible by remember { mutableStateOf(false) }
-    var equalizerSheetVisible by remember { mutableStateOf(false) }
     var chaptersPanelVisible by remember { mutableStateOf(false) }
 
     /** 选倍速：落到播放器 + 持久化 + 回执，并收起选择条 */
@@ -1103,7 +1106,6 @@ fun PlayerScreen(
     // 打开"禁止"时窗口不可被截图/录屏（与设计稿 check-row 同一语义）。
     // A1-6：值改**持久**（此前是页内 `rememberSaveable`，退页即复原成"允许"——
     // 隐私开关被静默清掉比"默认允许"更糟）。生效范围不变：仍只挂播放页窗口。
-    val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
     fun setScreenshotBlocked(blocked: Boolean) {
         scope.launch { settings.setScreenshotBlocked(blocked) }
         // toast 报的是**目标值**：状态要等 DataStore 回流才更新，读它会慢一拍说反话
@@ -1383,7 +1385,7 @@ fun PlayerScreen(
      * **收起全部弹层**（审查批次 B1）。
      *
      * 此前"锁定"与"进 PiP"各自手写一份清理清单，且两份都不完整：锁定块漏了
-     * 章节面板 / 音轨 / 画面 / 均衡器，PiP 块漏了更多操作与文件信息。
+     * 章节面板 / 音轨 / 画面，PiP 块漏了更多操作与文件信息。
      * 漏一项的后果不是"多留一个面板"那么轻——锁定态下播放页的 `BackHandler`
      * 会吞掉返回键（[stageLocked] 那条），残留面板既关不掉、又盖在锁定舞台上，
      * 与"锁定后屏幕上只有解锁钮可点"的承诺相反。
@@ -1402,7 +1404,6 @@ fun PlayerScreen(
         subtitleSheetVisible = false
         audioTrackSheetVisible = false
         pictureSheetVisible = false
-        equalizerSheetVisible = false
         moreSheetVisible = false
         fileInfoVisible = false
     }
@@ -1415,7 +1416,7 @@ fun PlayerScreen(
     LaunchedEffect(stageLocked) {
         if (stageLocked) {
             controlsVisible = true
-            // 审查批次 B1：统一收口。旧清单漏了章节 / 音轨 / 画面 / 均衡器四层，
+            // 审查批次 B1：统一收口。旧清单漏了章节 / 音轨 / 画面三层，
             // 而锁定态的 BackHandler 会吞返回键 → 残留面板既盖在锁定舞台上又关不掉。
             dismissAllOverlays()
         }
@@ -1509,41 +1510,6 @@ fun PlayerScreen(
     )
     LaunchedEffect(player, subtitleEnabled) { player.setTextTracksEnabled(subtitleEnabled) }
 
-    // 面板开关（`audioTrackSheetVisible` / `pictureSheetVisible` /
-    // `equalizerSheetVisible` / `chaptersPanelVisible` 已随其它弹层状态前置，
-    // 见上方"审查批次 B1"注释——收口函数要能引用全部弹层）
-
-    // ---- 均衡器（A2-11 / 设计文档 §15.4：仅听页入口 + 段滑杆 + 预设）----
-    //
-    // 值存**归一增益**（-1..1 / 段），量程映射在引擎侧；能力（段数/量程）由服务侧
-    // 实测经 SessionExtras 回传，UI 打开面板时探测一次。
-    val eqEnabled by settings.eqEnabled.collectAsStateWithLifecycle(initialValue = false)
-    val eqSavedLevels by settings.eqLevels.collectAsStateWithLifecycle(initialValue = emptyList())
-    val eqCapabilities by player.equalizerCapabilities.collectAsStateWithLifecycle(initialValue = null)
-
-    fun openEqualizerSheet() {
-        equalizerSheetVisible = true
-        player.probeEqualizer()
-    }
-
-    fun applyEqualizer(levels: List<Float>, enabled: Boolean) {
-        player.setEqualizerLevels(levels)
-        player.setEqualizerEnabled(enabled)
-        scope.launch {
-            settings.setEqLevels(levels)
-            settings.setEqEnabled(enabled)
-        }
-    }
-
-    // 记忆恢复：进程重启后设置里是"开着"，但引擎侧的效果实例是新建的（默认关），
-    // 不补发就会出现"开关显示开着、声音没变"的假状态。
-    LaunchedEffect(eqEnabled, eqSavedLevels) {
-        if (eqEnabled) {
-            player.probeEqualizer()
-            player.setEqualizerLevels(eqSavedLevels)
-            player.setEqualizerEnabled(true)
-        }
-    }
     // 睡眠定时：绝对到期时间（epoch ms），0 = 关。到期暂停播放。
     val sleepTimerEndsAtMs by session.sleepTimerEndsAtMs.collectAsStateWithLifecycle()
     val sleepLabel = if (sleepTimerEndsAtMs > 0) {
@@ -1559,7 +1525,6 @@ fun PlayerScreen(
     }
 
     // 截图（TextureView 取当前帧，落 Pictures/None Player）
-    val surfaceViewRef = remember { mutableStateOf<TextureView?>(null) }
     fun screenshot() {
         savePlaybackScreenshot(context, surfaceViewRef.value, scope, screenshotBlocked, toast::show)
     }
@@ -1613,48 +1578,7 @@ fun PlayerScreen(
         }
     }
 
-    // 仅听音频 per-media 记忆（§5.1）+ **媒体类型默认**（E129 / 审查 #1、#2）：
-    // 进同一文件直接进入该有的形态。读键与写键同源（A1-1/A1-2/A2-8）：两边都是
-    // [mediaKey]（`sourceId:mediaId`），由会话已落定的权威条目算出——路由 id 可能为空
-    // 或没有来源前缀，两处各算必然漂。
-    //
-    // 三个坑，这一版一起收：
-    //  ① **空键一律不读**：装载尚未完成时键还为空，此时去读会命中历史遗留的孤儿空键桶
-    //     （`audio_only_`，实测值 true）→ 冷进任何文件都被判成音频形态，且那次误判还会被
-    //     写回真正的条目键上，把脏数据扩散出去（模拟器实测）。空桶由一次性搬迁清理。
-    //  ② **`false` 与"没记过"必须分开**（审查 #2）：旧写法只在偏好为 true 时置位，
-    //     为 false 时什么都不做，于是"上一个媒体停在仅听"会一路带进下一个媒体。
-    //     现在读三态（[AppSettings.audioOnlyPreference]），只有"没记过"才落到默认值。
-    //  ③ **默认值按媒体类型给**（审查 #1）：音频文件默认仅听，不再以视频舞台 + 空画面
-    //     出现——那会让用户看不出音频到底在不在播；视频文件默认带画面。
-    //
-    // 用 `LaunchedEffect(mediaKey)` + `collect` 而不是 `collectAsStateWithLifecycle`：
-    // 后者必须给 `initialValue`，而"还没读出"与"读出了 false"在布尔上无法区分——正是 ②
-    // 的病根（首帧拿 false 抢跑，音频文件会被先切成视频形态再翻回音频，闪一下）。
-    // 协程内直接收流，第一帧就是 DataStore 的真值；`mediaKey` 是 key，切媒体即重启收流，
-    // 旧媒体的值不会漏到新媒体上。写回（[PlaybackSession.setAudioOnly]）会再发一次同值，
-    // 此时 `target == session.audioOnly.value`，天然是空操作，不会自激。
-    LaunchedEffect(mediaKey, currentItem?.id) {
-        val item = currentItem ?: return@LaunchedEffect
-        if (audioOnlyEntry && item.uri == uri) {
-            if (mediaKey.isNotEmpty()) settings.setAudioOnlyPreferred(mediaKey, true)
-            session.setAudioOnly(true)
-        }
-        // 空键（深链没带 id）：**没有记忆可读**——E109 的孤儿桶正是不该读它。
-        // 但媒体类型默认值不需要键，所以这里喂一个"没记过"给决策函数，
-        // 让音频照样进仅听形态；这一次不落盘（setAudioOnly 自己判空键）。
-        // 真机实测过：少了这一支，"从外部 ACTION_VIEW 打开音频"会落回视频舞台 + 空画面。
-        val preferences = if (mediaKey.isEmpty()) {
-            flowOf<Boolean?>(null)
-        } else {
-            settings.audioOnlyPreference(mediaKey)
-        }
-        val isAudio = item.kind == MediaKind.AUDIO
-        preferences.collect { stored ->
-            val target = resolveAudioOnlyMode(stored, isAudio)
-            if (target != session.audioOnly.value) session.setAudioOnly(target)
-        }
-    }
+    // Preferences are restored once by the session, never collected back into live UI intent.
     fun toggleAudioOnlyWithMemory() {
         // 记忆由会话写（唯一写路径，迷你条与页内两处共用同一条），页面只给反馈
         session.toggleAudioOnly()
@@ -1777,6 +1701,10 @@ fun PlayerScreen(
             }
             .focusable(),
     ) {
+        if (!mediaOpened && rejectedUriError == null) {
+            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+            return@Box
+        }
         // M23：音频页 ↔ 视频页整页切换原先是 `if` 硬切——点「仅听音频」整屏啪地换成黑胶，
         // 像界面崩了一下。换成 `Scheme`(320) 交叉淡入：两页重叠期间视频 surface 仍在，
         // 不做位移（整页位移会把两条版式拉成一次"翻页"，读起来像切应用而不是切模式）。
@@ -1797,6 +1725,9 @@ fun PlayerScreen(
                 session = session,
                 // 返回上一页。切回全屏视频是「切回视频」的事，返回键不该做这个。
                 onBack = navigator::popBackStack,
+                onReturnToVideo = if (currentItem?.kind == MediaKind.AUDIO) null else {
+                    { session.setAudioOnly(false) }
+                },
                 favorited = favorited,
                 onToggleFavorite = { toggleFavorite() },
                 onOpenSpeed = { speedPickerVisible = !speedPickerVisible },
@@ -1804,7 +1735,6 @@ fun PlayerScreen(
                 speedPickerVisible = speedPickerVisible,
                 onPickSpeed = ::pickSpeed,
                 onOpenEpisodes = { episodePanelVisible = true },
-                onOpenEqualizer = { openEqualizerSheet() },
                 speedText = speedText,
             )
         } else {
@@ -2110,6 +2040,12 @@ fun PlayerScreen(
                                             ?.substringBeforeLast('.'),
                                         textTracks = tracks.filter { it.type == NpTrackType.TEXT },
                                         offsetMs = subtitleOffsetMs,
+                                        colorArgb = subtitleColorArgb,
+                                        onColor = { scope.launch { settings.setSubtitleColorArgb(it) } },
+                                        scale = subtitleScale,
+                                        onScale = { scope.launch { settings.setSubtitleScale(it) } },
+                                        italic = subtitleItalic,
+                                        onItalic = { scope.launch { settings.setSubtitleItalic(it) } },
                                         // 开关（2026-10-12）：与竖屏「字幕设置」面板同一语义——
                                         // 关 = 渲染总开关 + 引擎卸载；开 = 恢复渲染 + 重挂记忆字幕
                                         onSetEnabled = { on ->
@@ -2219,6 +2155,8 @@ fun PlayerScreen(
                         Box(
                             modifier = stageHeight
                                 .background(Color.Black)
+                                // 控制条从下缘滑入滑出。不裁切的话，半透明黑条会盖到视频下面的白底。
+                                .clipToBounds()
                                 .onGloballyPositioned { stageRectInWindow = it.boundsInWindow() }
                                 .then(stageGestures()),
                         ) {
@@ -2246,11 +2184,7 @@ fun PlayerScreen(
                                 stageRect = stageRectInWindow,
                                 wave = coverFlight,
                             )
-                            CenterResumeButton(
-                                visible = state == PlaybackState.Paused && !userDragging && !inPipMode && !stageLocked,
-                                onPlay = ::togglePlay,
-                                modifier = Modifier.align(Alignment.Center),
-                            )
+                            // 竖屏不放 64dp 中央暂停钮：它会挡住画面。播放/暂停在底栏左侧的小按钮。
                             if (state == PlaybackState.Ended && mediaOpened && !stageLocked) {
                                 EndedOverlay(
                                     onReplay = {
@@ -2316,14 +2250,29 @@ fun PlayerScreen(
                                 visible = controlsVisible && !inPipMode && !stageLocked,
                                 enter = fadeIn(npMotion(Motion.Field)),
                                 exit = fadeOut(npMotion(Motion.Field)),
-                                modifier = Modifier.align(Alignment.TopEnd)
-                                    .padding(8.dp).background(Color.Black.copy(alpha = 0.62f)),
+                                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
                             ) {
-                                BarCtlButton(
-                                    icon = NpIcon.Dots,
-                                    contentDescription = "播放选项",
-                                    onClick = { moreSheetVisible = true },
-                                )
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(Color.Black.copy(alpha = 0.55f))
+                                        .padding(start = 12.dp, end = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = headerTitle,
+                                        style = NpTypography.bodyMedium,
+                                        color = Color.White,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    BarCtlButton(
+                                        icon = NpIcon.Dots,
+                                        contentDescription = "播放选项",
+                                        onClick = { moreSheetVisible = true },
+                                    )
+                                }
                             }
                             // 视频区底部：进度 + 时间 + 全屏（§4.1 的版式）；
                             // 顶栏已上移为常驻 playerbar，舞台内不再放返回键。
@@ -2333,9 +2282,26 @@ fun PlayerScreen(
                                 visible = controlsVisible && !inPipMode && !stageLocked,
                                 applyInsets = false,
                                 showTransport = false,
-                                // 竖窗控制层压在只有 16:9 一条的视频区上，交互槽保持收窄档
-                                //（E129 / 审查 #14：横窗给 44dp，竖窗仍守 26dp 不挡画面）
-                                seekTouchBand = NpDimens.seekTouchBand,
+                                // 手机竖屏一条到底，不要再叠一行进度把画面盖住。
+                                preferSingleRow = true,
+                                seekTouchBand = 18.dp,
+                                leadingActions = {
+                                    IconButton(
+                                        onClick = ::togglePlay,
+                                        modifier = Modifier.size(36.dp),
+                                    ) {
+                                        if (state == PlaybackState.Playing) {
+                                            PauseGlyph(tint = Color.White, barWidth = 3.dp, barHeight = 14.dp)
+                                        } else {
+                                            Icon(
+                                                imageVector = Icons.Filled.PlayArrow,
+                                                contentDescription = "播放",
+                                                tint = Color.White,
+                                                modifier = Modifier.size(22.dp),
+                                            )
+                                        }
+                                    }
+                                },
                                 positionMs = positionState,
                                 durationMs = durationMs,
                                 bufferedPositionMs = bufferedPositionMs,
@@ -2417,25 +2383,35 @@ fun PlayerScreen(
                         // 收藏 / 播放选项 / 仅听音频。播放/暂停由画面中央大钮承担、
                         // 选集有内联 ep-inline 卡片、全屏在时间行右端，都不在这里重复。
                         // 等分横排（紧凑档 .btnp{flex:1 1 0}），选中态 accent。
+                        val actionScroll = rememberScrollState()
+                        val largeActions = LocalDensity.current.fontScale > 1.3f
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
+                                .then(if (largeActions) Modifier.horizontalScroll(actionScroll) else Modifier)
                                 .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 10.dp),
                             horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
+                            val actionWidth = if (largeActions) Modifier else Modifier.weight(1f)
                             PlayerActionButton(
                                 glyph = ActionGlyph.Fav,
                                 label = if (favorited) "已收藏" else "收藏",
                                 active = favorited,
                                 onClick = { toggleFavorite() },
-                                modifier = Modifier.weight(1f),
+                                modifier = actionWidth,
+                            )
+                            PlayerActionButton(
+                                glyph = ActionGlyph.Info,
+                                label = "详情",
+                                onClick = { fileInfoVisible = true },
+                                modifier = actionWidth,
                             )
                             PlayerActionButton(
                                 glyph = ActionGlyph.Audio,
                                 label = "仅听音频",
                                 onClick = { toggleAudioOnlyWithMemory() },
-                                modifier = Modifier.weight(1f),
+                                modifier = actionWidth,
                             )
                         }
                         // C21 软解前置提示（设计稿 .notice.warn）：探测发现只有软件解码器可用时
@@ -2715,20 +2691,6 @@ fun PlayerScreen(
                 )
             }
         }
-        if (equalizerSheetVisible) {
-            NpSheet(
-                onDismiss = { equalizerSheetVisible = false },
-                title = "均衡器",
-            ) {
-                EqualizerPanel(
-                    capabilities = eqCapabilities,
-                    enabled = eqEnabled,
-                    levels = eqSavedLevels,
-                    onEnabled = { applyEqualizer(eqSavedLevels, it) },
-                    onLevels = { applyEqualizer(it, eqEnabled) },
-                )
-            }
-        }
 
         if (moreSheetVisible) {
             NpSheet(
@@ -2965,7 +2927,7 @@ fun PlayerScreen(
         ) { visible ->
             FileInfoCard(
                 visible = visible,
-                title = headerTitle,
+                title = currentItem?.title?.ifBlank { null } ?: headerTitle,
                 item = currentItem,
                 durationMs = durationMs,
                 container = headerContainer,
@@ -3023,6 +2985,7 @@ internal fun subtitleDelayLabel(ms: Long): String = when {
  * 复用既有组件与令牌（`NpSwitch` / `NpDimens.touchTarget` / `NpRadius.chip` / Ink 令牌），
  * 不新造控件：颜色板是"命中 44dp 的透明盒 + 26dp 色点"，延时档是"命中 44dp 的胶囊"。
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SubtitleSettingsPanel(
     enabled: Boolean,
@@ -3078,11 +3041,29 @@ private fun SubtitleSettingsPanel(
     }
 
     SubtitleSettingRow(label = "文字字幕大小") {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Slider(
                 value = scale,
                 onValueChange = onScale,
                 valueRange = SUBTITLE_SCALE_MIN..SUBTITLE_SCALE_MAX,
+                thumb = {
+                    Box(
+                        Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(ink.fg),
+                    )
+                },
+                track = { sliderState ->
+                    androidx.compose.material3.SliderDefaults.Track(
+                        sliderState = sliderState,
+                        drawStopIndicator = null,
+                        thumbTrackGapSize = 0.dp,
+                    )
+                },
                 modifier = Modifier.weight(1f),
             )
             Text(
@@ -3098,8 +3079,11 @@ private fun SubtitleSettingsPanel(
         NpSwitch(checked = italic, onCheckedChange = onItalic)
     }
 
-    SubtitleSettingRow(label = "字幕延时", value = subtitleDelayLabel(offsetMs)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+    SubtitleSettingRow(label = "字幕延时") {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             SUBTITLE_DELAY_STEPS_MS.forEach { step ->
                 val selected = step == offsetMs
                 Box(
@@ -3195,8 +3179,14 @@ private fun SubtitleSettingRow(
                 modifier = Modifier.padding(start = 8.dp),
             )
         }
-        Spacer(modifier = Modifier.weight(1f))
-        content()
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 12.dp),
+            contentAlignment = Alignment.CenterEnd,
+        ) {
+            content()
+        }
     }
 }
 
@@ -3273,7 +3263,7 @@ private fun FileInfoCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    text = "文件信息",
+                    text = "视频详情",
                     style = NpTypography.headlineSmall,
                     color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
@@ -3350,7 +3340,7 @@ private fun npPanelEntrance(from: Float): Pair<State<Float>, State<Float>> {
  *  - 全部返回 State 供 `graphicsLayer` 在**绘制期**读，逐帧不重组面板内容；
  *  - 位移/缩放受 [npDisplacementAllowed] 门控，轻量档与 Reduce Motion 退化成纯淡。
  *
- * 调用方负责在退场结束后才真正移除组合（见 [DismissOnExit]）。
+ * 调用方负责在退场动画走完之后才真正把面板移出组合树，否则面板会在退场途中直接消失。
  */
 @Composable
 private fun npPanelTransition(
@@ -3381,7 +3371,7 @@ private fun npPanelTransition(
  * 期间 [content] 仍留在组合树里（只改 alpha/scale），触摸已由 [onDismiss] 屏蔽。
  */
 @Composable
-private fun PanelExitHost(
+internal fun PanelExitHost(
     visible: Boolean,
     exitMs: Int = 160,
     onRemoved: () -> Unit,
@@ -3499,7 +3489,7 @@ private fun EndedOverlay(
  * 拇指可达（平板/手机一致），且不遮挡正在播的画面上半部分（半透明 scrim + 列表只占下半屏）。
  */
 @Composable
-private fun EpisodePanel(
+internal fun EpisodePanel(
     /** 进出场驱动（审查批次 C3） */
     visible: Boolean = true,
     queue: List<MediaItem>,
@@ -3636,9 +3626,8 @@ internal fun BarCtlButton(
 }
 
 /** 把控件在窗口中的位置回报给全屏下拉菜单当锚点；无回调时零开销 */
-private fun anchorReporter(onAnchor: ((Rect) -> Unit)?): Modifier =
-    if (onAnchor == null) Modifier
-    else Modifier.onGloballyPositioned { onAnchor(it.boundsInWindow()) }
+private fun Modifier.anchorReporter(onAnchor: ((Rect) -> Unit)?): Modifier =
+    if (onAnchor == null) this else onGloballyPositioned { onAnchor(it.boundsInWindow()) }
 
 /**
  * 连播传输键（上一集 / 播放暂停 / 下一集，§8.2）。
@@ -3731,10 +3720,13 @@ private fun TransportGroup(
  * 以及浅色主题的仅听音频页里都读得清。
  */
 @Composable
+@OptIn(ExperimentalLayoutApi::class)
 internal fun SpeedChoiceRow(
     speed: Float,
     onPick: (Float) -> Unit,
     modifier: Modifier = Modifier,
+    presets: List<Float> = SPEED_PRESETS,
+    showCaption: Boolean = true,
 ) {
     val ink = LocalNpInk.current
     Column(
@@ -3744,15 +3736,20 @@ internal fun SpeedChoiceRow(
             .border(1.dp, ink.border, RoundedCornerShape(NpRadius.button))
             .padding(6.dp),
     ) {
-        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            SPEED_PRESETS.forEach { preset ->
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            presets.forEach { preset ->
                 val on = kotlin.math.abs(preset - speed) < 0.001f
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
                         .background(if (on) MaterialTheme.colorScheme.primary else Color.Transparent)
                         .clickable { onPick(preset) }
+                        .heightIn(min = NpDimens.touchTarget)
                         .padding(horizontal = 9.dp, vertical = 7.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         text = speedLabel(preset),
@@ -3762,13 +3759,15 @@ internal fun SpeedChoiceRow(
                 }
             }
         }
-        // ExoPlayer 经 Sonic 变速默认保音调（PlaybackService.setEnableAudioTrackPlaybackParams）
-        Text(
-            text = "变速保持音调",
-            style = NpMono.copy(fontSize = 11.sp),
-            color = ink.muted,
-            modifier = Modifier.padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
-        )
+        if (showCaption) {
+            // ExoPlayer 经 Sonic 变速默认保音调（PlaybackService.setEnableAudioTrackPlaybackParams）
+            Text(
+                text = "变速保持音调",
+                style = NpMono.copy(fontSize = 11.sp),
+                color = ink.muted,
+                modifier = Modifier.padding(start = 4.dp, top = 2.dp, bottom = 2.dp),
+            )
+        }
     }
 }
 
@@ -3863,7 +3862,40 @@ private fun ResumePositionNotice(
  *
  * 形态（2026-10-12 用户裁定两条）：**横跨屏幕的完整横条、单行紧凑**——
  * 不做圆角浮动小窗；进度条与按钮共线一行，比原两行版省近一半高度。
+ * 放不下时由 [playerBarSplitsProgress] 把进度拆到单独一行，按钮行横滑。
  */
+
+/**
+ * 控制条是否把进度拆到单独一行。
+ *
+ * 宽窗口维持单行。字号超过 1.3，或单行里的传输键、时间码、图标和最短进度条
+ * 已经超过栏宽时，拆开。`preferSingleRow` 只跳过「宽度小于 560dp 就拆」这一条，
+ * 挡不住大字号和真实放不下的情况。
+ */
+internal fun playerBarSplitsProgress(
+    maxWidthDp: Float,
+    fontScale: Float,
+    preferSingleRow: Boolean,
+    showTransport: Boolean,
+    hasLeading: Boolean,
+    iconButtonCount: Int,
+): Boolean {
+    if (!maxWidthDp.isFinite() || maxWidthDp <= 0f) return false
+    val scale = if (fontScale.isFinite() && fontScale > 0f) fontScale else 1f
+    if (scale > 1.3f) return true
+    if (!preferSingleRow && maxWidthDp < 560f) return true
+    val leading = when {
+        showTransport -> 44f * 3f
+        hasLeading -> 36f
+        else -> 0f
+    }
+    val times = 42f * scale * 2f
+    val icons = 44f * iconButtonCount.coerceAtLeast(0)
+    val chrome = 32f + 8f
+    val minSeek = 64f
+    return leading + times + icons + chrome + minSeek > maxWidthDp
+}
+
 @Composable
 internal fun PlayerBottomControls(
     visible: Boolean,
@@ -3937,31 +3969,73 @@ internal fun PlayerBottomControls(
     trailingActions: (@Composable () -> Unit)? = null,
     /**
      * 平板右栏宽度经常低于 560dp，默认会把功能键折进横滑条，和全屏不是同一套。
-     * 右栏传 true，强制与全屏同一行。
+     * 右栏传 true 时，只要单行还放得下就与全屏保持同一行。
      */
     preferSingleRow: Boolean = false,
 ) {
     val idleColor = Color.White.copy(alpha = 0.9f)
     val content: @Composable () -> Unit = {
+        // 安全区不在这里消费：底部 inset 必须落在**黑色条底之下**（见下方 plate），
+        // 否则条底被 inset 顶起，画面会从条下缘露出来一条（2026-10-13 用户实报"浮空"）。
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .then(
-                    if (applyInsets) {
-                        Modifier.windowInsetsPadding(
-                            WindowInsets.safeDrawing.only(
-                                WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom,
-                            ),
-                        )
-                    } else {
-                        Modifier
-                    },
-                )
-                .padding(horizontal = NpSpace.lg),
+            modifier = Modifier.fillMaxWidth(),
         ) {
+            val speedSlideAllowed = npDisplacementAllowed()
+            AnimatedVisibility(
+                visible = speedPickerVisible && inlineSpeedRow,
+                enter = fadeIn(animationSpec = npMotion(Motion.Field)) +
+                    slideInVertically(animationSpec = npMotion(Motion.Field)) {
+                        if (speedSlideAllowed) it / 2 else 0
+                    },
+                exit = fadeOut(animationSpec = npMotion(Motion.Field)),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    SpeedChoiceRow(
+                        speed = speed,
+                        onPick = onPickSpeed,
+                        presets = SPEED_PORTRAIT_PRESETS,
+                        showCaption = false,
+                        modifier = Modifier.padding(bottom = 6.dp),
+                    )
+                }
+            }
             // Wide surfaces use one row; narrow windows separate timeline and scrollable commands.
-            BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
-                val compact = !preferSingleRow && (maxWidth < 560.dp || LocalDensity.current.fontScale > 1.3f)
+            BoxWithConstraints(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(Color.Black.copy(alpha = BOTTOM_BAR_PLATE_ALPHA))
+                    // 底部/横向安全区收在**黑底之内**：黑条因此一直铺到视频/屏幕下缘，
+                    // 手势条或刘海区也盖在同一块半透明黑上，条下不再露画面。
+                    .then(
+                        if (applyInsets) {
+                            Modifier.windowInsetsPadding(
+                                WindowInsets.safeDrawing.only(
+                                    WindowInsetsSides.Horizontal + WindowInsetsSides.Bottom,
+                                ),
+                            )
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .padding(horizontal = NpSpace.lg)
+                    // 原先这块留白挂在黑条**外面**，等于把条底垫高 4dp、条下露出画面；
+                    // 收进条内后，留白照旧、条底与视频/屏幕下缘严丝合缝。
+                    .padding(bottom = NpSpace.xs),
+            ) {
+                val controlScroll = rememberScrollState()
+                val compact = playerBarSplitsProgress(
+                    maxWidthDp = maxWidth.value,
+                    fontScale = LocalDensity.current.fontScale,
+                    preferSingleRow = preferSingleRow,
+                    showTransport = showTransport,
+                    hasLeading = leadingActions != null,
+                    iconButtonCount = 3 +
+                        (if (onToggleAudioOnly != null) 1 else 0) +
+                        (if (trailingActions != null) 1 else 0),
+                )
                 Column {
                     if (compact) {
                         NpSeekBar(
@@ -3974,12 +4048,12 @@ internal fun PlayerBottomControls(
                             onScrubEnd = onScrubEnd,
                             onScrubCancel = onScrubCancel,
                             touchBand = seekTouchBand,
-                            modifier = Modifier.fillMaxWidth().then(anchorReporter(onSeekBarAnchor)),
+                            modifier = Modifier.fillMaxWidth().anchorReporter(onSeekBarAnchor),
                         )
                     }
             Row(
                 modifier = Modifier.fillMaxWidth().then(
-                    if (compact) Modifier.horizontalScroll(rememberScrollState()) else Modifier,
+                    if (compact) Modifier.horizontalScroll(controlScroll) else Modifier,
                 ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -4006,6 +4080,9 @@ internal fun PlayerBottomControls(
                     // 与下方 pinfo 的 mono 行视觉同级（时间码不该比元数据更抢眼）。
                     style = NpMono.copy(fontSize = 12.sp),
                     color = if (userDragging) MaterialTheme.colorScheme.onPrimary else idleColor,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = if (userDragging) {
                         Modifier
                             .clip(RoundedCornerShape(NpRadius.chip))
@@ -4029,26 +4106,29 @@ internal fun PlayerBottomControls(
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 8.dp)
-                        .then(anchorReporter(onSeekBarAnchor)),
+                        .anchorReporter(onSeekBarAnchor),
                 )
                 Text(
                     text = formatTimestamp(durationMs),
                     style = NpMono,
                     color = idleColor,
+                    maxLines = 1,
+                    softWrap = false,
+                    overflow = TextOverflow.Ellipsis,
                 )
                 BarCtlButton(
                     icon = NpIcon.Subtitle,
                     contentDescription = "字幕",
                     onClick = onPickSubtitle,
                     active = subtitleLoaded,
-                    modifier = anchorReporter(onSubtitleAnchor),
+                    modifier = Modifier.anchorReporter(onSubtitleAnchor),
                 )
                 BarCtlButton(
                     icon = NpIcon.Speed,
                     contentDescription = "倍速播放",
                     onClick = onToggleSpeedPicker,
                     active = speed != 1f || speedPickerVisible,
-                    modifier = anchorReporter(onSpeedAnchor),
+                    modifier = Modifier.anchorReporter(onSpeedAnchor),
                 )
                 if (onToggleAudioOnly != null) {
                     BarCtlButton(
@@ -4067,36 +4147,6 @@ internal fun PlayerBottomControls(
             }
                 }
             }
-            // 倍速选择条：贴在倍速钮上方展开（替代原底部弹层——调速不该
-            // 把整个画面盖住，也不该让用户的手从控制条跑到屏幕底下）。
-            // 全屏形态改用下拉菜单后传 inlineSpeedRow=false，这条只服务竖屏/仅听音频。
-            // M21：它是锚在钮上的紧凑菜单，走 `Field`（150）而不是控制层的 `Overlay`——
-            // 点了要立刻有反应，280ms 在这里读起来是"卡了一下才出现"。
-            // 位移开关读在组合期：`slideInVertically` 的 lambda 在过渡作用域里跑，拿不到组合上下文。
-            val speedSlideAllowed = npDisplacementAllowed()
-            AnimatedVisibility(
-                visible = speedPickerVisible && inlineSpeedRow,
-                enter = fadeIn(animationSpec = npMotion(Motion.Field)) +
-                    slideInVertically(animationSpec = npMotion(Motion.Field)) {
-                        if (speedSlideAllowed) it else 0
-                    },
-                exit = fadeOut(animationSpec = npMotion(Motion.Field)) +
-                    slideOutVertically(animationSpec = npMotion(Motion.Field)) {
-                        if (speedSlideAllowed) it else 0
-                    },
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                ) {
-                    SpeedChoiceRow(
-                        speed = speed,
-                        onPick = onPickSpeed,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                }
-            }
-            Box(modifier = Modifier.height(NpSpace.xs))
         }
     }
 
@@ -4126,13 +4176,7 @@ internal fun PlayerBottomControls(
             //  ② "不要做成圆角小浮动窗口，做成横跨屏幕的完整横条"——撤销上一版的
             //     悬浮板（留边 + 圆角），底边贴齐视频/屏幕下缘、左右通到屏幕边。
             //     入场仍从下缘升起（[BAR_ENTER_SLIDE]），全程不越过视频下边界。
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color.Black.copy(alpha = BOTTOM_BAR_PLATE_ALPHA)),
-            ) {
-                content()
-            }
+            content()
         }
     }
 }
@@ -4415,7 +4459,7 @@ private fun SpeedPill(speed: Float, modifier: Modifier = Modifier) {    if (spee
 }
 
 /** 播放页主操作行的图标族（设计稿 .pactions 的三个 `.btnp`） */
-private enum class ActionGlyph { More, Audio, Fav }
+private enum class ActionGlyph { More, Audio, Fav, Info }
 
 /**
  * 播放页主操作按钮（设计稿 `.btnp`）：**圆形图标 + 11px 文字**，等分横排。
@@ -4432,7 +4476,6 @@ private fun PlayerActionButton(
     modifier: Modifier = Modifier,
     active: Boolean = false,
 ) {
-    val ink = LocalNpInk.current
     val tint = if (active) {
         MaterialTheme.colorScheme.primary
     } else {
@@ -4466,12 +4509,20 @@ private fun PlayerActionButton(
                 tint = tint,
                 modifier = Modifier.size(21.dp),
             )
+            ActionGlyph.Info -> Icon(
+                imageVector = NpIcon.Info,
+                contentDescription = label,
+                tint = tint,
+                modifier = Modifier.size(21.dp),
+            )
         }
         Text(
             text = label,
             style = MaterialTheme.typography.labelSmall,
             color = if (active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(top = 4.dp),
         )
     }
@@ -4621,7 +4672,10 @@ internal fun VideoStage(
                     view.scaleX = if (mirrored) -1f else 1f
                     view.rotation = rotation.toFloat()
                 },
-                onRelease = { onSurfaceView(null) },
+                onRelease = {
+                    player.detachDisplay(it)
+                    onSurfaceView(null)
+                },
                 modifier = Modifier.fillMaxSize(),
             )
             // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
@@ -5009,6 +5063,11 @@ private fun encodeRouteParam(value: String): String = android.net.Uri.encode(val
  */
 private suspend fun resolveMimeType(context: android.content.Context, uri: String): String? =
     withContext(Dispatchers.IO) {
+        val parsed = uri.toUri()
+        val inferred = runCatching { context.contentResolver.getType(parsed) }.getOrNull()
+            ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                parsed.lastPathSegment?.substringAfterLast('.', "")?.lowercase().orEmpty(),
+            )
         try {
             context.contentResolver
                 .query(
@@ -5017,9 +5076,10 @@ private suspend fun resolveMimeType(context: android.content.Context, uri: Strin
                     null, null, null,
                 )
                 ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+                ?: inferred
         } catch (e: Exception) {
             Log.d("PlayerScreen", "resolveMimeType 查询失败 $uri", e)
-            null
+            inferred
         }
     }
 
@@ -5109,13 +5169,7 @@ internal suspend fun resolveFolderQueue(
                 // 一旦换号，路由里带过来的旧 id 就再也匹配不上，队列会静默退化成
                 // "只有当前项"（迷你条没标题、没有 1/N、连播失效）——**播放本身却正常**，
                 // 于是这个缺陷很难被发现。uri 是播放真正依赖的东西，它不变。
-                val all = withTimeoutOrNull(SOURCE_WAIT_MS) {
-                    source.observeMedia().first { list ->
-                        list.any {
-                            (mediaId.isNotEmpty() && it.id == mediaId) || it.uri == uri
-                        }
-                    }
-                } ?: source.observeMedia().first()
+                val all = source.awaitSelfList(mediaId, uri)
                 val self = all.firstOrNull { mediaId.isNotEmpty() && it.id == mediaId }
                     ?: all.firstOrNull { it.uri == uri }
                     ?: continue
@@ -5135,6 +5189,36 @@ internal suspend fun resolveFolderQueue(
 
 /** 等媒体来源把"本项"扫出来的上限；超过则退回单项队列（绝不卡住进页） */
 private const val SOURCE_WAIT_MS = 3_000L
+
+/**
+ * 首帧**非空却仍不含本项**时的额外等待窗口。
+ *
+ * 来源的媒体列表是 StateFlow，且是"扫描完成一次性覆盖"（不是渐进追加）——非空即完整。
+ * 所以"非空又不含本项"等于"本项确实不在这个来源里"（id 变了 / 深链指向别的来源），
+ * 再等满 [SOURCE_WAIT_MS] 纯属白等：每个来源白等 3s，串起来就是进页几秒的转圈。
+ */
+private const val SOURCE_WAIT_SETTLED_MS = 400L
+
+/**
+ * 等到来源列表里出现"本项"（先 id 再 uri）为止，返回**那一刻的完整列表**。
+ *
+ * 冷启动（首帧是空列表，扫描未落库）值得等满 [SOURCE_WAIT_MS]；
+ * 首帧非空却仍不含本项则只给 [SOURCE_WAIT_SETTLED_MS] 的窗口。
+ * 超时一律回退**已经拿到的那份快照**——不再二次订阅（此前超时分支会重新
+ * `observeMedia().first()`，等于把同一个等待又排一遍）。
+ */
+private suspend fun MediaSourceProvider.awaitSelfList(
+    mediaId: String,
+    uri: String,
+): List<MediaItem> {
+    fun matches(list: List<MediaItem>) =
+        list.any { (mediaId.isNotEmpty() && it.id == mediaId) || it.uri == uri }
+
+    val snapshot = observeMedia().first()
+    if (matches(snapshot)) return snapshot
+    val budget = if (snapshot.isEmpty()) SOURCE_WAIT_MS else SOURCE_WAIT_SETTLED_MS
+    return withTimeoutOrNull(budget) { observeMedia().first { matches(it) } } ?: snapshot
+}
 
 // ---- PiP 动作（§5.3）：经标准 MEDIA_BUTTON 事件驱动会话，引擎无关 ----
 

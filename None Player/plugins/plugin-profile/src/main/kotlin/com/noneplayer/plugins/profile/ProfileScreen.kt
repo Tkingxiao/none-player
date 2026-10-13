@@ -31,7 +31,6 @@ import androidx.navigation.compose.composable
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
-import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
@@ -47,7 +46,6 @@ import com.noneplayer.core.ui.NpCoverPlaceholder
 import com.noneplayer.core.ui.NpEmptyState
 import com.noneplayer.core.ui.NpEyebrow
 import com.noneplayer.core.ui.NpIcon
-import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpMediaCard
 import com.noneplayer.core.ui.NpMediaColor
 import com.noneplayer.core.ui.NpMoreLink
@@ -62,14 +60,11 @@ import com.noneplayer.core.ui.npStaggerWindow
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.get
-import com.noneplayer.kernel.api.observe
-import com.noneplayer.kernel.ui.api.ABOUT_ROUTE
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.rememberMediaItems
 import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.NpTabChannel
-import com.noneplayer.kernel.ui.api.SETTINGS_ROUTE
 import com.noneplayer.kernel.ui.api.TabProvider
 import com.noneplayer.core.ui.LocalNpTopBarInset
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
@@ -80,7 +75,7 @@ class ProfileTabProvider : TabProvider {
     override val tabId: String = "profile"
     override val label: String = "我的"
     override val icon: Any = NpIcon.Person
-    override val selectedIcon: Any? = NpIcon.PersonFill
+    override val selectedIcon: Any = NpIcon.PersonFill
     override val order: Int = 30
     override val route: String = "profile"
     override val deepLinks: List<String> = emptyList()
@@ -111,18 +106,12 @@ private fun ProfileScreen(navigator: Navigator) {
     val compact = windowInfo.isCompact
     // 跳到同为顶层标签的设置页（见 [LocalNpTabSwitcher] 的说明）
     val switchTab = LocalNpTabSwitcher.current
-    val versionName = remember {
-        runCatching {
-            context.packageManager.getPackageInfo(context.packageName, 0).versionName
-        }.getOrNull() ?: "—"
-    }
 
     // 最近播放：**真实播放记录**——有进度（>0）的条目按"上次播放时间"倒序。
     // 此前是按 joinedAtMs（入库时间）倒序的临时近似；D2/D7 接线后：
     // 进度与 lastAt 都由播放会话落盘（AppSettings），这里只排序，不再近似。
     // E105：媒体列表用共享助手的"首帧同步快照"版（重进页面不再闪一帧空模板）
     val mediaState = rememberMediaItems()
-    val settings = remember { kernel.services.get<AppSettings>() }
     // §8.3：播放历史/收藏（进度与时间序都读 Room 仓库）
     val history = remember { kernel.services.get<HistoryRepository>() }
     val historyEntries by history.recent.collectAsStateWithLifecycle(initialValue = emptyList())

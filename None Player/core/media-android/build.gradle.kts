@@ -31,6 +31,9 @@ dependencies {
     implementation(libs.media3.common)
     implementation(libs.media3.extractor)
     implementation(libs.media3.datasource)
+    // FormatProbe 用 `String.toUri()`（core-ktx）：直接引用须显式声明，与 :core:ui 同一口径，
+    // 否则 lint 的 UseKtx 会提示且依赖关系是隐式的
+    implementation(libs.androidx.core.ktx)
     // AVI 解封装增强（AviExtractorsFactory）：探测链必须与播放链同源，
     // 否则"探测说没视频轨、播放却能出画"（或反之）——见 FormatProbe 注释
     implementation(libs.media3avi)

@@ -1,5 +1,6 @@
 package com.noneplayer.kernel.ui.api
 
+import android.annotation.SuppressLint
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -59,7 +60,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.SolidColor
@@ -190,7 +190,10 @@ val LocalNpBottomInset: ProvidableCompositionLocal<Dp> =
  *
  * [tabNavController] 由外层 [KernelNavHost] 注入——**不能在此 `remember`**（E53）。
  */
+// 紧凑档的 Scaffold 刻意不消费 innerPadding（见紧凑分支里的注释：内容层要延伸到
+// 迷你条/Tab 栏之下，各页自己用 LocalNpBottomInset 做最后一屏避让），所以这条 lint 是有意为之。
 @Composable
+@SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
 fun KernelTabScaffold(
     navigator: Navigator,
     tabNavController: NavHostController,
@@ -418,6 +421,7 @@ fun KernelTabScaffold(
         // 反而比单栏更难用；§8.1 表里"路径 A 先行"那一行本来也标在 isDesktopLike。
         val pane = sortedPanes.firstOrNull()
         val paneInUse = pane != null && windowInfo.isDesktopLike && pane.isOccupied()
+        val showBottomChrome = !paneInUse || pane?.showsBottomChrome() == true
         Row(modifier = Modifier.fillMaxSize()) {
             NpNavRail(
                 tabs = sortedTabs,
@@ -485,14 +489,6 @@ fun KernelTabScaffold(
                                         modifier = Modifier
                                             .weight(1f)
                                             .fillMaxHeight()
-                                            .graphicsLayer {
-                                                // 在右栏自己的框里缩小，锚点靠右，避免收起时被拉到左封面。
-                                                val scale = 0.72f + 0.28f * paneProgress
-                                                scaleX = scale
-                                                scaleY = scale
-                                                alpha = paneProgress.coerceIn(0f, 1f)
-                                                transformOrigin = TransformOrigin(1f, 0.45f)
-                                            }
                                             .padding(
                                                 start = windowInfo.pageGutter,
                                                 end = windowInfo.pageGutter,
@@ -503,7 +499,7 @@ fun KernelTabScaffold(
                         }
                     }
                 }
-                if (paneInUse) {
+                if (!showBottomChrome) {
                     // 进分栏后底部没有悬浮条：清掉上一档遗留的实测高度，
                     // 否则列表列会在底部留出正好一条迷你条高的空白。
                     LaunchedEffect(Unit) { bottomBarPx = 0 }

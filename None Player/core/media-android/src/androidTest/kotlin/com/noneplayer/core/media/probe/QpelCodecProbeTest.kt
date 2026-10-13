@@ -110,11 +110,11 @@ class QpelCodecProbeTest {
         val clip = demux(ASSET_CLIP)
         line(
             "DEMUX",
-            "asset=$ASSET_QPEL mime=${qpel.format.sampleMimeType} ${qpel.format.width}x${qpel.format.height} samples=${qpel.samples.size} csd=${qpel.format.initializationData?.size ?: 0}B",
+            "asset=$ASSET_QPEL mime=${qpel.format.sampleMimeType} ${qpel.format.width}x${qpel.format.height} samples=${qpel.samples.size} csd=${qpel.format.initializationData.size}B",
         )
         line(
             "DEMUX",
-            "asset=$ASSET_CLIP mime=${clip.format.sampleMimeType} ${clip.format.width}x${clip.format.height} samples=${clip.samples.size} csd=${clip.format.initializationData?.size ?: 0}B",
+            "asset=$ASSET_CLIP mime=${clip.format.sampleMimeType} ${clip.format.width}x${clip.format.height} samples=${clip.samples.size} csd=${clip.format.initializationData.size}B",
         )
         val qFirst = qpel.samples.first().data
         val cFirst = clip.samples.first().data
@@ -179,7 +179,7 @@ class QpelCodecProbeTest {
             samples = listOf(demuxed.samples.first().copy(data = rest)) + demuxed.samples.drop(1)
         } else {
             // 如实记录容器是否自带 csd；XVID AVI 通常没有（头在帧内）
-            demuxed.format.initializationData?.firstOrNull()?.let {
+            demuxed.format.initializationData.firstOrNull()?.let {
                 format.setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(it))
             }
             samples = demuxed.samples

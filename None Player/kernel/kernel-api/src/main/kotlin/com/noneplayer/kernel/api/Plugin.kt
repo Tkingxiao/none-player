@@ -52,7 +52,7 @@ interface Plugin {
  *
  * 每个标注了 [PluginMarker] 的插件类，其所在模块会生成一个
  * `<插件类名>PluginIndex` 实现本接口；宿主 `:app` 在装配时收集所有索引，
- * 交给 [KernelCreator] 引导内核。
+ * 交给 `NonePlayerApplication` 引导内核。
  */
 interface PluginIndex {
     fun plugins(): List<Plugin>

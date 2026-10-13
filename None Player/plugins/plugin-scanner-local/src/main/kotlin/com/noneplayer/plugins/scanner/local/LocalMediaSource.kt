@@ -790,7 +790,6 @@ class LocalMediaSource(
             MediaStore.Video.Media.HEIGHT,
         )
         val hasRelativePath = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
-        val primaryRelativePath = (scope as? ScanScope.Primary)?.relativePath
         val items = mutableListOf<MediaItem>()
         context.contentResolver.query(
             videoCollection(),
@@ -1223,11 +1222,16 @@ private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, Med
     // 此前 `out +=` 无判重，同一文件以同一 id 进列表两次（用户实报"扫描会出现双份文件"）
     val seen = HashSet<String>()
     scopes.forEach { scope ->
+        // Unresolvable 一律跳过（与 [queryScope] 同一道闸）：scopeSelection 对它返回
+        // (null, null)，而 (null, null) 与"用户选的就是主存储根目录＝全量扫描"同形，
+        // 拼进 selection 就只剩 `MEDIA_TYPE = 0` —— 那条查询会越过授权目录扫遍整机
+        // 非媒体行，正违反 scopeSelection 注释里"任何分支都不得回退全量扫描"的不变量。
+        if (scope is ScanScope.Unresolvable) return@forEach
         val (scopeSel, scopeArgs) = scopeSelection(
             scope,
             MediaStore.MediaColumns.RELATIVE_PATH,
             MediaStore.MediaColumns.DATA,
-        ) ?: return@forEach
+        )
         val selection = "${MediaStore.Files.FileColumns.MEDIA_TYPE} = 0" +
             (scopeSel?.let { " AND $it" } ?: "")
         runCatching {

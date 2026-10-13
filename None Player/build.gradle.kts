@@ -20,7 +20,8 @@ allprojects {
     }
 }
 
-// 版本类 lint（GradleDependency / NewerVersionAvailable / OldTargetApi）为刻意锁版：
+// 版本类 lint（GradleDependency / NewerVersionAvailable / AndroidGradlePluginVersion /
+// OldTargetApi）为刻意锁版：
 // compileSdk 36、Compose BOM 2024.12、Kotlin 2.2.10 均为受控升级节奏，统一豁免。
 // ObsoleteSdkInt 唯一命中点是 mipmap-anydpi-v26——AGP 9 的 AAPT2 对 adaptive-icon
 // 资源强制要求 -v26 目录限定符，无法按建议合并，一并豁免。
@@ -28,14 +29,20 @@ subprojects {
     plugins.withId("com.android.library") {
         extensions.configure<com.android.build.api.dsl.LibraryExtension> {
             lint {
-                disable += setOf("GradleDependency", "NewerVersionAvailable", "OldTargetApi", "ObsoleteSdkInt")
+                disable += setOf(
+                    "GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion",
+                    "OldTargetApi", "ObsoleteSdkInt",
+                )
             }
         }
     }
     plugins.withId("com.android.application") {
         extensions.configure<com.android.build.api.dsl.ApplicationExtension> {
             lint {
-                disable += setOf("GradleDependency", "NewerVersionAvailable", "OldTargetApi", "ObsoleteSdkInt")
+                disable += setOf(
+                    "GradleDependency", "NewerVersionAvailable", "AndroidGradlePluginVersion",
+                    "OldTargetApi", "ObsoleteSdkInt",
+                )
             }
         }
     }

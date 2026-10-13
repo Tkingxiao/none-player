@@ -14,7 +14,7 @@ import org.junit.Test
  * ① 音频首次打开（审查 #1）；
  * ② 视频首次打开（默认必须带画面，不能因为"没记过"就落到音频）；
  * ③ **仅听视频 → 切普通视频**（审查 #2 的回归用例，旧实现必挂）；
- * ④ 记过值与没记过必须区分（旧 `audioOnlyPreferred` 把两者压成同一个 false）；
+ * ④ 纯音频无视旧的视频模式偏好；
  * ⑤ 无记忆键可读时仍按媒体类型给默认（真机实测采出的缺口，见该用例注释）。
  */
 class AudioOnlyModeTest {
@@ -49,12 +49,10 @@ class AudioOnlyModeTest {
     }
 
     @Test
-    fun `记过 false 与没记过必须区分开`() {
-        // 同样是"音频媒体"，一个记过 false、一个没记过：前者必须原样返回 false。
-        // 若把两者都压成 false（旧 AppSettings.audioOnlyPreferred 的做法），
-        // 就无法给音频文件一个"没记过 → 默认仅听"的落点。
+    fun `pure audio ignores a saved video preference`() {
+        // Pure audio cannot render a video surface, even with an old false preference.
         assertEquals(
-            false,
+            true,
             resolveAudioOnlyMode(storedPreference = false, isAudioMedia = true),
         )
         // 记过 true 的视频：用户明确要过仅听，必须尊重
@@ -62,6 +60,11 @@ class AudioOnlyModeTest {
             true,
             resolveAudioOnlyMode(storedPreference = true, isAudioMedia = false),
         )
+    }
+
+    @Test
+    fun `explicit video preference overrides saved audio mode for video media`() {
+        assertEquals(false, resolveAudioOnlyMode(storedPreference = false, isAudioMedia = false))
     }
 
     @Test

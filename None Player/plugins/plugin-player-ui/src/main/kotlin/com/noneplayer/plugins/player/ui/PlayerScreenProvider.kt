@@ -32,6 +32,8 @@ class PlayerScreenProvider : ScreenProvider {
         listOf(
             "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}&audio={audio}",
             "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}",
+            "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&audio={audio}",
+            "noneplayer://player?uri={uri}&mime={mime}",
             "noneplayer://player?uri={uri}&id={id}",
             "noneplayer://player?uri={uri}",
         )
@@ -63,7 +65,11 @@ class PlayerScreenProvider : ScreenProvider {
                 navigator = navigator,
                 fromStart = entry.arguments?.getString("from") == "start",
                 immersiveEntry = entry.arguments?.getString("fs") == "1",
-                audioOnlyEntry = entry.arguments?.getString("audio") == "1",
+                audioOnlyEntry = when (entry.arguments?.getString("audio")) {
+                    "1" -> true
+                    "0" -> false
+                    else -> null
+                },
                 manualPipEntry = entry.arguments?.getString("pip") == "1",
             )
         }

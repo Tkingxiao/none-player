@@ -24,6 +24,8 @@ class PlayerDeepLinkTemplateTest {
         shape("uri", "title", "mime", "id", "from", "fs", "audio"),
         // 内部导航与详情页/右栏：全量形状
         shape("uri", "title", "mime", "id", "from", "fs"),
+        shape("uri", "title", "mime", "id", "audio"),
+        shape("uri", "mime"),
         // 通知/锁屏/PiP 回跳（PlaybackService.deepLinkPendingIntent）：只带 uri 与权威 id
         shape("uri", "id"),
         // 外部应用最简深链

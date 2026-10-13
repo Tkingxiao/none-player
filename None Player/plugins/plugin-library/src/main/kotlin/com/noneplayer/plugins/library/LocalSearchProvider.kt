@@ -1,7 +1,6 @@
 package com.noneplayer.plugins.library
 
 import com.noneplayer.core.media.MediaItem
-import com.noneplayer.core.media.cardTitle
 import com.noneplayer.core.media.SearchResult
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.MediaSourceProvider

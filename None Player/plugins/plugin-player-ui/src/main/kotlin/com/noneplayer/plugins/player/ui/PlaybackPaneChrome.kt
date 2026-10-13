@@ -18,12 +18,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.ui.LocalNpInk
@@ -33,11 +36,20 @@ import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.npGlassSurface
+import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryEntry
+import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.kind
 import com.noneplayer.kernel.api.Navigator
+import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.ui.api.DetailPaneProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.NpInlinePlayRequest
+import com.noneplayer.kernel.ui.api.LocalNpBottomInset
+import com.noneplayer.kernel.ui.api.NpPlayerPaneMotion
 import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.launch
 import coil.compose.AsyncImage
 
 /**
@@ -73,10 +85,16 @@ class PlaybackPaneChrome : DetailPaneProvider {
         val session = sessionOf()
         // E120：这里只问"有没有在播"，却要订 nowPlaying——它每 250ms 随进度发新值，
         // 于是整个类 PC 外壳（含媒体库那一栏）跟着进度 4/s 失效。改订位置无关的摘要。
-        val nowPlaying by session.nowPlayingSummary.collectAsStateWithLifecycle()
-        val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
-        // 仅听音频模式由整屏音频页承载，右栏没有画面可放——这一档仍交给底部迷你条
-        return nowPlaying != null && !audioOnly
+        val queue by session.queue.collectAsStateWithLifecycle()
+        val index by session.index.collectAsStateWithLifecycle()
+        SideEffect { if (queue.getOrNull(index) == null) NpPlayerPaneMotion.clearPane() }
+        return queue.getOrNull(index) != null
+    }
+
+    @Composable
+    override fun showsBottomChrome(): Boolean {
+        val audioOnly by sessionOf().audioOnly.collectAsStateWithLifecycle()
+        return audioOnly
     }
 
     @Composable
@@ -101,6 +119,7 @@ class PlaybackPaneChrome : DetailPaneProvider {
             }
         }
         val currentSnapshot = session.nowPlayingSummary.collectAsStateWithLifecycle().value
+        val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
         var lastSnapshot by remember { mutableStateOf<NowPlaying?>(null) }
         SideEffect { if (currentSnapshot != null) lastSnapshot = currentSnapshot }
         val snapshot = currentSnapshot ?: lastSnapshot ?: return
@@ -135,14 +154,22 @@ class PlaybackPaneChrome : DetailPaneProvider {
                     modifier = Modifier.padding(start = NpSpace.sm),
                 )
                 Text(
-                    text = snapshot.title,
+                    text = if (audioOnly || snapshot.item.kind == MediaKind.AUDIO) "正在播放" else snapshot.title,
                     style = NpTypography.titleSmall,
                     color = ink.fg,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
-                Spacer(modifier = Modifier.width(NpSpace.lg))
+                if (audioOnly || snapshot.item.kind == MediaKind.AUDIO) {
+                    NpIconButton(
+                        icon = NpIcon.Expand,
+                        contentDescription = "打开完整音频播放",
+                        onClick = { openAudio(navigator, snapshot) },
+                    )
+                } else {
+                    Spacer(modifier = Modifier.width(NpSpace.lg))
+                }
             }
             Box(modifier = Modifier.weight(1f)) {
                 if (currentSnapshot == null) {
@@ -152,6 +179,15 @@ class PlaybackPaneChrome : DetailPaneProvider {
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize(),
+                    )
+                    return@Box
+                }
+                if (audioOnly || snapshot.item.kind == MediaKind.AUDIO) {
+                    AudioPane(
+                        session = session,
+                        onOpen = { openAudio(navigator, snapshot) },
+                        showOpenButton = false,
+                        modifier = Modifier.fillMaxSize().padding(bottom = LocalNpBottomInset.current),
                     )
                     return@Box
                 }
@@ -170,7 +206,9 @@ class PlaybackPaneChrome : DetailPaneProvider {
                                 "&fs=1",
                         )
                     },
-                    modifier = Modifier.fillMaxSize(),
+                    modifier = Modifier.fillMaxSize().onGloballyPositioned {
+                        NpPlayerPaneMotion.recordPane(snapshot.item.uri, it.boundsInWindow())
+                    },
                 )
             }
         }
@@ -187,4 +225,81 @@ class PlaybackPaneChrome : DetailPaneProvider {
      * 查询参数按 URI 规范解码时它就是个加号。
      */
     private fun encode(value: String): String = android.net.Uri.encode(value, "")
+
+    private fun openAudio(navigator: Navigator, snapshot: NowPlaying) {
+        navigator.navigate(
+            "player?uri=${encode(snapshot.item.uri)}" +
+                "&title=${encode(snapshot.title)}" +
+                "&mime=${encode(snapshot.item.mimeType)}" +
+                "&id=${encode(snapshot.item.id)}&audio=1",
+        )
+    }
+}
+
+@Composable
+internal fun AudioPane(
+    session: PlaybackSession,
+    onOpen: () -> Unit,
+    modifier: Modifier = Modifier,
+    showOpenButton: Boolean = true,
+) {
+    val services = LocalKernel.current.services
+    val history = remember(services) { services.get<HistoryRepository>() }
+    val settings = remember(services) { services.get<AppSettings>() }
+    val scope = rememberCoroutineScope()
+    val snapshot by session.nowPlayingSummary.collectAsStateWithLifecycle()
+    val item = snapshot?.item ?: return
+    val player = session.player ?: return
+    val favoriteKeys by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
+    val speed by player.speed.collectAsStateWithLifecycle()
+    val queue by session.queue.collectAsStateWithLifecycle()
+    val queueIndex by session.index.collectAsStateWithLifecycle()
+    var speedPickerVisible by remember(item.uri) { mutableStateOf(false) }
+    var queueVisible by remember(item.uri) { mutableStateOf(false) }
+
+    androidx.activity.compose.BackHandler(speedPickerVisible) { speedPickerVisible = false }
+    Box(modifier) {
+        AudioOnlyScreen(
+            session = session,
+            onBack = onOpen,
+            onReturnToVideo = if (item.kind == MediaKind.AUDIO) null else {
+                { session.setAudioOnly(false) }
+            },
+            favorited = HistoryEntry.keyOf(item) in favoriteKeys,
+            onToggleFavorite = { scope.launch { history.toggleFavorite(item) } },
+            onOpenSpeed = { speedPickerVisible = !speedPickerVisible },
+            speed = speed,
+            speedText = "${speed}x",
+            speedPickerVisible = speedPickerVisible,
+            onPickSpeed = { next ->
+                player.setSpeed(next)
+                scope.launch { settings.setPlaybackSpeed(next) }
+                speedPickerVisible = false
+            },
+            onOpenEpisodes = { queueVisible = true },
+            embedded = true,
+        )
+        if (showOpenButton) {
+            NpIconButton(
+                icon = NpIcon.Expand,
+                contentDescription = "打开完整音频播放",
+                onClick = onOpen,
+                modifier = Modifier.align(Alignment.TopEnd),
+            )
+        }
+        PanelExitHost(visible = queueVisible, onRemoved = { queueVisible = false }) { visible ->
+            androidx.activity.compose.BackHandler { queueVisible = false }
+            EpisodePanel(
+                visible = visible,
+                queue = queue,
+                currentIndex = queueIndex,
+                onSelect = {
+                    session.selectQueueIndex(it)
+                    queueVisible = false
+                },
+                onDismiss = { queueVisible = false },
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
+    }
 }

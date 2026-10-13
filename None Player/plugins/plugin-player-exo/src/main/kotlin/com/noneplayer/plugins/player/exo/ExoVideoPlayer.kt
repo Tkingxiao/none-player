@@ -2,7 +2,6 @@ package com.noneplayer.plugins.player.exo
 
 import android.content.ComponentName
 import android.content.Context
-import android.net.Uri
 import android.os.Bundle
 import android.view.SurfaceView
 import android.view.TextureView
@@ -10,7 +9,6 @@ import androidx.annotation.OptIn
 import androidx.core.net.toUri
 import androidx.core.content.ContextCompat
 import androidx.media3.common.C
-import androidx.media3.common.Label
 import androidx.media3.common.text.Cue
 import androidx.media3.common.text.CueGroup
 import androidx.media3.common.MediaItem
@@ -22,7 +20,6 @@ import androidx.media3.common.PlaybackException
 import androidx.media3.common.PlaybackParameters
 import androidx.media3.common.Player
 import androidx.media3.common.TrackSelectionOverride
-import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionParameters
 import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
@@ -49,14 +46,14 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.Flow
-import com.noneplayer.kernel.api.EqualizerCapabilities
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
@@ -65,10 +62,6 @@ import kotlin.math.abs
  * 播放器实例驻留服务进程侧：UI 销毁不影响播放（后台播放 + 媒体通知）。
  * [awaitReady] 阻塞到会话建立；字幕/倍速/进度记忆都作用于会话侧播放器。
  */
-/** 均衡器探测后的有界重读次数与间隔（A2-11）：`SessionExtras` 没有变化回调，只能拉取 */
-private const val EQ_PROBE_READS = 3
-private const val EQ_PROBE_READ_INTERVAL_MS = 200L
-
 class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private val appContext = context.applicationContext
@@ -126,6 +119,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private val connected = CompletableDeferred<MediaController>()
     private var controller: MediaController? = null
     private var attachedDisplay: Any? = null
+    private var refreshPausedFrameOnSurface = false
     private var currentMediaUri: String? = null
     private var currentMimeType: String = "video/mp4"
     private var currentTitle: String = ""
@@ -133,6 +127,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var subtitleUri: String? = null
     private var mountedSubtitleUri: String? = null
     private var textTracksEnabled = true
+    private var videoTracksEnabled = true
 
     // E39/E41：探测期间的挂起操作与轨道信息
     private var prepareJob: Job? = null
@@ -219,9 +214,6 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                         return@addListener
                     }
                     controller = c
-                    // 均衡器能力（A2-11）：连上先读一次会话侧已回传的 extras，
-                    // 之后由 [eqExtrasListener] 跟进变化（探测帧发出后服务侧才写）。
-                    refreshEqCapabilities(c)
                     c.addListener(object : Player.Listener {
                         // 首帧不在这里：media3 不把 onRenderedFirstFrame 转发给
                         // MediaController，控制器侧只能看到 STATE_READY。出画时刻记在会话侧
@@ -243,6 +235,15 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
                         override fun onVideoSizeChanged(videoSize: VideoSize) {
                             applyVideoSize(videoSize)
+                        }
+
+                        override fun onSurfaceSizeChanged(width: Int, height: Int) {
+                            if (!refreshPausedFrameOnSurface || width <= 0 || height <= 0) return
+                            refreshPausedFrameOnSurface = false
+                            // A paused decoder may have already released its only frame to the old surface.
+                            if (attachedDisplay != null && videoTracksEnabled &&
+                                c.playbackState == Player.STATE_READY && !c.playWhenReady
+                            ) c.seekTo(c.currentPosition)
                         }
 
                         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
@@ -336,6 +337,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     // 否则"关闭自动连播"在重建控制器后（换 mime / 重进）会失效
                     sendAutoplayFlag()
                     setTextTracksEnabled(textTracksEnabled)
+                    setVideoTracksEnabled(videoTracksEnabled)
                     connected.complete(c)
                     scope.launch { pollPosition(c) }
                 } catch (t: Throwable) {
@@ -378,13 +380,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             _videoAspectRatio.value = 0f
             return
         }
-        var ratio = videoSize.width.toFloat() * videoSize.pixelWidthHeightRatio /
+        // 旋转已在 MediaCodecVideoRenderer 侧处理：format.rotationDegrees 为 90/270 时
+        // 那里已交换宽高并取倒数 pixelWidthHeightRatio，报上来的 VideoSize 就是显示尺寸
+        // （unappliedRotationDegrees 恒为 0 且已弃用），这里直接算比例即可。
+        _videoAspectRatio.value = videoSize.width.toFloat() * videoSize.pixelWidthHeightRatio /
             videoSize.height.toFloat()
-        // 竖向旋转的横拍视频：宽高对调
-        if (videoSize.unappliedRotationDegrees == 90 || videoSize.unappliedRotationDegrees == 270) {
-            ratio = 1f / ratio
-        }
-        _videoAspectRatio.value = ratio
     }
 
     override suspend fun awaitReady() {
@@ -417,13 +417,16 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      *    会先闪一屏"播放结束"或旧错误再开始播；
      * ③ 世代号（E58 二次防御）：快速切换 A→B 时，A 的探测协程即便在极端调度下
      *    "取消晚了一步"跑完，落地前也会先核对世代号——不是最新一次就直接丢弃。
+     *
+     * [apply] 是 suspend 的：装载落地里最重的一段（整表 MediaItem 构建 + 封面读盘）
+     * 必须能切到 IO 线程执行，见 [applyQueue]。
      */
     private fun probeThenLoad(
         uri: String,
         expectedMime: String? = null,
         sizeBytes: Long = 0L,
         lastModifiedSec: Long = 0L,
-        apply: () -> Unit,
+        apply: suspend () -> Unit,
     ) {
         prepareJob?.cancel()
         loadPending = true
@@ -530,7 +533,18 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     }
 
     override fun attachDisplay(view: Any?) {
+        if (attachedDisplay === view) return
+        NpPerf.sessionMark("display attach ${System.identityHashCode(view)} previous=${System.identityHashCode(attachedDisplay)}")
         attachedDisplay = view
+        refreshPausedFrameOnSurface = view != null
+        attachSurfaceTo(controller)
+    }
+
+    override fun detachDisplay(view: Any) {
+        NpPerf.sessionMark("display detach ${System.identityHashCode(view)} current=${System.identityHashCode(attachedDisplay)}")
+        if (attachedDisplay !== view) return
+        attachedDisplay = null
+        refreshPausedFrameOnSurface = false
         attachSurfaceTo(controller)
     }
 
@@ -584,39 +598,47 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val target = items[safeIndex]
         setCurrentTarget(target)
         probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
-            applyQueue(mediaItemsOf(items), safeIndex, startPositionMs)
+            applyQueue(items, safeIndex, startPositionMs)
         }
     }
 
 
     /** setQueue 成功路径的装载体（探测通过后调用），保持与探测前的行为一致 */
     @OptIn(UnstableApi::class)
-    private fun applyQueue(
-        mediaItems: List<MediaItem>,
+    private suspend fun applyQueue(
+        coreItems: List<com.noneplayer.core.media.MediaItem>,
         safeIndex: Int,
         startPositionMs: Long,
     ) {
         val c = controller ?: return
         // 同 [applyMedia]：任何一次新装载都放下失败闩（旧错误面板不许跨媒体残留）
         terminalFailure = false
-        _queue.value.let { if (it.isNotEmpty()) _currentUri.value = it[safeIndex].uri }
+        coreItems.getOrNull(safeIndex)?.let { _currentUri.value = it.uri }
         // 批次 3 修复：队列路径此前从不带 SubtitleConfiguration——字幕记忆/同名挂载
         // 在"进页即 setQueue"的主流程上整体失效（applyMedia 只服务单媒体项路径）。
         // 给**即将播放的那一项**烘上当前字幕地址；切集后由 setSubtitle 走重建路径。
         val subtitle = subtitleUri
-        val items = if (subtitle != null) {
-            mediaItems.mapIndexed { index, item ->
-                if (index == safeIndex) {
-                    item.buildUpon()
+        // 建表必须在 IO：整表 MediaItem 会为**每一项**准备封面元数据，此前还逐项把封面
+        // 文件读成 artworkData——一季 100 集就是 100 次同步读盘 + 一次超大 Binder 事务，
+        // 全压在装载协程（主线程）上，表现就是"点播放转圈很久 / 切集卡死"。
+        // 现在只有**即将播放的那一项**带封面字节（通知/锁屏立即可见），其余项只给
+        // artworkUri 让系统异步加载——队列语义不变，成本从 O(队列) 降到 O(1)。
+        val items = withContext(Dispatchers.IO) {
+            coreItems.mapIndexed { index, src ->
+                val built = src.toMediaItem(withArtwork = index == safeIndex)
+                if (subtitle != null && index == safeIndex) {
+                    built.buildUpon()
                         .setSubtitleConfigurations(listOf(subtitleConfiguration(subtitle)))
                         .build()
                 } else {
-                    item
+                    built
                 }
-            }
-        } else {
-            mediaItems
+            }.also { NpPerf.mark("built ${it.size} media items") }
         }
+        // 建表期间可能已经来了更新的装载（A→B 快速切换会 cancel 本次 prepareJob）：
+        // withContext 自身会在挂起点抛出取消，但"IO 刚回来、还没落盘"这一小段
+        // 是纯同步代码，必须自己再核一次，别把旧队列盖到新装载上。
+        currentCoroutineContext().ensureActive()
         appliedUri = items[safeIndex].localConfiguration?.uri?.toString()
         appliedItems = items
         mountedSubtitleUri = subtitle
@@ -626,9 +648,6 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         c.play()
         NpPerf.mark("setMediaItems idx=$safeIndex applied")
     }
-
-    private fun mediaItemsOf(items: List<com.noneplayer.core.media.MediaItem>): List<MediaItem> =
-        items.map { it.toMediaItem() }.also { NpPerf.mark("built ${it.size} media items") }
 
     /**
      * 选集/自动切集的落点：**同样是一条装载路径**，因此与 setQueue 走同一条探测闸。
@@ -642,9 +661,35 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * 此时对旧播放列表 seek 会指到别的媒体甚至越界。
      */
     override fun selectQueueIndex(index: Int) {
-        if (controller == null) return
+        val c = controller ?: return
         val items = _queue.value
         if (index !in items.indices) return
+        // 队列已经在播：直接跳到那一项。再整表 setMediaItems + 重新探测会和正在打开的文件抢句柄，
+        // 切集停在转圈，直到进程重启把句柄放掉。
+        //
+        // 判据只看**控制器里已经装着同一份队列**（项数一致）。此前还额外要求
+        // `appliedItems.size == items.size`——那是"我这边也记着同一份"的代理条件，
+        // 而单媒体项装载（applyMedia / 预载命中）之后 appliedItems 为空，于是每一次
+        // 切集都掉进下面的整表重建 + 重新探测分支：一季几十集就是几十次无谓重装。
+        val queueMounted = c.mediaItemCount == items.size
+        if (queueMounted && index == c.currentMediaItemIndex) {
+            c.play()
+            return
+        }
+        if (queueMounted && !terminalFailure) {
+            _currentIndex.value = index
+            val target = items[index]
+            // 新一集不该继承上一集的外挂字幕（与整表重建分支同一语义）
+            subtitleUri = null
+            mountedSubtitleUri = null
+            setCurrentTarget(target)
+            _currentUri.value = target.uri
+            appliedUri = target.uri
+            loadPending = false
+            c.seekToDefaultPosition(index)
+            c.play()
+            return
+        }
         _currentIndex.value = index
         val target = items[index]
         subtitleUri = null
@@ -652,7 +697,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         pendingSeekMs = null
         setCurrentTarget(target)
         probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
-            applyQueue(mediaItemsOf(items), index, 0L)
+            applyQueue(items, index, 0L)
         }
     }
 
@@ -709,9 +754,16 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         }
     }
 
-    /** 队列项 → media3 MediaItem（id、标题、封面、字幕与 `.cue` 裁剪窗口一并带上） */
+    /**
+     * 队列项 → media3 MediaItem（id、标题、封面、字幕与 `.cue` 裁剪窗口一并带上）。
+     *
+     * [withArtwork] = true 时才把封面**读成字节**（artworkData）：本地缩略图很小，
+     * 烘成字节经 Binder 同步送达会话，通知栏/锁屏立即可见。这只对"即将播放的那一项"
+     * 值得做——整表逐项读盘会让一季 100 集的队列装载多出 100 次同步 IO 与一次超大
+     * Binder 事务（点播放转圈 / 切集卡死的主因）。其余项只给 artworkUri，由系统异步加载。
+     */
     @OptIn(UnstableApi::class)
-    private fun com.noneplayer.core.media.MediaItem.toMediaItem(): MediaItem =
+    private fun com.noneplayer.core.media.MediaItem.toMediaItem(withArtwork: Boolean): MediaItem =
         MediaItem.Builder()
             .setUri(uri)
             .setMimeType(mimeType)
@@ -737,7 +789,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     .setIsBrowsable(false)
                     .setIsPlayable(true)
                     .apply {
-                        val bytes = readArtworkBytes(coverUri)
+                        val bytes = if (withArtwork) readArtworkBytes(coverUri) else null
                         if (bytes != null) {
                             setArtworkData(bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
                         } else {
@@ -823,7 +875,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val c = controller ?: return
         val items = appliedItems
         if (items.isEmpty()) {
-            currentMediaUri?.let { applyMedia(it) }
+            // applyMedia 现在是 suspend（封面读盘走 IO），这里只能起协程接力——
+            // 语义不变：队列未装载时按单媒体项重建。
+            currentMediaUri?.let { uri -> scope.launch { applyMedia(uri) } }
             return
         }
         val index = _currentIndex.value.takeIf { it in items.indices }
@@ -880,6 +934,15 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         c.trackSelectionParameters = c.trackSelectionParameters
             .buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !enabled)
+            .build()
+    }
+
+    override fun setVideoTracksEnabled(enabled: Boolean) {
+        videoTracksEnabled = enabled
+        val c = controller ?: return
+        c.trackSelectionParameters = c.trackSelectionParameters
+            .buildUpon()
+            .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled)
             .build()
     }
 
@@ -970,8 +1033,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             NpTrackType.TEXT -> C.TRACK_TYPE_TEXT
         }
         runCatching {
-            // Tracks.Group.mediaTrackGroup 声明为 MediaTrackGroup 接口，实际必是 TrackGroup
-            val trackGroup = group.mediaTrackGroup as TrackGroup
+            val trackGroup = group.mediaTrackGroup
             c.trackSelectionParameters = c.trackSelectionParameters
                 .buildUpon()
                 .clearOverridesOfType(trackType)
@@ -984,67 +1046,6 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun setSubtitleOffsetMs(offsetMs: Long) {
         subtitleOffsetMs = offsetMs
         controller?.let { recomputeCues(it.currentPosition.coerceAtLeast(0)) }
-    }
-
-    /**
-     * 均衡器能力（A2-11）：服务侧建好效果后经 `SessionExtras` 回传，这里翻成契约类型。
-     *
-     * `null` = 不支持**或还没探到**。UI 侧的判据因此是"探测发出后仍为 null 才收起入口"，
-     * 不是一上来就按不支持处理（那会把有 EQ 的设备也误收）。
-     */
-    private val eqCapabilities = MutableStateFlow<EqualizerCapabilities?>(null)
-    override val equalizerCapabilities: Flow<EqualizerCapabilities?> = eqCapabilities.asStateFlow()
-
-    /** 读一次会话侧回传的均衡器能力（controller 就绪时与 extras 变化时各调一次） */
-    private fun refreshEqCapabilities(c: androidx.media3.session.MediaController) {
-        val extras = runCatching { c.sessionExtras }.getOrNull()
-        if (extras == null || extras.getBoolean(EQ_EXTRA_UNSUPPORTED, false)) {
-            eqCapabilities.value = null
-            return
-        }
-        val bands = extras.getInt(EQ_EXTRA_BANDS, 0)
-        val minMb = extras.getInt(EQ_EXTRA_MIN_MB, 0)
-        val maxMb = extras.getInt(EQ_EXTRA_MAX_MB, 0)
-        eqCapabilities.value =
-            if (bands > 0 && maxMb > minMb) EqualizerCapabilities(bands, minMb, maxMb) else null
-    }
-
-    private fun sendEqCommand(levels: FloatArray?, enabled: Boolean?, probe: Boolean) {
-        controller?.sendCustomCommand(
-            SessionCommand(EQ_COMMAND, Bundle.EMPTY),
-            Bundle().apply {
-                if (levels != null) putFloatArray(EQ_ARG_LEVELS, levels)
-                if (enabled != null) putBoolean(EQ_ARG_ENABLED, enabled)
-                if (probe) putBoolean(EQ_ARG_PROBE, true)
-            },
-        )
-    }
-
-    override fun setEqualizerLevels(levels: List<Float>) {
-        sendEqCommand(levels.toFloatArray(), enabled = null, probe = false)
-    }
-
-    override fun setEqualizerEnabled(enabled: Boolean) {
-        sendEqCommand(levels = null, enabled = enabled, probe = false)
-    }
-
-    /**
-     * 只探能力，不带开关与增益 = 不动当前声音状态。
-     *
-     * 能力是服务侧建好效果后写进 `SessionExtras` 的，而 media3 1.11 的
-     * `MediaController.Listener` **没有 extras 变化回调**，所以这里发完探测帧后
-     * 做**有界重读**（拿到就停，最多 3 次）——不常驻轮询。
-     */
-    override fun probeEqualizer() {
-        sendEqCommand(levels = null, enabled = null, probe = true)
-        if (eqCapabilities.value != null) return
-        scope.launch {
-            repeat(EQ_PROBE_READS) {
-                delay(EQ_PROBE_READ_INTERVAL_MS)
-                controller?.let { refreshEqCapabilities(it) }
-                if (eqCapabilities.value != null) return@launch
-            }
-        }
     }
 
     /**
@@ -1175,7 +1176,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     }
 
     @OptIn(UnstableApi::class)
-    private fun applyMedia(mediaUri: String) {
+    private suspend fun applyMedia(mediaUri: String) {
         val c = controller ?: return
         // 失败闩必须随**任何一次新装载**放下（用户实报：看过不可播的视频后换别的视频，
         // 旧错误面板一直挂着）。闩的本意是"stop+clearMediaItems 之后 Error 不许被
@@ -1188,6 +1189,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // 稍微过期的位置恢复播放，产生极窄的"位置回退"窗口。
         val position = pendingSeekMs ?: c.currentPosition
         val wasPlaying = c.isPlaying || c.playWhenReady
+        // 封面读盘放 IO：装载协程跑在主线程，即便只有一张小图也不该在主线程同步读
+        val artworkUri = currentArtworkUri
+        val artwork = withContext(Dispatchers.IO) { readArtworkBytes(artworkUri) }
         val builder = MediaItem.Builder()
             .setMediaId(currentMediaId)
             .setUri(mediaUri)
@@ -1214,11 +1218,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     .apply {
                         // 本地封面直接读为 artworkData：小图（缩略图缓存 <200KB）经 Binder
                         // 同步送达会话，通知栏/锁屏立即可见；读不到时退回 URI 由系统异步加载
-                        val bytes = readArtworkBytes(currentArtworkUri)
-                        if (bytes != null) {
-                            setArtworkData(bytes, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                        if (artwork != null) {
+                            setArtworkData(artwork, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
                         } else {
-                            currentArtworkUri?.let { setArtworkUri(it.toUri()) }
+                            artworkUri?.let { setArtworkUri(it.toUri()) }
                         }
                     }
                     .build(),

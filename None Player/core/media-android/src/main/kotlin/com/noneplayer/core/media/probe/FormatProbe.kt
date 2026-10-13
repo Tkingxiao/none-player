@@ -20,6 +20,7 @@ import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.PositionHolder
 import androidx.media3.extractor.SeekMap
 import android.net.Uri
+import androidx.core.net.toUri
 import androidx.media3.extractor.TrackOutput
 import com.homesoft.exo.extractor.AviExtractorsFactory
 import com.noneplayer.core.media.MediaNames
@@ -27,8 +28,8 @@ import com.noneplayer.core.media.ProbeMemo
 import com.noneplayer.core.media.PlaybackFailure
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary
 import java.io.ByteArrayOutputStream
-import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import kotlin.math.max
@@ -143,7 +144,7 @@ object FormatProbe {
      * 「最近探测」行来自这里。展示名取地址末段；Unknown 不记录（没有可读结论）。
      */
     private fun recordMemo(uriString: String, result: Result) {
-        val displayName = Uri.parse(uriString).lastPathSegment?.substringAfterLast('/') ?: uriString
+        val displayName = uriString.toUri().lastPathSegment?.substringAfterLast('/') ?: uriString
         val entry = when (result) {
             is Result.Playable -> ProbeMemo.Entry(
                 displayName = displayName,
@@ -213,7 +214,7 @@ object FormatProbe {
         val expectVideo: Boolean? = expectedMime?.let {
             if (it.startsWith("audio/", true)) false else if (it.startsWith("video/", true)) true else null
         }
-        val uri = Uri.parse(uriString)
+        val uri = uriString.toUri()
         if (uri.scheme?.lowercase() !in PROBE_SCHEMES) return Result.Unknown
 
         val containerName = MediaNames.containerName(uriString)
@@ -227,7 +228,7 @@ object FormatProbe {
             var matched: Extractor? = null
             var sniffThrew = false
             for (extractor in extractors) {
-                coroutineContext.ensureActive()
+                currentCoroutineContext().ensureActive()
                 val sniffed = try {
                     extractor.sniff(input)
                 } catch (_: Throwable) {
@@ -263,7 +264,7 @@ object FormatProbe {
             var reads = 0
             while (reads < MAX_READS) {
                 reads++
-                coroutineContext.ensureActive()
+                currentCoroutineContext().ensureActive()
                 val result = try {
                     matched.read(input, holder)
                 } catch (_: Throwable) {
@@ -330,7 +331,7 @@ object FormatProbe {
         }
 
     /** 本地文件字节长度；拿不到返回 null（用探测预算兜底）。不抛异常。 */
-    private fun localLength(context: Context, uri: android.net.Uri): Long? = runCatching {
+    private fun localLength(context: Context, uri: Uri): Long? = runCatching {
         when (uri.scheme?.lowercase()) {
             "file" -> uri.path?.let { path -> java.io.File(path).takeIf { it.isFile }?.length() }
             "content" -> context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { fd ->
@@ -349,8 +350,9 @@ object FormatProbe {
         return runCatching {
             val platform = PlatformMediaFormat.createAudioFormat(
                 mime,
-                if (format.sampleRate != null && format.sampleRate > 0) format.sampleRate else 48_000,
-                if (format.channelCount != null && format.channelCount > 0) format.channelCount else 2,
+                // media3 的 sampleRate/channelCount 是 int（缺省哨兵 -1），非空判断恒真
+                if (format.sampleRate > 0) format.sampleRate else 48_000,
+                if (format.channelCount > 0) format.channelCount else 2,
             )
             MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(platform) != null
         }.getOrDefault(true)
@@ -481,7 +483,7 @@ object FormatProbe {
                             container = containerName,
                             videoCodec = null,
                             audioCodec = audioName,
-                            audioChannels = audio.channelCount?.takeIf { it > 0 }?.let(::audioLayoutName),
+                            audioChannels = audio.channelCount.takeIf { it > 0 }?.let(::audioLayoutName),
                         )
                     }
                     return Result.Unplayable(
@@ -518,9 +520,10 @@ object FormatProbe {
                 hdr = hdr,
                 audioChannels = audioLayout,
                 // 平台没有该编码的解码器、只能靠 FFmpeg 或 MJPEG 位图出画时，同样是"仅软解可用"，
-                // 也要给 C21 前置提示（否则用户只会觉得"莫名其妙很卡/很烫"）
-                softwareVideoOnly = onlySoftwareDecoder(video) ||
-                    (!platformVideo && (ffmpegVideo || bitmapVideo)),
+                // 也要给 C21 前置提示（否则用户只会觉得"莫名其妙很卡/很烫"）。
+                // 不用再判 `ffmpegVideo || bitmapVideo`：上面 unsupported 的早退已保证三者至少
+                // 其一成立，走到这里 `!platformVideo` 就必然是两条软解之一出画。
+                softwareVideoOnly = onlySoftwareDecoder(video) || !platformVideo,
             )
         }
 
@@ -536,7 +539,7 @@ object FormatProbe {
             audioName: String?,
         ): Result? {
             if (video.sampleMimeType != MIME_MP4V) return null
-            val header = video.initializationData?.firstOrNull()?.takeIf { it.isNotEmpty() }
+            val header = video.initializationData.firstOrNull()?.takeIf { it.isNotEmpty() }
                 ?: firstVideoSampleHead
                 ?: return null
             val verdict = Mpeg4ProfileParser.parse(header)

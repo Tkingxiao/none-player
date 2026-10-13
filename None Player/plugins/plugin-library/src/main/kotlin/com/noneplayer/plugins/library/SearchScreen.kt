@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -44,18 +43,15 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.SortMode
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaNaturalOrder
-import com.noneplayer.core.media.cardTitle
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.NpAppTopBar
 import com.noneplayer.core.ui.LocalNpTopBarInset
@@ -81,7 +77,6 @@ import com.noneplayer.core.ui.npStaggeredEntry
 import com.noneplayer.core.ui.npStaggerWindow
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.get
-import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.rememberMediaItems
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
@@ -107,10 +102,8 @@ private const val SEARCH_DEBOUNCE_MS = 120L
 @Composable
 fun SearchScreen(navigator: Navigator) {
     val kernel = LocalKernel.current
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val settings = remember { kernel.services.get<AppSettings>() }
-    val ink = LocalNpInk.current
     val windowInfo = LocalNpWindowInfo.current
     val compact = windowInfo.isCompact
     val gutter = if (compact) 14.dp else 20.dp
@@ -373,7 +366,6 @@ private fun SearchResults(
     onToggleAscending: (Boolean) -> Unit,
     onOpen: (MediaItem) -> Unit,
 ) {
-    val ink = LocalNpInk.current
     // 换词 = 新的一屏结果：窗口跟着 query 重新起，结果集每次入场都错峰一次
     val staggerWindow = npStaggerWindow(query)
     val itemFade = npItemFadeSpec()

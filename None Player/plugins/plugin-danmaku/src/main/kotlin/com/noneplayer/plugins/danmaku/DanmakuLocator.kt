@@ -85,7 +85,7 @@ class DanmakuLocator(private val context: Context) {
         //    scoped storage 实测：只持 READ_MEDIA_* 的 app 在 Files 集合里
         //    **看不到非媒体文件**（.xml/.ass 行对查询不可见）——所以空结果
         //    大概率不是"不存在"，而是"查不到"。
-        var found = querySiblingsByData(resolver, filesUri, parent, names)
+        val found = querySiblingsByData(resolver, filesUri, parent, names)
         // ③ 直读路径兜底：DATA 真实路径就在手里，直接 java.io 读——
         //    用户授予"所有文件访问"（MANAGE_EXTERNAL_STORAGE，由弹幕设置区块
         //    引导）后生效；未授予时读失败，静默回 None（手动选择走 SAF 不受限）。

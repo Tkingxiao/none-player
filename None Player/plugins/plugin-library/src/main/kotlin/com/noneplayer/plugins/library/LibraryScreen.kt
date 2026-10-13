@@ -60,7 +60,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -128,7 +127,6 @@ import com.noneplayer.core.ui.formatFileSize
 import com.noneplayer.core.ui.formatRelativeDate
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npAnchor
-import com.noneplayer.core.ui.npClickable
 import com.noneplayer.core.ui.npItemFadeSpec
 import com.noneplayer.core.ui.npPressScale
 import com.noneplayer.core.ui.npStaggeredEntry
@@ -238,9 +236,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // 在过渡期会继续渲染旧帧（见 LibraryStage 注释），于是每次切 Tab / 从播放页返回
     // 都要闪一帧「选择要观看的文件夹」空态浮在正在淡出的页面上（2026-10-11 用户实报，
     // 实机抓帧在案）。
-    val folderUris by settings.scanFolderUris
-        .map<List<String>, List<String>?> { it }
-        .collectAsStateWithLifecycle(initialValue = settings.scanFolderUrisSnapshot)
+    val folderUris by remember(settings) {
+        settings.scanFolderUris.map<List<String>, List<String>?> { it }
+    }.collectAsStateWithLifecycle(initialValue = settings.scanFolderUrisSnapshot)
     // 设计稿 viewToggle 的 `state.view`：网格 / 列表，跨页面共用并持久化
     val listViewStyle = libraryPreferences?.viewStyle ?: "grid"
     val onViewStyle: (String) -> Unit = { scope.launch { settings.setListViewStyle(it) } }
@@ -454,7 +452,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
         val uri = runCatching { item.uri.toUri() }.getOrNull()
         val isDocument = item.id.startsWith("saf-")
         when {
-            uri == null || uri.scheme == null -> android.widget.Toast.makeText(
+            uri?.scheme == null -> android.widget.Toast.makeText(
                 context,
                 "无法解析该条目的地址，删除已取消",
                 android.widget.Toast.LENGTH_SHORT,
@@ -1883,7 +1881,6 @@ private fun EpisodesEntry(
  */
 @Composable
 private fun StorageSection(modifier: Modifier = Modifier) {
-    val context = LocalContext.current
     val storageText = remember {
         runCatching {
             val dir = android.os.Environment.getExternalStorageDirectory() ?: return@runCatching null

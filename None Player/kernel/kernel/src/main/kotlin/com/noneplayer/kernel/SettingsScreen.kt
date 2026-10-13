@@ -105,7 +105,7 @@ internal class KernelSettingsScreenProvider(private val kernel: Kernel) : TabPro
     override val tabId: String = "settings"
     override val label: String = "设置"
     override val icon: Any = NpShellIcons.Gear
-    override val selectedIcon: Any? = NpIcon.GearFill
+    override val selectedIcon: Any = NpIcon.GearFill
     override val order: Int = 40
     override val pinnedToEnd: Boolean = true
 

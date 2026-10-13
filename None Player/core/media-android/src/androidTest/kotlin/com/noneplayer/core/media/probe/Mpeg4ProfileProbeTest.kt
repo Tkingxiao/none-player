@@ -87,7 +87,6 @@ class Mpeg4ProfileProbeTest {
     /** 端到端：FormatProbe 对两个样本给出相反结论（qpel 拒 / clip 放）。 */
     @Test
     fun formatProbeRejectsQpelAcceptsClip() {
-        val ctx = instrumentation.targetContext
         val qpelUri = Uri.fromFile(copyAsset(ASSET_QPEL)).toString()
         val clipUri = Uri.fromFile(copyAsset(ASSET_CLIP)).toString()
 

@@ -32,6 +32,9 @@ interface DetailPaneProvider : ExtensionPoint {
     @Composable
     fun isOccupied(): Boolean
 
+    @Composable
+    fun showsBottomChrome(): Boolean = false
+
     /**
      * 渲染右栏内容。
      *

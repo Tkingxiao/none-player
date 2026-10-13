@@ -9,17 +9,12 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -38,28 +33,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.kind
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpToastHost
 import com.noneplayer.core.ui.rememberNpToastState
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.database.HistoryEntry
-import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpIcon
-import com.noneplayer.core.ui.NpMono
-import com.noneplayer.core.ui.NpMonoSmall
-import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npDuration
-import com.noneplayer.core.ui.npTouchTarget
 import com.noneplayer.core.ui.npAnchor
 import com.noneplayer.core.ui.rememberNpAnchorHolder
-import com.noneplayer.plugins.player.ui.controls.NpSeekBar
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.NpTrackType
@@ -169,6 +159,8 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         }
 
         val state by player.state.collectAsStateWithLifecycle()
+        val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
+        val summary by session.nowPlayingSummary.collectAsStateWithLifecycle()
         val videoAspectRatio by player.videoAspectRatio.collectAsStateWithLifecycle()
         val cues by player.cues.collectAsStateWithLifecycle()
         val overlays by remember { kernel.registry.observe<PlaybackOverlay>() }
@@ -324,6 +316,10 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                     indication = null,
                 ) { controlsVisible = !controlsVisible },
         ) {
+            if (media.kind == MediaKind.AUDIO || (audioOnly && summary?.item?.uri == media.uri)) {
+                AudioPane(session, ::openAudioOnly, Modifier.fillMaxSize())
+                return@Box
+            }
             VideoStage(
                 player = player,
                 videoAspectRatio = videoAspectRatio,
@@ -529,6 +525,12 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             savedSubtitleName = savedSubtitle?.toUri()?.lastPathSegment,
                             textTracks = tracks.filter { it.type == NpTrackType.TEXT },
                             offsetMs = subtitleOffsetMs,
+                            colorArgb = subtitleColorArgb,
+                            onColor = { scope.launch { settings.setSubtitleColorArgb(it) } },
+                            scale = subtitleScale,
+                            onScale = { scope.launch { settings.setSubtitleScale(it) } },
+                            italic = subtitleItalic,
+                            onItalic = { scope.launch { settings.setSubtitleItalic(it) } },
                             onSetEnabled = { enabled ->
                                 player.setTextTracksEnabled(enabled)
                                 scope.launch { settings.setSubtitleEnabled(enabled) }

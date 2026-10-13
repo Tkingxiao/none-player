@@ -3,18 +3,21 @@ package com.noneplayer.plugins.player.exo
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Bundle
-import android.util.Log
 import androidx.annotation.OptIn
 import androidx.core.net.toUri
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.DataSource
+import androidx.media3.datasource.cache.Cache
 import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.preload.DefaultPreloadManager
+import androidx.media3.exoplayer.source.preload.MediaSourceFactorySupplier
 import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -27,7 +30,6 @@ import com.homesoft.exo.extractor.AviExtractorsFactory
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlin.math.roundToInt
 
 /** 擦洗命令：UI 拖动进度条时切换 seek 精度（会话侧 API 不在 MediaController 暴露） */
 /** 本文件的日志标签（服务基类自带一个私有的 `TAG`，不复用它以免撞名） */
@@ -39,18 +41,6 @@ internal const val SCRUB_ARG_ACTIVE = "active"
 /** 画面裁剪命令：UI「画面」面板切换 cover/fit（同样只在会话侧暴露） */
 internal const val CROP_COMMAND = "np.crop"
 
-/** 均衡器命令（A2-11）：客户端只发**归一增益**与开关，量程映射与效果实例都留在本进程 */
-internal const val EQ_COMMAND = "np.eq"
-internal const val EQ_ARG_ENABLED = "eq_enabled"
-internal const val EQ_ARG_LEVELS = "eq_levels"
-/** 探测：UI 打开面板时先发一发，服务侧据此建效果并把能力写进 SessionExtras */
-internal const val EQ_ARG_PROBE = "eq_probe"
-
-/** SessionExtras 里回传给客户端的均衡器能力键（见 ExoVideoPlayer.equalizerCapabilities） */
-internal const val EQ_EXTRA_BANDS = "np_eq_bands"
-internal const val EQ_EXTRA_MIN_MB = "np_eq_min_mb"
-internal const val EQ_EXTRA_MAX_MB = "np_eq_max_mb"
-internal const val EQ_EXTRA_UNSUPPORTED = "np_eq_unsupported"
 internal const val CROP_ARG_ACTIVE = "active"
 
 /**
@@ -128,11 +118,14 @@ class PlaybackService : MediaSessionService() {
         // 映射：ON = 平台硬解优先、平台解不了才落 FFmpeg；PREFER = FFmpeg 软解优先（兼容档）。
         // **不能映射成 OFF**——那会把扩展渲染器整条摘掉，AVI/MJPEG 之外的一票旧编码直接变
         // "无法播放"，与设置行承诺的"兼容性更好"正好相反。
-        val hardwareFirst = runBlocking {
-            withTimeoutOrNull(HARDWARE_DECODE_READ_TIMEOUT_MS) {
-                AppSettings(this@PlaybackService).hardwareDecodePreferred.first()
-            }
-        } ?: true
+        // 优先取启动时预热好的进程内缓存——服务创建落在"点播放"的关键路径上，
+        // 没有缓存才退回有界等待（首次读盘）。两条路都拿不到就用默认值。
+        val hardwareFirst = AppSettings.cachedHardwareDecodePreferred()
+            ?: runBlocking {
+                withTimeoutOrNull(HARDWARE_DECODE_READ_TIMEOUT_MS) {
+                    AppSettings(this@PlaybackService).hardwareDecodePreferred.first()
+                }
+            } ?: true
         val renderersFactory = NpRenderersFactory(this)
             .setExtensionRendererMode(
                 if (hardwareFirst) {
@@ -142,7 +135,7 @@ class PlaybackService : MediaSessionService() {
                 },
             )
             .setEnableDecoderFallback(true)
-            .setEnableAudioTrackPlaybackParams(true)
+            .setEnableAudioOutputPlaybackParameters(true)
         // AVI 交给 Media3Avi 的增强解封装器（OpenDML/AVIX + indx/ix 索引、MP42/MP43、MJPEG、
         // 更多 H.264 fourCC），其余容器仍是 media3 默认链。必须与 FormatProbe 的探测链同源
         // （见 FormatProbe.AVI_EXTRACTORS 注释）：不同源会让"探测结论"与"实际能否出画"分叉。
@@ -158,8 +151,20 @@ class PlaybackService : MediaSessionService() {
             .setLoadControl(loadControl)
             .setRenderersFactory(renderersFactory)
             // 预载管理器自己也要建 MediaSource：不喂同一个工厂，它预载出来的源
-            // 与播放器认的源就不是一套（AVI 会在预载侧解析失败/被丢弃，白预载）
-            .setMediaSourceFactory(mediaSourceFactory)
+            // 与播放器认的源就不是一套（AVI 会在预载侧解析失败/被丢弃，白预载）。
+            // 1.11 起 Builder.setMediaSourceFactory 弃用（该重载不会把 Cache/DataSourceFactory
+            // 注入进来），改用 Supplier 形态；这里返回的仍是同一个自建工厂，行为与弃用前一致。
+            .setMediaSourceFactorySupplier(
+                object : MediaSourceFactorySupplier {
+                    override fun setCache(cache: Cache?): MediaSourceFactorySupplier = this
+
+                    override fun setDataSourceFactory(
+                        dataSourceFactory: DataSource.Factory?,
+                    ): MediaSourceFactorySupplier = this
+
+                    override fun get(): MediaSource.Factory = mediaSourceFactory
+                },
+            )
         val player = preloadManagerBuilder.buildExoPlayer(
             ExoPlayer.Builder(this, renderersFactory)
                 .setMediaSourceFactory(mediaSourceFactory)
@@ -353,9 +358,6 @@ class PlaybackService : MediaSessionService() {
         private val player: ExoPlayer,
     ) : MediaSession.Callback {
 
-        /** 本会话的均衡器持有者（与回调同寿；引擎换代时按 audioSessionId 变化重建） */
-        private val eq = EqController(player)
-
         override fun onConnect(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
@@ -365,9 +367,10 @@ class PlaybackService : MediaSessionService() {
                 .add(SessionCommand(SCRUB_COMMAND, Bundle.EMPTY))
                 .add(SessionCommand(CROP_COMMAND, Bundle.EMPTY))
                 .add(SessionCommand(AUTOPLAY_COMMAND, Bundle.EMPTY))
-                .add(SessionCommand(EQ_COMMAND, Bundle.EMPTY))
                 .build()
-            return MediaSession.ConnectionResult.AcceptedResultBuilder(session)
+            // 用 (session, controller) 重载：受信控制器拿默认命令集，不受信（第三方 App）
+            // 拿收紧后的 UNTRUSTED 默认集。单参重载已弃用，且对第三方一律放全量命令。
+            return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
                 .setAvailableSessionCommands(commands)
                 .build()
         }
@@ -401,114 +404,7 @@ class PlaybackService : MediaSessionService() {
                 player.setPauseAtEndOfMediaItems(!args.getBoolean(AUTOPLAY_ARG_ENABLED, true))
                 return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
             }
-            if (customCommand.customAction == EQ_COMMAND) {
-                // 均衡器（A2-11）：framework Equalizer 要 audioSessionId，而 MediaController
-                // 拿不到它——所以效果实例、量程映射、能力上报全在会话侧，客户端只见归一值。
-                eq.applyCommand(
-                    session = session,
-                    // 「带没带这个参数」要区分开：探测帧不该顺手把均衡器关掉
-                    enabled = if (args.containsKey(EQ_ARG_ENABLED)) {
-                        args.getBoolean(EQ_ARG_ENABLED)
-                    } else {
-                        null
-                    },
-                    levels = args.getFloatArray(EQ_ARG_LEVELS),
-                    probe = args.getBoolean(EQ_ARG_PROBE, false),
-                )
-                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
-            }
             return super.onCustomCommand(session, controller, customCommand, args)
-        }
-    }
-
-    /**
-     * 会话侧均衡器（A2-11）。
-     *
-     * 三条约束决定了它只能长在这里：
-     * ① framework `Equalizer` 需要 **audioSessionId**，而那是 ExoPlayer（会话侧）的东西，
-     *    `MediaController` 拿不到；
-     * ② 段数与量程**各机型不同**（5 段 ±1500 只是最常见的一档），客户端不能猜，
-     *    所以能力经 `SessionExtras` 回传；
-     * ③ 建效果可能失败（设备没有 EQ）——失败要**如实上报**，UI 据此收起入口，
-     *    不留一排拨了没反应的滑杆。
-     */
-    @OptIn(UnstableApi::class)
-    private class EqController(private val player: ExoPlayer) {
-
-        private var eq: android.media.audiofx.Equalizer? = null
-        private var boundSessionId = -1
-        private var published = false
-
-        fun applyCommand(
-            session: MediaSession,
-            enabled: Boolean?,
-            levels: FloatArray?,
-            probe: Boolean,
-        ) {
-            val effect = ensure(session) ?: return
-            levels?.let { applyLevels(effect, it) }
-            if (enabled != null) {
-                runCatching { effect.enabled = enabled }.onFailure {
-                    Log.w(SERVICE_LOG_TAG, "均衡器开关失败，按不支持处理", it)
-                    publish(session, unsupported = true)
-                }
-            }
-            if (probe) publish(session, unsupported = false)
-        }
-
-        /** 取（或建）效果实例。audioSessionId 变化 = 引擎换代，旧效果必须释放重建 */
-        private fun ensure(session: MediaSession): android.media.audiofx.Equalizer? {
-            val sessionId = runCatching { player.audioSessionId }.getOrDefault(-1)
-            if (sessionId <= 0) return null
-            eq?.takeIf { boundSessionId == sessionId }?.let { existing ->
-                if (!published) publish(session, unsupported = false)
-                return existing
-            }
-            runCatching { eq?.release() }
-            val created = runCatching { android.media.audiofx.Equalizer(0, sessionId) }
-                .onFailure { Log.w(SERVICE_LOG_TAG, "设备无系统均衡器，UI 将收起入口", it) }
-                .getOrNull()
-            if (created == null) {
-                eq = null; boundSessionId = -1
-                publish(session, unsupported = true)
-                return null
-            }
-            eq = created; boundSessionId = sessionId
-            published = false
-            publish(session, unsupported = false)
-            return created
-        }
-
-        private fun applyLevels(effect: android.media.audiofx.Equalizer, levels: FloatArray) {
-            val range = runCatching { effect.bandLevelRange }.getOrNull() ?: return
-            if (range.size < 2) return
-            val min = range.first().toInt()
-            val max = range.last().toInt()
-            if (max <= min) return
-            val bands = runCatching { effect.numberOfBands.toInt() and 0xFF }.getOrDefault(0)
-            for (i in 0 until bands) {
-                val normalized = levels.getOrElse(i) { 0f }.coerceIn(-1f, 1f)
-                // 归一 -1..1 → 设备真实量程（客户端不知道量程，越界只可能在映射这一步防住）
-                val level = (min + (normalized + 1f) / 2f * (max - min)).roundToInt().coerceIn(min, max)
-                runCatching { effect.setBandLevel(i.toShort(), level.toShort()) }
-            }
-        }
-
-        private fun publish(session: MediaSession, unsupported: Boolean) {
-            val effect = eq
-            val extras = Bundle().apply {
-                if (unsupported || effect == null) {
-                    putBoolean(EQ_EXTRA_UNSUPPORTED, true)
-                } else {
-                    val range = runCatching { effect.bandLevelRange }.getOrNull()
-                    putBoolean(EQ_EXTRA_UNSUPPORTED, false)
-                    putInt(EQ_EXTRA_BANDS, runCatching { effect.numberOfBands.toInt() and 0xFF }.getOrDefault(0))
-                    putInt(EQ_EXTRA_MIN_MB, range?.firstOrNull()?.toInt() ?: 0)
-                    putInt(EQ_EXTRA_MAX_MB, range?.lastOrNull()?.toInt() ?: 0)
-                }
-            }
-            published = true
-            runCatching { session.setSessionExtras(extras) }
         }
     }
 

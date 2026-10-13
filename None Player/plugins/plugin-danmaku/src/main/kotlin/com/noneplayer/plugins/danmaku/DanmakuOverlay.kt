@@ -290,7 +290,11 @@ private class Anchor {
     }
 }
 
-private suspend fun loadFileSource(
+/**
+ * 读某个弹幕来源文件。全程阻塞 I/O、自身不挂起点，所以不是 `suspend`——
+ * 由调用方在 [kotlinx.coroutines.Dispatchers.IO] 上调用（见上面 `withContext(Dispatchers.IO)`）。
+ */
+private fun loadFileSource(
     appContext: android.content.Context,
     media: MediaItem,
     manualUri: String?,

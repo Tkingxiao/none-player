@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -494,8 +493,8 @@ fun NpCoverBox(
 /**
  * `.medcard`：封面 + 两行标题 + 等宽元信息。
  *
- * [metaChips] 走槽位是因为元信息行有三种形态：只有"时长 · 分辨率"、
- * 带"已看 xx%"前缀、或带文件夹 chip——固定参数会把其中两种挤变形。
+ * [meta] 用字符串数组而不是拆成固定参数，是因为元信息行有三种形态：只有"时长 · 分辨率"、
+ * 带"已看 xx%"前缀、或带文件夹 chip（[folderTag]）——固定参数会把其中两种挤变形。
  */
 @Composable
 fun NpMediaCard(

@@ -162,6 +162,13 @@ class Kernel private constructor(
                 runCatching { services.get<HistoryRepository>().prime() }
                     .onFailure { Log.w(TAG, "历史库预热失败（UI 首次收集时会再试）", it) }
             }
+            // 播放偏好预热：渲染器模式在 ExoPlayer 构建期定型，`PlaybackService.onCreate`
+            // 必须同步拿到"硬解优先"值。这里先在 IO 上读一次写进进程内缓存，服务侧就不必
+            // 在主线程上 runBlocking 等首次读盘（那一段正落在"点播放"的关键路径上）。
+            backgroundStartupJobs += scope.launch(Dispatchers.IO) {
+                runCatching { AppSettings.warmHardwareDecodePreferred(context) }
+                    .onFailure { Log.w(TAG, "播放偏好预热失败（服务侧会自行回退读取）", it) }
+            }
             // 启动任务给一个**有界预算**：扫得快就带着内容进首页（常见于热启动/小库），
             // 扫得慢就先让 UI 走、内容随后补齐。超时**不取消**任务——它本来就不在
             // 页面可用的关键路径上，取消等于把媒体列表丢掉。

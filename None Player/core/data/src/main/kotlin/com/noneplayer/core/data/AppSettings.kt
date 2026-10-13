@@ -11,6 +11,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 
@@ -96,30 +97,30 @@ data class LibraryPreferences(
  */
 class AppSettings(private val context: Context) {
 
-    private companion object {
-        val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
-        val KEY_MOTION_LEVEL = intPreferencesKey("motion_level")
-        val KEY_SORT_MODE = stringPreferencesKey("library_sort_mode")
-        val KEY_SORT_ASC = booleanPreferencesKey("library_sort_asc")
-        val KEY_SCAN_FOLDER = stringPreferencesKey("scan_folder_uri")
-        val KEY_SCAN_FOLDERS = stringPreferencesKey("scan_folder_uris")
-        val KEY_GRID_COLUMNS = stringPreferencesKey("library_grid_columns")
-        val KEY_LIST_VIEW_STYLE = stringPreferencesKey("library_view_style")
-        val KEY_PLAYBACK_SPEED = stringPreferencesKey("playback_speed")
-        val KEY_SEARCH_HISTORY = stringPreferencesKey("search_history")
-        val KEY_HARDWARE_DECODE = booleanPreferencesKey("decode_hardware_preferred")
-        val KEY_AUTOPLAY_NEXT = booleanPreferencesKey("autoplay_next")
-        val KEY_BACKGROUND_PLAY = booleanPreferencesKey("background_play")
-        val KEY_KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
-        val KEY_GESTURES_ENABLED = booleanPreferencesKey("playback_gestures")
+    companion object {
+        private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
+        private val KEY_MOTION_LEVEL = intPreferencesKey("motion_level")
+        private val KEY_SORT_MODE = stringPreferencesKey("library_sort_mode")
+        private val KEY_SORT_ASC = booleanPreferencesKey("library_sort_asc")
+        private val KEY_SCAN_FOLDER = stringPreferencesKey("scan_folder_uri")
+        private val KEY_SCAN_FOLDERS = stringPreferencesKey("scan_folder_uris")
+        private val KEY_GRID_COLUMNS = stringPreferencesKey("library_grid_columns")
+        private val KEY_LIST_VIEW_STYLE = stringPreferencesKey("library_view_style")
+        private val KEY_PLAYBACK_SPEED = stringPreferencesKey("playback_speed")
+        private val KEY_SEARCH_HISTORY = stringPreferencesKey("search_history")
+        private val KEY_HARDWARE_DECODE = booleanPreferencesKey("decode_hardware_preferred")
+        private val KEY_AUTOPLAY_NEXT = booleanPreferencesKey("autoplay_next")
+        private val KEY_BACKGROUND_PLAY = booleanPreferencesKey("background_play")
+        private val KEY_KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
+        private val KEY_GESTURES_ENABLED = booleanPreferencesKey("playback_gestures")
 
         // ---- 字幕样式（E131：对齐参考示例的「字幕设置」面板）----
         // 与 `subtitle_<mediaKey>` 那族**per-media** 记忆不同：样式是**全局偏好**
         // （用户挑的字体颜色/大小不该每换一部片就重置），所以不带 mediaKey 后缀。
-        val KEY_SUBTITLE_ENABLED = booleanPreferencesKey("subtitle_enabled")
-        val KEY_SUBTITLE_COLOR = stringPreferencesKey("subtitle_color")
-        val KEY_SUBTITLE_SCALE = stringPreferencesKey("subtitle_scale")
-        val KEY_SUBTITLE_ITALIC = booleanPreferencesKey("subtitle_italic")
+        private val KEY_SUBTITLE_ENABLED = booleanPreferencesKey("subtitle_enabled")
+        private val KEY_SUBTITLE_COLOR = stringPreferencesKey("subtitle_color")
+        private val KEY_SUBTITLE_SCALE = stringPreferencesKey("subtitle_scale")
+        private val KEY_SUBTITLE_ITALIC = booleanPreferencesKey("subtitle_italic")
 
         /**
          * 播放页禁止截屏/录屏（FLAG_SECURE，C18）。
@@ -128,41 +129,35 @@ class AppSettings(private val context: Context) {
          * 用户为隐私打开的开关在一次退页后被静默清掉。隐私类开关的语义是偏好，
          * 不是本次播放的临时状态，故收进设置持久化（生效范围仍是播放页窗口）。
          */
-        val KEY_SCREENSHOT_BLOCKED = booleanPreferencesKey("screenshot_blocked")
+        private val KEY_SCREENSHOT_BLOCKED = booleanPreferencesKey("screenshot_blocked")
 
         /** 双击画面左右侧的快进/快退步长（L14 自定义双击步长，毫秒） */
-        val KEY_DOUBLE_TAP_STEP_MS = longPreferencesKey("double_tap_step_ms")
-
-        /** 均衡器开关与各段归一增益（A2-11） */
-        val KEY_EQ_ENABLED = booleanPreferencesKey("eq_enabled")
-        // 各段归一增益编码成 "0.4,0.2,0,-0.1,-0.3" 字符串——preferences 没有列表键，
-        // 与画面记忆 `display_*` 同一手法（见 [displayKey]）
-        val KEY_EQ_LEVELS = stringPreferencesKey("eq_levels")
+        private val KEY_DOUBLE_TAP_STEP_MS = longPreferencesKey("double_tap_step_ms")
 
         // E73 / A2-8（已落地）：per-media 键按 `sourceId:mediaId` 分命名空间——
         // subtitle_ / display_ / audio_only_ 三族的键值现在都是 `<前缀><sourceId>:<id>`，
         // 与 Room 的 media_key 同一条约定；旧格式由 migratePerMediaKeyNamespaceOnce()
         // 一次性重排（按当前唯一来源 "local" 补前缀），同时清掉归属不明的空后缀孤儿键。
         // 断点族（playback_pos_ / playback_at_）已在 E11 搬进 Room，不在此列。
-        fun subtitleKey(mediaKey: String) = stringPreferencesKey("subtitle_$mediaKey")
+        private fun subtitleKey(mediaKey: String) = stringPreferencesKey("subtitle_$mediaKey")
 
         /** 画面显示记忆（批次 3）："<比例模式>|<镜像0/1>|<旋转0/180>"，整体读写 */
-        fun displayKey(mediaKey: String) = stringPreferencesKey("display_$mediaKey")
+        private fun displayKey(mediaKey: String) = stringPreferencesKey("display_$mediaKey")
 
         /** 仅听音频记忆（§5.1）：下次进同一文件直接进入音频形态 */
-        fun audioOnlyKey(mediaKey: String) = booleanPreferencesKey("audio_only_$mediaKey")
+        private fun audioOnlyKey(mediaKey: String) = booleanPreferencesKey("audio_only_$mediaKey")
 
         /** 手动选择的弹幕文件（批次 6）：按视频 uri 记忆，渲染层优先于同名自动匹配 */
-        fun danmakuManualKey(videoUri: String) = stringPreferencesKey("danmaku_manual_$videoUri")
+        private fun danmakuManualKey(videoUri: String) = stringPreferencesKey("danmaku_manual_$videoUri")
 
         /** 弹幕本地屏蔽词（批次 6）：换行分隔的原始串 */
-        val KEY_DANMAKU_BLOCKLIST = stringPreferencesKey("danmaku_blocklist")
+        private val KEY_DANMAKU_BLOCKLIST = stringPreferencesKey("danmaku_blocklist")
 
         /** §8.3：历史迁移完成标记（E11：迁移后 DataStore 只留设置项） */
-        val KEY_HISTORY_MIGRATED = booleanPreferencesKey("history_migrated")
+        private val KEY_HISTORY_MIGRATED = booleanPreferencesKey("history_migrated")
 
         /** A2-8：per-media 键已按 `sourceId:mediaId` 重排的一次性标记 */
-        val KEY_PER_MEDIA_KEY_MIGRATED = booleanPreferencesKey("per_media_key_migrated")
+        private val KEY_PER_MEDIA_KEY_MIGRATED = booleanPreferencesKey("per_media_key_migrated")
 
         /** 旧键重排时补的命名空间前缀（唯一真相见文件级 [LOCAL_MEDIA_SOURCE_ID]） */
         private const val LEGACY_SOURCE_ID = LOCAL_MEDIA_SOURCE_ID
@@ -175,10 +170,31 @@ class AppSettings(private val context: Context) {
          * Room 侧从第一天就是 `media_key = "<sourceId>:<mediaId>"`（E73 口径），
          * DataStore 侧补齐后两处的约定才是一句话。
          */
-        val PER_MEDIA_PREFIXES = listOf("subtitle_", "display_", "audio_only_")
+        private val PER_MEDIA_PREFIXES = listOf("subtitle_", "display_", "audio_only_")
 
         /** 最近搜索最多保留 5 条（设计稿 searchView 的 chips 一行放得下） */
-        const val MAX_SEARCH_HISTORY = 5
+        private const val MAX_SEARCH_HISTORY = 5
+
+        /**
+         * 进程内"硬件解码优先"的最近一次取值。
+         *
+         * 为什么需要它：渲染器模式在 **ExoPlayer 构建期**定型（[hardwareDecodePreferred]
+         * 是工厂属性，MediaController 运行期改不了），所以 `PlaybackService.onCreate`
+         * 必须在建播放器**之前**同步拿到这个值——而 DataStore 只能异步读。此前那里用
+         * `runBlocking` 在主线程上等首次读盘（上限 1.5s），而服务创建正好落在"点播放"
+         * 的关键路径上：设置层慢一次，用户就多转一次圈。
+         * 启动时在 IO 上预热一次写进这里，服务即可同步取用；没预热到才回退等待。
+         */
+        @Volatile
+        private var hardwareDecodePreferredCache: Boolean? = null
+
+        /** 同步读缓存；未预热到（或读失败）时为 null，调用方自行回退。 */
+        fun cachedHardwareDecodePreferred(): Boolean? = hardwareDecodePreferredCache
+
+        /** 启动预热：读一次写进缓存。失败静默——缓存为空时调用方仍走原回退路径。 */
+        suspend fun warmHardwareDecodePreferred(context: Context) {
+            hardwareDecodePreferredCache = AppSettings(context).hardwareDecodePreferred.first()
+        }
     }
 
     // ---- 外观 ----
@@ -303,6 +319,8 @@ class AppSettings(private val context: Context) {
 
     suspend fun setHardwareDecodePreferred(enabled: Boolean) {
         context.dataStore.edit { it[KEY_HARDWARE_DECODE] = enabled }
+        // 同步刷新进程内缓存：下一次播放会话（服务侧建播放器）要同步取这个值
+        hardwareDecodePreferredCache = enabled
     }
 
     /** 自动连播下一集：当前条目结束后自动播放队列中的下一条 */
@@ -338,31 +356,6 @@ class AppSettings(private val context: Context) {
 
     suspend fun setDoubleTapStepMs(stepMs: Long) {
         context.dataStore.edit { it[KEY_DOUBLE_TAP_STEP_MS] = stepMs.coerceIn(1_000L, 60_000L) }
-    }
-
-    // ---- 均衡器（A2-11）----
-    //
-    // 存的是**归一增益**（-1f..1f / 段），不是 mB 绝对值：真实量程各机型不同，
-    // 由引擎侧映射（见 `VideoPlayer.setEqualizerLevels`）。段数变化（换设备）时
-    // 多出来的段按 0f 平、少掉的段忽略，不做迁移。
-
-    val eqEnabled: Flow<Boolean> = context.dataStore.data
-        .map { it[KEY_EQ_ENABLED] ?: false }
-
-    suspend fun setEqEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[KEY_EQ_ENABLED] = enabled }
-    }
-
-    val eqLevels: Flow<List<Float>> = context.dataStore.data
-        .map { raw ->
-            raw[KEY_EQ_LEVELS]
-                ?.split(',')
-                ?.mapNotNull { it.toFloatOrNull() }
-                ?: emptyList()
-        }
-
-    suspend fun setEqLevels(levels: List<Float>) {
-        context.dataStore.edit { it[KEY_EQ_LEVELS] = levels.joinToString(",") }
     }
 
     /** 播放页禁止截屏/录屏（默认关 = 允许，与 C18 现状一致） */

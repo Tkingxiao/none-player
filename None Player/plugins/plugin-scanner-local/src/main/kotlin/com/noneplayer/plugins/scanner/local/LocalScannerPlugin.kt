@@ -3,7 +3,6 @@ package com.noneplayer.plugins.scanner.local
 import android.content.Context
 import com.noneplayer.core.common.DispatcherProvider
 import com.noneplayer.core.data.AppSettings
-import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.kernel.api.CacheProvider
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry

@@ -6,6 +6,15 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
@@ -121,6 +130,8 @@ fun KernelNavHost(
     val navExitMs = if (reduceMotion) npDuration(Motion.ReduceFade) else npDuration(Motion.NavExit)
     val navSlideAllowed = npDisplacementAllowed()
 
+    var hostBounds by remember { mutableStateOf(Rect.Zero) }
+    Box(modifier = modifier.fillMaxSize().onGloballyPositioned { hostBounds = it.boundsInWindow() }) {
     NavHost(
         navController = navController,
         startDestination = SHELL_ROUTE,
@@ -128,7 +139,7 @@ fun KernelNavHost(
         // Tab 页由 KernelTabScaffold 自己画底，但**外层路由**（搜索页、播放页、
         // 关于/插件页）不经过 Shell——不在这里铺底，它们会露出窗口默认背景
         // （浅色系统主题下的白色），暗色主题下就是"顶栏黑、内容白"的断头效果。
-        modifier = modifier.background(MaterialTheme.colorScheme.background),
+        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
         // iOS push 式转场：新页自右轻滑入场，返回时反向滑出；进出伴随淡入淡出。
         // 时长走 §7.2 的 Nav* 令牌（Q20：裸 tween 例外清零），档位换算在组合期完成——
         // 下面的 lambda 跑在 EnterTransitionScope 里，读不到组合上下文。
@@ -137,8 +148,12 @@ fun KernelNavHost(
                 slideInHorizontally(tween(navEnterMs, easing = NpEasing.Silk)) { if (navSlideAllowed) it / 4 else 0 }
         },
         exitTransition = { fadeOut(tween(navExitMs, easing = NpEasing.SilkExit)) },
-        popEnterTransition = { fadeIn(tween(navFadeMs, easing = NpEasing.Silk)) },
+        popEnterTransition = {
+            if (NpPlayerPaneMotion.flight != null) EnterTransition.None
+            else fadeIn(tween(navFadeMs, easing = NpEasing.Silk))
+        },
         popExitTransition = {
+            if (NpPlayerPaneMotion.flight != null) return@NavHost ExitTransition.None
             // 返回时旧页往**左**退出（`-it/4`）：与 push 的入场方向成对，
             // 写成 `it / 4` 会让"返回"读成"又推进了一页"。
             // E119：滑出时长原本错用了 navEnterMs(280)——alpha 在 navExitMs(180) 就归零了，
@@ -149,6 +164,8 @@ fun KernelNavHost(
         },
         builder = graphBuilder,
     )
+    PlayerPaneMotionOverlay(hostBounds)
+    }
 }
 
 /**
@@ -163,6 +180,9 @@ class NavControllerNavigator(private val navController: NavHostController) : Nav
     }
 
     override fun popBackStack() {
-        navController.popBackStack()
+        if (!navController.popBackStack()) {
+            // A cold external deep link may have no shell underneath its destination.
+            navController.navigate(SHELL_ROUTE) { launchSingleTop = true }
+        }
     }
 }

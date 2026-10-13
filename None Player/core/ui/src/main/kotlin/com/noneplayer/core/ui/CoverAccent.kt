@@ -9,9 +9,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.produceState
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
-import androidx.core.graphics.ColorUtils
 import androidx.core.graphics.scale
 import androidx.core.net.toUri
 import kotlinx.coroutines.Dispatchers

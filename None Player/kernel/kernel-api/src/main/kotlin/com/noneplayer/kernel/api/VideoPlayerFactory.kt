@@ -19,4 +19,18 @@ class VideoPlayerFactory(private val registry: ExtensionRegistry) {
             ?: error("没有播放引擎支持格式 $mimeType（请确认已启用相应的播放内核插件）")
         return engine.create(context)
     }
+
+    /**
+     * 目标 mimeType 会落到哪个引擎（[PlayerEngineProvider.engineId]）；无引擎支持时返回 null。
+     *
+     * 调用方据此判断"换一个媒体还需不需要重建引擎"：同一引擎能接的两种 mimeType
+     * （如 `video/mp4` 与 `video/x-matroska` 都归 exo）之间切换时复用既有实例即可——
+     * 按 mimeType **字符串**比较会把每次换集都判成"换代"，重建 MediaController 要重连
+     * 会话，用户看到的是切集卡在转圈。引擎内部本就按条目各自的 mimeType 选解封装器。
+     */
+    fun engineIdFor(mimeType: String): String? =
+        registry.query<PlayerEngineProvider>()
+            .filter { it.supports(mimeType) }
+            .maxByOrNull { it.priority }
+            ?.engineId
 }

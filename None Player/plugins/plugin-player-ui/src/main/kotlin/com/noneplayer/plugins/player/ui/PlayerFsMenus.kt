@@ -22,7 +22,6 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -69,7 +68,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import com.noneplayer.core.data.SUBTITLE_COLOR_OPTIONS
 import com.noneplayer.core.data.SUBTITLE_DELAY_STEPS_MS
+import com.noneplayer.core.data.SUBTITLE_SCALE_MAX
+import com.noneplayer.core.data.SUBTITLE_SCALE_MIN
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
@@ -88,7 +90,6 @@ import com.noneplayer.core.ui.npTouchTarget
 import com.noneplayer.kernel.api.NpChapter
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.NpTrack
-import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.ui.api.PlaybackMenuContributor
 import kotlin.math.roundToInt
@@ -783,13 +784,19 @@ fun FsSpeedMenuContent(
 
 /** 字幕页：开关/内嵌轨/外挂挂载/偏移 */
 @Composable
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 fun FsSubtitleMenuContent(
     subtitleOn: Boolean,
     subtitleLoaded: Boolean,
     savedSubtitleName: String?,
     textTracks: List<NpTrack>,
     offsetMs: Long,
+    colorArgb: Long,
+    onColor: (Long) -> Unit,
+    scale: Float,
+    onScale: (Float) -> Unit,
+    italic: Boolean,
+    onItalic: (Boolean) -> Unit,
     onSetEnabled: (Boolean) -> Unit,
     onPickTrack: (NpTrack) -> Unit,
     onMountExternal: () -> Unit,
@@ -802,9 +809,78 @@ fun FsSubtitleMenuContent(
     // （settings.subtitleEnabled，外挂/内嵌/PGS 一律受它门控）与引擎侧卸载/复原——
     // 与竖屏「字幕设置」面板的开关同一语义、同一写路径。
     FsMenuSwitchRow(
-        label = "显示字幕",
+        label = "开启字幕",
         checked = subtitleOn,
         onCheckedChange = onSetEnabled,
+    )
+    FsMenuTitle("字幕颜色")
+    Row(
+        modifier = Modifier.padding(horizontal = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        SUBTITLE_COLOR_OPTIONS.forEach { argb ->
+            val selected = argb == colorArgb
+            Box(
+                modifier = Modifier
+                    .size(NpDimens.touchTarget)
+                    .clip(CircleShape)
+                    .clickable { onColor(argb) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(22.dp)
+                        .clip(CircleShape)
+                        .background(Color(argb.toInt()))
+                        .then(
+                            if (selected) Modifier.border(2.dp, Color.White, CircleShape) else Modifier,
+                        ),
+                )
+            }
+        }
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "文字字幕大小",
+            style = NpTypography.bodyMedium,
+            color = Color.White,
+        )
+        Slider(
+            value = scale,
+            onValueChange = onScale,
+            valueRange = SUBTITLE_SCALE_MIN..SUBTITLE_SCALE_MAX,
+            thumb = {
+                Box(
+                    Modifier.size(12.dp).clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+            },
+            track = { sliderState ->
+                SliderDefaults.Track(
+                    sliderState = sliderState,
+                    drawStopIndicator = null,
+                    thumbTrackGapSize = 0.dp,
+                )
+            },
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+        )
+        Text(
+            text = "%.1f".format(scale),
+            style = NpMonoSmall,
+            color = Color.White.copy(alpha = 0.7f),
+        )
+    }
+    FsMenuSwitchRow(
+        label = "文字字幕用斜体",
+        checked = italic,
+        onCheckedChange = onItalic,
     )
     FsMenuRow(
         label = "挂载外挂字幕…",
