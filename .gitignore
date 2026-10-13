@@ -47,3 +47,14 @@ captures/
 /docs/screenshots
 install.bat
 /None Player/code error
+bug list.txt
+
+# ---- 本地文档产物与密钥目录（公开仓前的兜底排除）----
+# `/*.log` 只挡仓库根，实机日志常落在 docs/ 下；截图取证目录整目录排除。
+/docs/*.log
+/docs/**/*.png
+/docs/**/*.mp4
+# keystore 目录整体排除：除 *.jks/*.keystore 外也可能落入 .pem/.p12/口令文件
+/sign-key/
+*.pem
+*.p12
