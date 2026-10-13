@@ -3862,38 +3862,63 @@ private fun ResumePositionNotice(
  *
  * 形态（2026-10-12 用户裁定两条）：**横跨屏幕的完整横条、单行紧凑**——
  * 不做圆角浮动小窗；进度条与按钮共线一行，比原两行版省近一半高度。
- * 放不下时由 [playerBarSplitsProgress] 把进度拆到单独一行，按钮行横滑。
+ *
+ * 排不下时按 [playerBarLayout] 的三档退让（2026-10-13 用户裁定）：先省掉总时长换回
+ * 单行，两档都塞不下才把进度拆成单独一行。此前只有"塞不下就拆两行"一档，
+ * 360dp 手机上预算 356dp 对 328dp 的可用宽，竖屏 215dp 高的画面被白白再吃掉一行。
  */
 
+/** 底部控制条的排版档位，见 [playerBarLayout]。 */
+internal enum class PlayerBarLayout {
+    /** 单行：进度条夹在「已播」与「总时长」之间，选项钮排在右侧。 */
+    SingleRow,
+
+    /**
+     * 单行、省掉总时长。
+     *
+     * 总时长在本页下方的信息区已有，而在窄窗里它值 42dp、换来的是整行画面不被盖住。
+     */
+    SingleRowWithoutDuration,
+
+    /** 真的放不下（或系统字号 > 1.3）：进度单独一行，按钮行横滑。 */
+    Split,
+}
+
 /**
- * 控制条是否把进度拆到单独一行。
+ * 控制条怎么排：先试完整单行，再试省掉总时长的单行，都不行才拆两行。
  *
- * 宽窗口维持单行。字号超过 1.3，或单行里的传输键、时间码、图标和最短进度条
- * 已经超过栏宽时，拆开。`preferSingleRow` 只跳过「宽度小于 560dp 就拆」这一条，
- * 挡不住大字号和真实放不下的情况。
+ * 宽度预算按固定档位估：触控键 44/颗、传输排 132、时间码 42×字号缩放、
+ * 左右内边距与间距 40、进度条最短可拖长度 64。
+ *
+ * `preferSingleRow` 只跳过「宽度小于 560dp 就拆」这一条，挡不住大字号和真实放不下的情况。
  */
-internal fun playerBarSplitsProgress(
+internal fun playerBarLayout(
     maxWidthDp: Float,
     fontScale: Float,
     preferSingleRow: Boolean,
     showTransport: Boolean,
     hasLeading: Boolean,
     iconButtonCount: Int,
-): Boolean {
-    if (!maxWidthDp.isFinite() || maxWidthDp <= 0f) return false
+): PlayerBarLayout {
+    if (!maxWidthDp.isFinite() || maxWidthDp <= 0f) return PlayerBarLayout.SingleRow
     val scale = if (fontScale.isFinite() && fontScale > 0f) fontScale else 1f
-    if (scale > 1.3f) return true
-    if (!preferSingleRow && maxWidthDp < 560f) return true
+    if (scale > 1.3f) return PlayerBarLayout.Split
+    if (!preferSingleRow && maxWidthDp < 560f) return PlayerBarLayout.Split
     val leading = when {
         showTransport -> 44f * 3f
         hasLeading -> 36f
         else -> 0f
     }
-    val times = 42f * scale * 2f
     val icons = 44f * iconButtonCount.coerceAtLeast(0)
     val chrome = 32f + 8f
     val minSeek = 64f
-    return leading + times + icons + chrome + minSeek > maxWidthDp
+    val oneTime = 42f * scale
+    val body = leading + icons + chrome + minSeek
+    return when {
+        body + oneTime * 2f <= maxWidthDp -> PlayerBarLayout.SingleRow
+        body + oneTime <= maxWidthDp -> PlayerBarLayout.SingleRowWithoutDuration
+        else -> PlayerBarLayout.Split
+    }
 }
 
 @Composable
@@ -4026,7 +4051,7 @@ internal fun PlayerBottomControls(
                     .padding(bottom = NpSpace.xs),
             ) {
                 val controlScroll = rememberScrollState()
-                val compact = playerBarSplitsProgress(
+                val barLayout = playerBarLayout(
                     maxWidthDp = maxWidth.value,
                     fontScale = LocalDensity.current.fontScale,
                     preferSingleRow = preferSingleRow,
@@ -4036,8 +4061,14 @@ internal fun PlayerBottomControls(
                         (if (onToggleAudioOnly != null) 1 else 0) +
                         (if (trailingActions != null) 1 else 0),
                 )
+                val split = barLayout == PlayerBarLayout.Split
+                val showDuration = barLayout == PlayerBarLayout.SingleRow
+                // 单行时行高已由 44dp 的图标撑起来，进度条的触控带跟着吃满同样的高度是
+                // 白得的命中面积（轨道本身仍按 trackHeight 居中画，视觉不变）；
+                // 拆成两行时才用形态各自给的窄带（竖屏 18dp），否则黑条又要垫高一行。
+                val inlineSeekBand = seekTouchBand.coerceAtLeast(NpDimens.touchTarget)
                 Column {
-                    if (compact) {
+                    if (split) {
                         NpSeekBar(
                             durationMs = durationMs,
                             displayPositionMs = displayPosition.value,
@@ -4053,7 +4084,7 @@ internal fun PlayerBottomControls(
                     }
             Row(
                 modifier = Modifier.fillMaxWidth().then(
-                    if (compact) Modifier.horizontalScroll(controlScroll) else Modifier,
+                    if (split) Modifier.horizontalScroll(controlScroll) else Modifier,
                 ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -4092,7 +4123,7 @@ internal fun PlayerBottomControls(
                         Modifier
                     },
                 )
-                if (!compact) NpSeekBar(
+                if (!split) NpSeekBar(
                     durationMs = durationMs,
                     displayPositionMs = displayPosition.value,
                     bufferedPositionMs = bufferedPositionMs,
@@ -4102,20 +4133,22 @@ internal fun PlayerBottomControls(
                     onScrubEnd = onScrubEnd,
                     // E129（审查 #3）：取消与提交是两个出口——被系统边缘返回打断的拖动不 seek
                     onScrubCancel = onScrubCancel,
-                    touchBand = seekTouchBand,
+                    touchBand = inlineSeekBand,
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 8.dp)
                         .anchorReporter(onSeekBarAnchor),
                 )
-                Text(
-                    text = formatTimestamp(durationMs),
-                    style = NpMono,
-                    color = idleColor,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                if (showDuration) {
+                    Text(
+                        text = formatTimestamp(durationMs),
+                        style = NpMono,
+                        color = idleColor,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 BarCtlButton(
                     icon = NpIcon.Subtitle,
                     contentDescription = "字幕",

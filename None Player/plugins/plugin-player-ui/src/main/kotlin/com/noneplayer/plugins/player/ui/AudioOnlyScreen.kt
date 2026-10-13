@@ -308,12 +308,18 @@ fun AudioOnlyScreen(
             }
         }
 
-        // 工具 chips（设计稿 .audio-tools：2 列网格、max 420、chip 居中）
+        // 工具区（原设计稿 .audio-tools 是 2 列网格）。2026-10-13 用户裁定改成自适应单行：
+        // 纯音频时「切回视频」为 null，2×2 网格因此留下一格空位，三枚挤在四格里
+        // 读起来像漏了一块；有几枚排几枚才不留洞。
         // [fillChips]：横窗给 true——设计稿 `.tool-chip{width:100%;justify-content:center}`
-        // 是"胶囊铺满格、内容居中"。竖窗沿用既成的"胶囊按内容收、格内居中"，不动它。
+        // 是"胶囊铺满格、内容居中"。
         @Composable
         @OptIn(ExperimentalFoundationApi::class)
-        fun ToolChips(modifier: Modifier = Modifier, fillChips: Boolean = false) {
+        fun ToolChips(
+            modifier: Modifier = Modifier,
+            fillChips: Boolean = false,
+            startAligned: Boolean = false,
+        ) {
             val speedMenu = remember { BringIntoViewRequester() }
             val speedMenuDuration = npDuration(Motion.Field)
             LaunchedEffect(speedPickerVisible) {
@@ -325,6 +331,7 @@ fun AudioOnlyScreen(
             Column(
                 modifier = modifier,
                 verticalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalAlignment = if (startAligned) Alignment.Start else Alignment.CenterHorizontally,
             ) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -346,14 +353,7 @@ fun AudioOnlyScreen(
                             fill = fillChips,
                             modifier = Modifier.weight(1f),
                         )
-                    } else {
-                        Spacer(modifier = Modifier.weight(1f))
                     }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
                     ToolChip(
                         icon = NpIcon.Speed,
                         label = "倍速 $speedText",
@@ -362,16 +362,15 @@ fun AudioOnlyScreen(
                         fill = fillChips,
                         modifier = Modifier.weight(1f),
                     )
-                    // 设计稿此格是「睡眠定时」——该能力尚未落地，不做假动作：
-                    // 换成真实的后台播放状态指示（同一格的诚实替代）。
-                    ToolChip(
-                        icon = NpIcon.Headphones,
-                        label = "后台播放中",
-                        onClick = {},
-                        fill = fillChips,
-                        modifier = Modifier.weight(1f),
-                    )
                 }
+                // 「后台播放中」原先也占一枚 chip 位，但 `onClick = {}`——看着能点、点了没反应。
+                // 它是状态说明而不是动作，降成一行弱化文字，胶囊排布也不再为它留格。
+                // 设计稿这一格本是「睡眠定时」，该能力尚未落地，不做假动作。
+                Text(
+                    text = "后台播放中",
+                    style = com.noneplayer.core.ui.NpMonoSmall,
+                    color = ink.muted,
+                )
                 // 倍速选择条：与播放页同一交互（点钮 → 钮下列表），不走底部弹层
                 // M21：锚在钮上的紧凑菜单走 `Field`；默认的 fadeIn()/fadeOut() 是 150ms
                 // LinearOutSlowIn，和其余钮上菜单不同曲线，同屏会读出两种"出现"的节奏。
@@ -468,12 +467,12 @@ fun AudioOnlyScreen(
                                 arrangement = Arrangement.SpaceEvenly,
                                 modifier = Modifier.fillMaxWidth(),
                             )
-                            // chips 仍是设计稿的 2 列网格（max 420），不摊成一行四枚。
-                            // 只给上限不给 fillMaxWidth：后者会把 420 的内容摆在 560 槽的
-                            // 正中，与左对齐的标题/控制排错开一条起读线。
+                            // chips 走自适应单行（不再有 2×2 的空格）；右栏左对齐，
+                            // 与上方左对齐的标题/控制排同一条起读线。
                             ToolChips(
                                 modifier = Modifier.widthIn(max = 420.dp),
                                 fillChips = true,
+                                startAligned = true,
                             )
                         }
                     }

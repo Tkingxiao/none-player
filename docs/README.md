@@ -9,6 +9,7 @@
 | `审查文档.md` | 历史验收证据、测量纪律；数字不可当本轮复验 |
 | `设计文档.md` | 视觉/组件/动效规格，最新用户需求优先于旧规格 |
 | `decoding/extension-decoder-decision.md` | 实际解码链及依赖合规待核 |
+| `decoding/wmv2-xvid-qpel-prompt.md` | WMV2 与 Xvid-Qpel 播放修复提示词 |
 | `buglist-device-test.ps1` | 默认模拟器抓图/点按；显式`-AllowPhysicalDevice`允许已授权真机，不清除数据 |
 | `audit-device-matrix.ps1` | 窗口尺寸模拟，恢复设置，不等于真实铰链 |
 | `playback-regression.ps1` | 后台无自动PiP、缺失文件→正常文件恢复、退播放页回桌面回归 |
