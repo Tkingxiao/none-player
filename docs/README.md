@@ -20,7 +20,7 @@
 
 ```powershell
 .\docs\player-menu-regression.ps1 -Device emulator-5556
-.\docs\player-menu-regression.ps1 -Device 60dd2f94 -AllowPhysicalDevice -MediaUri "file:///sdcard/Movies/NonePlayerAuditB3/audit-long.mp4"
+.\docs\player-menu-regression.ps1 -Device <真机序列号> -AllowPhysicalDevice -MediaUri "file:///sdcard/Movies/NonePlayerAuditB3/audit-long.mp4"
 ```
 
 从仓库根目录运行，先安装本批构建并准备合成测试素材。脚本会启动测试视频并临时修改会话字幕延时，测试末尾暂停目标视频，不清除数据或修改系统显示设置；后台断言要求后台播放开关已开启。不要用私人视频替代专用素材。
