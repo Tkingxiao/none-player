@@ -123,6 +123,18 @@ data class PlaybackFailure(
 /** mime / 扩展名 → 可读编码与容器名（E41 三行文案的词汇表） */
 object MediaNames {
 
+    /**
+     * WMV2 专用 mime。不要复用 [VIDEO] `video/x-ms-wmv`（显示名是 VC-1）或 `video/x-ms-vc1`。
+     * 只有补出来的 WMV2 轨、软解渲染器和这里的显示名认它。
+     */
+    const val MIME_WMV2 = "video/x-np-wmv2"
+
+    /**
+     * 设备明确没有 MPEG-4 ASP、且软解可用时，才把 Qpel 流改成这个 mime。
+     * Simple Profile 和设备已声明 ASP 的流保持 `video/mp4v-es`。
+     */
+    const val MIME_MPEG4_ASP = "video/x-np-mpeg4-asp"
+
     /** 从地址扩展名映射容器名；未知时返回大写的扩展名 */
     fun containerName(uriString: String): String? {
         val path = uriString.substringBefore('?').substringBefore('#')
@@ -156,6 +168,8 @@ object MediaNames {
         "video/mp43" to "MS MPEG-4 v3",
         "video/x-ms-wmv" to "WMV (VC-1)",
         "video/x-ms-vc1" to "VC-1",
+        MIME_WMV2 to "WMV2",
+        MIME_MPEG4_ASP to "MPEG-4 ASP (Qpel)",
         "video/av01" to "AV1",
         "video/x-vnd.on2.vp9" to "VP9",
         "video/x-vnd.on2.vp8" to "VP8",

@@ -22,6 +22,7 @@ import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.LOCAL_MEDIA_SOURCE_ID
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.core.media.AviDuration
 import com.noneplayer.core.media.CueSheet
 import com.noneplayer.core.media.kind
 import com.noneplayer.core.media.MediaItem
@@ -283,6 +284,7 @@ class LocalMediaSource(
         // 封面并发补齐放在**发布之前**：UI 侧拿到的列表永远是"封面已就绪"的那一份，
         // 不需要两段式刷新，也不会因为某一项封面慢而整页停在占位图。
         val items = attachCovers((storeItems + unknownItems + hiddenItems).distinctBy { it.id })
+            .map { it.withAviDuration() }
         // [诊断] 发布前自检：同 id 重复会以 Lazy 重复 key 直接打崩 UI（实报闪退），
         // 这里留一行日志把缺陷暴露在数据层，而不是让它到界面上炸（正常应为零输出）
         run {
@@ -343,6 +345,21 @@ class LocalMediaSource(
      * 查询），这里再挡一道是防御异常 OEM 实现把半成品塞进游标——下载器创建的
      * `xxx.mp4.part` 一旦被索引，库里就会出现"点开打不开"的条目。
      */
+    /**
+     * MediaStore 经常给 AVI 填 0 时长。只在缺时长、且看起来是 AVI 时读文件头。
+     */
+    private fun MediaItem.withAviDuration(): MediaItem {
+        if (durationMs > 0L) return this
+        val avi = title.endsWith(".avi", ignoreCase = true) ||
+            mimeType.contains("avi", ignoreCase = true) ||
+            mimeType.equals("video/x-msvideo", ignoreCase = true)
+        if (!avi) return this
+        val ms = runCatching {
+            context.contentResolver.openInputStream(uri.toUri())?.use { AviDuration.read(it) }
+        }.getOrNull() ?: 0L
+        return if (ms > 0L) copy(durationMs = ms) else this
+    }
+
     private fun isJunkFile(name: String, sizeBytes: Long): Boolean {
         if (sizeBytes <= 0L) return true
         if (name.startsWith('.')) return true
@@ -377,7 +394,7 @@ class LocalMediaSource(
                 Log.e(TAG, "[诊断] 快照恢复列表出现重复 id：${dupKeys.take(5)}（共 ${dupKeys.size} 个）")
             }
         }
-        _media.value = items
+        _media.value = items.map { it.withAviDuration() }
         hasSnapshot = true
         Log.i(TAG, "扫描索引快照已恢复：${items.size} 项（冷启动首帧不再等全量扫描）")
     }

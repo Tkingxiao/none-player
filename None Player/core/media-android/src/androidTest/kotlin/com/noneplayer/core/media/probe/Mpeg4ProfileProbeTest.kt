@@ -29,8 +29,9 @@ import org.junit.runner.RunWith
 
 /**
  * §12.9.4 验证：`Mpeg4ProfileParser` 能从真实码流头部判出 ASP vs Simple，
- * 从而让起播前探测把 `xvid-qpel.avi` 判为 **Unplayable（档次不支持）**，
- * 而 `xvid-clip.avi`（Simple Profile 基线）仍判为 **Playable**。
+ * `xvid-clip.avi`（Simple Profile）保持 `video/mp4v-es` 并可播。
+ * `xvid-qpel.avi` 在设备明确没有 ASP 且软解可用时改为专用 mime，探测为可播；
+ * 解析器本身对 qpel 仍必须是 Advanced Simple，对 clip 仍不得是 ASP。
  *
  * 这正是 §12.9.2.1 QPel 探测暴露的"错误承诺"的修复证据：从"试出来崩在第一帧"
  * 变成"查出来起播前拒"。
@@ -96,20 +97,22 @@ class Mpeg4ProfileProbeTest {
         line("PROBE", "asset=$ASSET_CLIP result=${describe(clipResult)}")
         flushReport("probe")
 
-        // qpel：起播前就判为 Unplayable，且原因点名档次
         assertTrue(
-            "xvid-qpel.avi 应被 FormatProbe 判为 Unplayable，实际 ${describe(qpelResult)}",
-            qpelResult is FormatProbe.Result.Unplayable,
+            "xvid-qpel.avi 在软解可用或设备声明 ASP 时应可播，实际 ${describe(qpelResult)}",
+            qpelResult is FormatProbe.Result.Playable,
         )
-        val reason = (qpelResult as FormatProbe.Result.Unplayable).failure.reason
+        val qpelCodec = (qpelResult as FormatProbe.Result.Playable).videoCodec
         assertTrue(
-            "失败原因应点名档次/Advanced Simple，实际：$reason",
-            reason.contains("档次") || reason.contains("Advanced Simple"),
+            "qpel 要么走专用软解 mime，要么设备自己声明了 ASP 仍用 mp4v，实际：$qpelCodec",
+            qpelCodec == "MPEG-4 ASP (Qpel)" || qpelCodec == "MPEG-4 Visual (Xvid/DivX)",
         )
-        // clip：Simple Profile 基线应放行（Playable 或 Unknown 都算未拦截，但期望 Playable）
         assertTrue(
-            "xvid-clip.avi 不应被档次拦截，实际 ${describe(clipResult)}",
-            clipResult !is FormatProbe.Result.Unplayable,
+            "xvid-clip.avi 不应被改写或拦截，实际 ${describe(clipResult)}",
+            clipResult is FormatProbe.Result.Playable,
+        )
+        assertEquals(
+            "MPEG-4 Visual (Xvid/DivX)",
+            (clipResult as FormatProbe.Result.Playable).videoCodec,
         )
     }
 

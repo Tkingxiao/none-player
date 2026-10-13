@@ -440,6 +440,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // R+ 走 MediaStore.createDeleteRequest：系统弹出自己的确认框，用户确认才删——
     // 破坏性动作的最后一道门在系统手里，应用侧没有"悄悄删"的路径。
     // 结果无论成败都做一次重扫（增量对比，没变则零写盘）。
+    var pendingDelete by remember { mutableStateOf<MediaItem?>(null) }
     val deleteLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.StartIntentSenderForResult(),
     ) { result ->
@@ -990,10 +991,22 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                 } else {
                     null
                 },
-                // 「删除」= 删除设备上的文件（用户裁定）：R+ 由系统确认框把关，删完自动重扫
+                // 「删除」先走自己的确认框，再交给系统授权（Android 11+ 删别人的文件躲不开）。
                 onDelete = {
                     contextMenu = null
-                    requestDelete(menuItem)
+                    pendingDelete = menuItem
+                },
+            )
+        }
+
+        pendingDelete?.let { item ->
+            DeleteConfirmDialog(
+                item = item,
+                onDismiss = { pendingDelete = null },
+                onConfirm = {
+                    pendingDelete = null
+                    haptics.performHaptic(NpHaptic.Warning)
+                    requestDelete(item)
                 },
             )
         }

@@ -26,7 +26,7 @@ import androidx.media3.session.SessionResult
 import com.noneplayer.core.data.AppSettings
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import com.homesoft.exo.extractor.AviExtractorsFactory
+import com.noneplayer.core.media.extract.NpExtractorsFactory
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
@@ -136,13 +136,13 @@ class PlaybackService : MediaSessionService() {
             )
             .setEnableDecoderFallback(true)
             .setEnableAudioOutputPlaybackParameters(true)
-        // AVI 交给 Media3Avi 的增强解封装器（OpenDML/AVIX + indx/ix 索引、MP42/MP43、MJPEG、
-        // 更多 H.264 fourCC），其余容器仍是 media3 默认链。必须与 FormatProbe 的探测链同源
+        // AVI 交给 NpExtractorsFactory：非 WMV2 仍是 Media3Avi，WMV2 补轨，确需软解的
+        // MPEG-4 ASP 改专用 mime。必须与 FormatProbe 的探测链同源
         // （见 FormatProbe.AVI_EXTRACTORS 注释）：不同源会让"探测结论"与"实际能否出画"分叉。
         // 同理，FormatProbe 的"有没有解码器"也必须把上面这条链算全：FFmpeg 软解
         // （FormatProbe.ffmpegSupports）与末端的 MJPEG 位图软解（FormatProbe.bitmapRendererSupports），
         // 否则会把"能软解"的文件误判为不可播。
-        val mediaSourceFactory = DefaultMediaSourceFactory(this, AviExtractorsFactory())
+        val mediaSourceFactory = DefaultMediaSourceFactory(this, NpExtractorsFactory())
         val loadControl = buildLoadControl()
         // L1/L2（§11.2）：预载管理器与播放器必须出自**同一个 builder**——
         // `buildExoPlayer` 会把同一个 MediaSource.Factory / RenderersFactory / LoadControl

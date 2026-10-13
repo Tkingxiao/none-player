@@ -1,0 +1,13 @@
+{
+  global:
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCreate;
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativeSend;
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativePending;
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativePeek;
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCopy;
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativeRender;
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativeFlush;
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativeRelease;
+  local:
+    *;
+};

@@ -6,14 +6,20 @@ import androidx.core.net.toUri
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -27,12 +33,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
@@ -281,6 +289,125 @@ private fun ContextMenuRow(
             )
         },
     )
+}
+
+/**
+ * 长按「删除」之后的确认。系统在 Android 11+ 仍可能再弹一次授权框，
+ * 这一层先把「删的是哪一个、删了回不来」说清楚，并按媒体库自己的表面来画。
+ */
+@Composable
+internal fun DeleteConfirmDialog(
+    item: MediaItem,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val ink = LocalNpInk.current
+    val shape = RoundedCornerShape(20.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ink.scrim)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onDismiss,
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 28.dp)
+                .widthIn(max = 320.dp)
+                .fillMaxWidth()
+                .clip(shape)
+                .background(ink.surface)
+                .border(1.dp, ink.border, shape)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                )
+                .padding(horizontal = 18.dp, vertical = 18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(46.dp)
+                    .background(ink.dangerSoft, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = NpIcon.Trash,
+                    contentDescription = null,
+                    tint = ink.danger,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+            Text(
+                text = "删除这个文件？",
+                style = NpTypography.titleSmall,
+                color = ink.fg,
+                modifier = Modifier.padding(top = 12.dp),
+            )
+            Text(
+                text = item.cardTitle,
+                style = NpMonoSmall,
+                color = ink.fg,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            Text(
+                text = "文件会从设备上删除，媒体库里也找不到了。",
+                style = NpTypography.bodySmall,
+                color = ink.muted,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 6.dp),
+            )
+            Row(
+                modifier = Modifier
+                    .padding(top = 16.dp)
+                    .fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                DeleteDialogButton(
+                    text = "取消",
+                    container = ink.surface2,
+                    content = ink.fg,
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                )
+                DeleteDialogButton(
+                    text = "删除",
+                    container = ink.danger,
+                    content = Color.White,
+                    onClick = onConfirm,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DeleteDialogButton(
+    text: String,
+    container: Color,
+    content: Color,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .height(40.dp)
+            .clip(RoundedCornerShape(999.dp))
+            .background(container)
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(text = text, style = NpTypography.labelLarge, color = content)
+    }
 }
 
 /**

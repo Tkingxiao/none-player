@@ -6,10 +6,26 @@ android {
     namespace = "com.noneplayer.core.media.android"
     compileSdk = 36
 
+    ndkVersion = "27.2.12479018"
+
     defaultConfig {
         minSdk = 26
         // §12.9.2 QPel 探测 harness（androidTest）所需
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        externalNativeBuild {
+            cmake {
+                arguments += listOf(
+                    "-DANDROID_STL=none",
+                    "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON",
+                )
+            }
+        }
+    }
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

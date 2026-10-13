@@ -35,6 +35,9 @@ class PlaybackFailureTest {
     fun `编码名映射：常见与未知 mime`() {
         assertEquals("H.264 (AVC)", MediaNames.videoCodecName("video/avc"))
         assertEquals("MPEG-4 Visual (Xvid/DivX)", MediaNames.videoCodecName("video/mp4v-es"))
+        assertEquals("WMV2", MediaNames.videoCodecName(MediaNames.MIME_WMV2))
+        assertEquals("MPEG-4 ASP (Qpel)", MediaNames.videoCodecName(MediaNames.MIME_MPEG4_ASP))
+        assertEquals("WMV (VC-1)", MediaNames.videoCodecName("video/x-ms-wmv"))
         assertEquals("H.265 (HEVC)", MediaNames.videoCodecName("video/hevc"))
         assertEquals("AAC", MediaNames.audioCodecName("audio/mp4a-latm"))
         assertEquals("MP3", MediaNames.audioCodecName("audio/mpeg"))

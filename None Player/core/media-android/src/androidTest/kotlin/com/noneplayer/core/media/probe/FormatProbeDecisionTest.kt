@@ -19,7 +19,7 @@ import org.junit.runner.RunWith
  *  - `xvid-clip.avi`（MPEG-4 SP，平台 mp4v 解码器）→ 可播；
  *  - `np-mjpeg.avi`（AVI 内嵌 MJPEG）→ 平台无解码器、NextLib 的 FFmpeg 也不含该编码，
  *    只有播放链末端的 `BitmapFactoryVideoRenderer` 能出画 → **可播 + 仅软解提示**；
- *  - `np-wmv2.avi`（WMV2）→ 三条链都不认 → 不可播（体面失败）。
+ *  - `np-wmv2.avi`（WMV2）→ libnplegacy 补轨并软解 → 可播，且只有软解。
  *
  * MJPEG 这条是本次修复的靶子：修复前 `decide()` 只查平台 + FFmpeg 两条链，
  * 会把"实际能播"的 MJPEG AVI 误判为 `videoCodecUnsupported`。
@@ -57,9 +57,12 @@ class FormatProbeDecisionTest {
         val result = probe("np-wmv2.avi")
         Log.i(TAG, "np-wmv2.avi => $result")
         assertTrue(
-            "WMV2 三条链都不认，应判为不可播，实际：$result",
-            result is FormatProbe.Result.Unplayable,
+            "WMV2 补轨后应由 libnplegacy 判为可播，实际：$result",
+            result is FormatProbe.Result.Playable,
         )
+        result as FormatProbe.Result.Playable
+        assertEquals("WMV2", result.videoCodec)
+        assertTrue("WMV2 没有平台解码器，应给 C21 前置提示", result.softwareVideoOnly)
     }
 
     @Test

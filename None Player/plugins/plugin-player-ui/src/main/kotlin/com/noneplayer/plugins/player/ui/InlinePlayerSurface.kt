@@ -449,7 +449,6 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 ErrorPanel(
                     message = error.message,
                     failure = error.failure,
-                    mediaUri = media.uri,
                     actionLabel = "重试",
                     onAction = {
                         val index = session.index.value

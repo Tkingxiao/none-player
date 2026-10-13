@@ -30,6 +30,8 @@ captures/
 /*.log
 /*.wav
 /*.cue
+/*.mp4
+/*.avi
 /ui.xml
 
 # ---- 性能取证产物（Perfetto / atrace / gfxinfo，本地测量用，不入库）----
@@ -48,6 +50,21 @@ captures/
 install.bat
 /None Player/code error
 bug list.txt
+
+# ---- 测试媒体与本地构建下载（体积大，本地保管，不入库）----
+# androidTest 的样本视频（播放/解码回归用）体积大、可由 ffmpeg 重新生成或另行保管：
+# 仓库只保留测试代码，样本文件留在本地同名路径——新机跑仪器测试前从本地资料恢复。
+# `core/media-android/src/main/cpp/build-ffmpeg.sh`（重建 libnplegacy.so）引用的
+# NDK / FFmpeg 源码包同理按需下载，落根目录但不入库。
+**/src/androidTest/assets/*.mp4
+**/src/androidTest/assets/*.avi
+**/src/androidTest/assets/*.mkv
+**/src/androidTest/assets/*.mov
+**/src/androidTest/assets/*.webm
+**/src/androidTest/assets/*.ts
+**/src/androidTest/assets/*.m4v
+/android-ndk-*.zip
+/ffmpeg_*.orig.tar.xz
 
 # ---- 本地文档产物与密钥目录（公开仓前的兜底排除）----
 # `/*.log` 只挡仓库根，实机日志常落在 docs/ 下；截图取证目录整目录排除。

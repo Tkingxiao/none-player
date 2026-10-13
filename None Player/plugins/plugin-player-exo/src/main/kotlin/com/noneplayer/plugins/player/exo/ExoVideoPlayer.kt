@@ -143,6 +143,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var loadPending = false
     private var currentMediaId: String = ""
     private var appliedItems: List<MediaItem> = emptyList()
+
+    /** 最近一次探测的 uri；与 currentMediaUri 不一致时（如队列快路径切集后），失败文案不得复用这些名字 */
+    private var probedUri: String? = null
     private var probedContainer: String? = null
     private var probedVideoCodec: String? = null
     private var probedAudioCodec: String? = null
@@ -284,10 +287,14 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                         }
 
                         override fun onPlayerError(error: PlaybackException) {
+                            // 只有"报错的就是刚探测过的那一条"才配得上探测摘要里的容器/编码名；
+                            // 队列快路径切集没有重新探测，名称属于上一条——复用会把
+                            // "切到 B 失败"说成"A 的编码不支持"（曾把 H264 失败显示成 WMV2）。
+                            val probedThis = probedUri != null && probedUri == currentMediaUri
                             val failure = error.toPlaybackFailure(
-                                probedContainer,
-                                probedVideoCodec,
-                                probedAudioCodec,
+                                probedContainer.takeIf { probedThis },
+                                probedVideoCodec.takeIf { probedThis },
+                                probedAudioCodec.takeIf { probedThis },
                             )
                             terminalFailure = true
                             _state.value = PlaybackState.Error(failure.reason, failure)
@@ -448,6 +455,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 is FormatProbe.Result.Unplayable -> {
                     loadPending = false
                     appliedUri = null
+                    probedUri = uri
                     probedContainer = probe.failure.container
                     probedVideoCodec = probe.failure.videoCodec
                     probedAudioCodec = probe.failure.audioCodec
@@ -464,6 +472,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     _state.value = PlaybackState.Error(probe.failure.reason, probe.failure)
                 }
                 is FormatProbe.Result.Playable -> {
+                    probedUri = uri
                     probedContainer = probe.container
                     probedVideoCodec = probe.videoCodec
                     probedAudioCodec = probe.audioCodec

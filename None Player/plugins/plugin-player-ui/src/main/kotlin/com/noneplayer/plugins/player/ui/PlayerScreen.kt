@@ -23,8 +23,13 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.AnimationVector1D
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -60,6 +65,7 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -116,13 +122,13 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
-import androidx.compose.ui.platform.LocalClipboardManager
+
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.AnnotatedString
+
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.Constraints
@@ -177,6 +183,7 @@ import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpMaskFade
 import com.noneplayer.core.ui.npDisplacementAllowed
+import com.noneplayer.core.media.AviDuration
 import com.noneplayer.core.ui.LocalNpReduceMotion
 import com.noneplayer.core.ui.npDuration
 import com.noneplayer.core.ui.npQuality
@@ -627,10 +634,37 @@ fun PlayerScreen(
     // 放在底栏 AnimatedVisibility 内部会让面板拿不到（且底栏隐藏时值也读不到）。
     val queue by session.queue.collectAsStateWithLifecycle()
     val queueIndex by session.index.collectAsStateWithLifecycle()
+    // MediaStore 对 AVI 经常给 0 时长。选集行先用播放器已经知道的时长，
+    // 其余 AVI 再读文件头，不把整表重扫挡在显示前面。
+    val headerDuration = androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateMapOf<String, Long>() }
+    LaunchedEffect(queue) {
+        val missing = queue.filter { item ->
+            item.durationMs <= 0L &&
+                headerDuration[item.id] == null &&
+                (item.title.endsWith(".avi", ignoreCase = true) ||
+                    item.mimeType.contains("avi", ignoreCase = true))
+        }
+        if (missing.isEmpty()) return@LaunchedEffect
+        val found = withContext(Dispatchers.IO) {
+            missing.mapNotNull { item ->
+                val ms = runCatching {
+                    context.contentResolver.openInputStream(item.uri.toUri())?.use { AviDuration.read(it) }
+                }.getOrNull() ?: 0L
+                if (ms > 0L) item.id to ms else null
+            }
+        }
+        found.forEach { (id, ms) -> headerDuration[id] = ms }
+    }
     // 页头（playerbar / pinfo / 文件信息卡）以**会话当前项**为准而不是路由入参：
     // 选集切换或底栏 ⏭ 之后，标题与容器必须立刻换成新一集，
     // 而不是停在进页时那一条（路由 uri 不会因子会话内切集而改变）。
     val currentItem = queue.getOrNull(queueIndex)
+    fun queueDuration(item: com.noneplayer.core.media.MediaItem): Long {
+        if (item.durationMs > 0L) return item.durationMs
+        headerDuration[item.id]?.let { if (it > 0L) return it }
+        if (item.id == currentItem?.id && durationMs > 0L) return durationMs
+        return 0L
+    }
     /**
      * per-media 记忆的键（A2-8）：`sourceId:mediaId`，与 Room 的 `media_key` 同一约定。
      *
@@ -1373,9 +1407,22 @@ fun PlayerScreen(
         // L10①：反馈诚实性——`enterPictureInPictureMode` 失败会返回 false（设备/系统
         // 不允许时也可能抛异常），此前无条件 toast「已进入画中画」，用户看不到小窗却被
         // 告知成功。比例改用真实视频宽高比（与参数跟随同一口径），竖视频不再塞进 16:9。
+        // 源矩形取视频内容区（TextureView 按比例布局，即画面所在区域）：Android 12+
+        // 的手动进小窗从该区域收拢过渡（与 setAutoEnterEnabled 一起构成 lint 要求的
+        // 新式 PiP 用法，见 manualPipParams）。
+        val surface = surfaceViewRef.value
+        val sourceRect = if (surface != null && surface.isAttachedToWindow &&
+            surface.width > 0 && surface.height > 0
+        ) {
+            val loc = IntArray(2)
+            surface.getLocationInWindow(loc)
+            android.graphics.Rect(loc[0], loc[1], loc[0] + surface.width, loc[1] + surface.height)
+        } else {
+            null
+        }
         val entered = runCatching {
             a.enterPictureInPictureMode(
-                manualPipParams(context, videoAspectRatio, state == PlaybackState.Playing),
+                manualPipParams(context, videoAspectRatio, state == PlaybackState.Playing, sourceRect),
             )
         }.getOrDefault(false)
         toast.show(if (entered) "已进入画中画" else "画中画不可用")
@@ -2490,7 +2537,7 @@ fun PlayerScreen(
                                         EpisodeRow(
                                             index = index,
                                             title = item.title.ifBlank { item.id },
-                                            durationMs = item.durationMs,
+                                            durationMs = queueDuration(item),
                                             selected = index == queueIndex,
                                             onClick = { session.selectQueueIndex(index) },
                                         )
@@ -2531,7 +2578,6 @@ fun PlayerScreen(
             ErrorPanel(
                 message = error.message,
                 failure = error.failure,
-                mediaUri = uri,
                 actionLabel = "重试",
                 onAction = {
                     // 重试必须重载**失败的那一项**：错误可能来自选集切换而非路由入参，
@@ -4562,8 +4608,8 @@ private fun PlayerActionButton(
 }
 
 /**
- * 信息区的选集行（§5.8 列表行语言）：选中 = 3dp accent 竖条 + accent 文字 + 静态声柱。
- * 声柱是**静态**的——"循环动画"在禁区清单里（呼吸灯/旋转背景同族）。
+ * 信息区的选集行：选中 = 3dp accent 竖条 + accent 文字 + 声柱。
+ * 声柱只在正在播放的那一行起伏；减少动效时停在一组固定高度。
  */
 @Composable
 private fun EpisodeRow(
@@ -4626,21 +4672,40 @@ private fun EpisodeRow(
     }
 }
 
-/** 正在播放的静态声柱（三根，高度不等）——表达状态，不做循环动画 */
+/** 正在播放的声柱：三根错相起伏。减少动效时用固定高度。 */
 @Composable
 private fun PlayingBars(modifier: Modifier = Modifier) {
+    val reduceMotion = LocalNpReduceMotion.current
+    val color = MaterialTheme.colorScheme.primary
+    val fractions = if (reduceMotion) {
+        listOf(0.45f, 1f, 0.7f)
+    } else {
+        val transition = rememberInfiniteTransition(label = "playingBars")
+        listOf(0 to 460, 160 to 620, 80 to 540).map { (offset, period) ->
+            transition.animateFloat(
+                initialValue = 0.28f,
+                targetValue = 1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(period, easing = androidx.compose.animation.core.FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse,
+                    initialStartOffset = StartOffset(offset),
+                ),
+                label = "bar$offset",
+            ).value
+        }
+    }
     Row(
         modifier = modifier.height(14.dp),
         verticalAlignment = Alignment.Bottom,
         horizontalArrangement = Arrangement.spacedBy(2.dp),
     ) {
-        listOf(5.dp, 13.dp, 9.dp).forEach { barHeight ->
+        fractions.forEach { fraction ->
             Box(
                 modifier = Modifier
                     .width(3.dp)
-                    .height(barHeight)
+                    .height(14.dp * fraction.coerceIn(0.28f, 1f))
                     .clip(RoundedCornerShape(1.dp))
-                    .background(MaterialTheme.colorScheme.primary),
+                    .background(color),
             )
         }
     }
@@ -4780,13 +4845,10 @@ internal fun ErrorPanel(
     message: String,
     modifier: Modifier = Modifier,
     failure: PlaybackFailure? = null,
-    mediaUri: String? = null,
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
     onBack: () -> Unit,
 ) {
-    val context = LocalContext.current
-    val clipboard = LocalClipboardManager.current
     val (scale, entranceAlpha) = npPanelEntrance(0.96f)
     // M18（§7.5 `Reject`）：错误面板出现的那一帧响一次——它与入场动画同时起步，
     // 是"停下来告诉你坏了"的面，不响就等于把错误做成了静默的视觉变化。
@@ -4794,77 +4856,75 @@ internal fun ErrorPanel(
     LaunchedEffect(Unit) { errorHaptics.performHaptic(NpHaptic.Reject) }
     Column(
         modifier = modifier
+            .padding(horizontal = 28.dp)
+            .widthIn(max = 300.dp)
             .graphicsLayer {
                 scaleX = scale.value
                 scaleY = scale.value
                 alpha = entranceAlpha.value
             }
-            .clip(MaterialTheme.shapes.medium)
-            .background(Color.Black.copy(alpha = 0.7f))
-            .padding(24.dp),
+            .clip(RoundedCornerShape(NpRadius.card))
+            .background(Color.Black.copy(alpha = 0.78f))
+            .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(NpRadius.card))
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         if (failure != null) {
-            // E41 三行结构：标题 / 容器·编码行 / 原因（+ 转码建议）
             Text(
                 text = failure.title,
-                style = MaterialTheme.typography.titleMedium,
+                style = NpTypography.titleSmall,
                 color = Color.White,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
             )
             failure.trackLine?.let { line ->
                 Text(
                     text = line,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = Color.White.copy(alpha = 0.82f),
-                    modifier = Modifier.padding(top = 8.dp),
+                    style = NpTypography.bodySmall,
+                    color = Color.White.copy(alpha = 0.72f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 6.dp),
                 )
             }
             Text(
                 text = failure.reason,
-                style = MaterialTheme.typography.bodyMedium,
-                color = Color.White,
-                modifier = Modifier.padding(top = 8.dp),
+                style = NpTypography.bodySmall,
+                color = Color.White.copy(alpha = 0.88f),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 6.dp),
             )
-            failure.suggestion?.let { suggestion ->
-                Text(
-                    text = suggestion,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color.White.copy(alpha = 0.65f),
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-            }
         } else {
             Text(
                 text = message,
-                style = MaterialTheme.typography.bodyLarge,
+                style = NpTypography.bodyMedium,
                 color = Color.White,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                maxLines = 4,
+                overflow = TextOverflow.Ellipsis,
             )
         }
         Row(
-            modifier = Modifier.padding(top = 16.dp),
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier
+                .padding(top = 12.dp)
+                .fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            ErrorPanelButton(
+                text = "返回",
+                onClick = onBack,
+                modifier = Modifier.weight(1f),
+            )
             if (actionLabel != null && onAction != null) {
-                ErrorPanelButton(text = actionLabel, primary = true, onClick = onAction)
-            }
-            if (mediaUri != null) {
                 ErrorPanelButton(
-                    text = "用其他播放器打开",
-                    onClick = {
-                        if (!openExternally(context, mediaUri)) {
-                            Toast.makeText(context, "没有可打开此文件的应用", Toast.LENGTH_SHORT).show()
-                        }
-                    },
-                )
-                ErrorPanelButton(
-                    text = "复制地址",
-                    onClick = {
-                        clipboard.setText(AnnotatedString(mediaUri))
-                        Toast.makeText(context, "已复制文件地址", Toast.LENGTH_SHORT).show()
-                    },
+                    text = actionLabel,
+                    primary = true,
+                    onClick = onAction,
+                    modifier = Modifier.weight(1f),
                 )
             }
-            ErrorPanelButton(text = "返回媒体库", onClick = onBack)
         }
     }
 }
@@ -4880,12 +4940,13 @@ internal fun ErrorPanel(
 private fun ErrorPanelButton(
     text: String,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     primary: Boolean = false,
 ) {
     val ink = LocalNpInk.current
     Box(
-        modifier = Modifier
-            .heightIn(min = NpDimens.touchTarget)
+        modifier = modifier
+            .heightIn(min = 40.dp)
             .clip(RoundedCornerShape(NpRadius.chip))
             .background(if (primary) ink.accent else Color.White.copy(alpha = 0.16f))
             .then(
@@ -5048,22 +5109,6 @@ private val ALLOWED_URI_SCHEMES = setOf("content", "file")
 
 internal fun isPlayableUriScheme(uriString: String): Boolean =
     runCatching { uriString.toUri().scheme?.lowercase() }.getOrNull() in ALLOWED_URI_SCHEMES
-
-/** ACTION_VIEW 外唤（本地 Intent，零网络）；scheme 不在白名单、无处理方或 file:// 受限时返回 false */
-private fun openExternally(context: Context, uriString: String): Boolean {
-    // E76 修复：与 E57 同根因——此前未校验 scheme 就把外部/深链来源的地址转发给
-    // 其他 App，同样属于"未经校验的不可信输入扩大信任面"模式。
-    if (!isPlayableUriScheme(uriString)) return false
-    return runCatching {
-        context.startActivity(
-            Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uriString.toUri(), "video/*")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            },
-        )
-        true
-    }.getOrDefault(false)
-}
 
 private fun toMediaItem(
     id: String,
@@ -5257,11 +5302,22 @@ private suspend fun MediaSourceProvider.awaitSelfList(
 
 private const val PIP_REQUEST_CODE_BASE = 2000
 
-private fun manualPipParams(context: Context, aspectRatio: Float, playing: Boolean): PictureInPictureParams {
+private fun manualPipParams(
+    context: Context,
+    aspectRatio: Float,
+    playing: Boolean,
+    sourceRect: android.graphics.Rect? = null,
+): PictureInPictureParams {
     val ratio = pipAspectRatio(aspectRatio)
     val builder = PictureInPictureParams.Builder()
         .setAspectRatio(android.util.Rational((ratio * 1000).roundToInt(), 1000))
         .setActions(pipActions(context, playing))
+    // 手动进小窗的源矩形（lint PictureInPictureIssue 的落点之一）：过渡动画从视频
+    // 区域收拢。自动进入保持关闭是产品决策——小窗只允许播放菜单手动入口
+    // （MainActivity.onPictureInPictureRequested），lint 只要求两种新式调用在工程内并存。
+    if (sourceRect != null && !sourceRect.isEmpty) {
+        builder.setSourceRectHint(sourceRect)
+    }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
         builder.setAutoEnterEnabled(false).setSeamlessResizeEnabled(false)
     }

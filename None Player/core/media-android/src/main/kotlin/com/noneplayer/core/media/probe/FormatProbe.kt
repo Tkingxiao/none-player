@@ -22,10 +22,11 @@ import androidx.media3.extractor.SeekMap
 import android.net.Uri
 import androidx.core.net.toUri
 import androidx.media3.extractor.TrackOutput
-import com.homesoft.exo.extractor.AviExtractorsFactory
 import com.noneplayer.core.media.MediaNames
 import com.noneplayer.core.media.ProbeMemo
 import com.noneplayer.core.media.PlaybackFailure
+import com.noneplayer.core.media.extract.NpExtractorsFactory
+import com.noneplayer.core.media.legacy.LegacyDecoderLibrary
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary
 import java.io.ByteArrayOutputStream
 import kotlinx.coroutines.Dispatchers
@@ -41,9 +42,10 @@ import kotlin.math.max
  * 2. **视频编码无解**：容器可读，但**平台 MediaCodec、内置 FFmpeg 软解与 AVI MJPEG 位图软解
  *    都不认这个编码**（WMV2 / VC-1 / RealVideo 等旧编码）。
  *
- * 探测用与播放相同的 media3 Extractor 链，解码器查询则同时看三条链：
+ * 探测用与播放相同的 media3 Extractor 链，解码器查询则同时看四条链：
  * 平台 `MediaCodecList`（硬解/平台软解）+ NextLib 的 `FfmpegLibrary`（内置 FFmpeg 软解）
- * + AVI MJPEG 的 `BitmapFactoryVideoRenderer`（位图软解）。
+ * + AVI MJPEG 的 `BitmapFactoryVideoRenderer`（位图软解）
+ * + `libnplegacy`（只认 WMV2 与专用 ASP mime，加载失败视为不支持）。
  * 只查平台会把"平台没有、FFmpeg 能解"的编码（AV1 / MPEG-1/2 等）与"平台没有、MJPEG
  * 位图渲染器能解"的 AVI 误判为不可播——播放侧明明是 `EXTENSION_RENDERER_MODE_ON`
  * （平台不支持就落 FFmpeg），且末端还挂着 MJPEG 位图渲染器，两边必须一致。
@@ -187,16 +189,16 @@ object FormatProbe {
     /**
      * 探测用的 Extractor 链——**必须与播放链同源**（E39 的一致性前提）。
      *
-     * AVI 交给 Media3Avi 的增强解封装器（OpenDML/AVIX + indx/ix 索引、MP42/MP43、
-     * MJPEG、更多 H.264 fourCC），其余容器仍是 media3 默认链；这与播放侧的
-     * `DefaultMediaSourceFactory(context, AviExtractorsFactory())` 是同一套。
+     * AVI 交给 [NpExtractorsFactory]：非 WMV2 仍是 Media3Avi，WMV2 由补轨提取器认领，
+     * 确需软解的 MPEG-4 ASP 在 Format 出手前改成专用 mime。这与播放侧的
+     * `DefaultMediaSourceFactory(context, NpExtractorsFactory())` 是同一套。
      * 两边不同源就会出现自相矛盾的结论：探测说"没有视频轨"而播放能出画，
      * 或探测放行而播放黑屏。
      *
      * 工厂本身无状态，每次 `createExtractors()` 产出全新的 Extractor 实例
      * （Extractor 有内部游标，不能跨文件复用），因此可以常驻单例。
      */
-    private val AVI_EXTRACTORS: ExtractorsFactory = AviExtractorsFactory()
+    private val AVI_EXTRACTORS: ExtractorsFactory = NpExtractorsFactory()
 
     /** profile 判读只需头部字节；截留上限（VOS/VOL/GOV 头远小于此） */
     private const val HEAD_CAP = 4 * 1024
@@ -313,7 +315,7 @@ object FormatProbe {
     /** 认领文件的是哪个解封装器 → 容器显示名（补 MediaStore 地址无扩展名的缺口） */
     private fun containerFromExtractor(extractor: Extractor): String? =
         when (extractor.javaClass.simpleName) {
-            "AviExtractor" -> "AVI"
+            "AviExtractor", "Wmv2AviExtractor", "Mp4vAspRewritingExtractor" -> "AVI"
             "MatroskaExtractor" -> "Matroska (MKV)"
             "Mp4Extractor", "FragmentedMp4Extractor" -> "MP4"
             "TsExtractor" -> "MPEG-TS"
@@ -506,7 +508,8 @@ object FormatProbe {
             val platformVideo = hasPlatformDecoder(video)
             val ffmpegVideo = ffmpegSupports(video.sampleMimeType)
             val bitmapVideo = bitmapRendererSupports(video.sampleMimeType)
-            if (!platformVideo && !ffmpegVideo && !bitmapVideo) {
+            val legacyVideo = legacySupports(video.sampleMimeType)
+            if (!platformVideo && !ffmpegVideo && !bitmapVideo && !legacyVideo) {
                 return Result.Unplayable(
                     PlaybackFailure.videoCodecUnsupported(containerName, videoName, audioName),
                 )
@@ -542,15 +545,9 @@ object FormatProbe {
             val header = video.initializationData.firstOrNull()?.takeIf { it.isNotEmpty() }
                 ?: firstVideoSampleHead
                 ?: return null
-            val verdict = Mpeg4ProfileParser.parse(header)
-            if (verdict.required != Mpeg4ProfileParser.RequiredProfile.ADVANCED_SIMPLE) return null
-            // 设备上所有 mp4v 解码器声明的 profile 集合
-            val deviceProfiles = mp4vDeviceProfiles()
-            val supportsAsp = deviceProfiles.any {
-                it == MediaCodecInfo.CodecProfileLevel.MPEG4ProfileAdvancedSimple
-            }
-            if (supportsAsp) return null // 设备确实声明了 ASP：放行
-            if (deviceProfiles.isEmpty()) return null // 查不到声明：fail-open，交给引擎
+            if (!Mp4vAspGate.requiresDedicatedDecoder(header)) return null
+            // 设备上所有 mp4v 解码器声明的 profile 集合。走到这里时列表非空且不含 ASP。
+            val deviceProfiles = Mp4vAspGate.deviceProfiles()
             return Result.Unplayable(
                 PlaybackFailure.videoProfileUnsupported(
                     container = containerName,
@@ -565,24 +562,6 @@ object FormatProbe {
             )
         }
     }
-
-    /** 枚举设备上所有支持 mp4v 的解码器声明的 profile（去不去重由调用方定）。 */
-    private fun mp4vDeviceProfiles(): List<Int> = runCatching {
-        MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
-            .asSequence()
-            .filter { !it.isEncoder }
-            .filter { info ->
-                runCatching { info.supportedTypes.any { it.equals(MIME_MP4V, true) } }
-                    .getOrDefault(false)
-            }
-            .flatMap { info ->
-                runCatching {
-                    info.getCapabilitiesForType(MIME_MP4V).profileLevels?.map { it.profile }
-                        ?: emptyList()
-                }.getOrDefault(emptyList()).asSequence()
-            }
-            .toList()
-    }.getOrDefault(emptyList())
 
     private fun mpeg4ProfileName(profile: Int): String = when (profile) {
         MediaCodecInfo.CodecProfileLevel.MPEG4ProfileSimple -> "Simple Profile"
@@ -660,4 +639,11 @@ object FormatProbe {
      * `BitmapFactoryVideoRenderer` 为准（其内部仅匹配该 mime）。
      */
     private fun bitmapRendererSupports(mime: String?): Boolean = mime == MIME_MJPEG
+
+    /**
+     * libnplegacy 是否认这个 mime。加载失败是 false，不能像 [hasPlatformDecoder] 那样 fail-open。
+     * 表外 mime 不触发加载。
+     */
+    private fun legacySupports(mime: String?): Boolean =
+        runCatching { LegacyDecoderLibrary.supports(mime) }.getOrDefault(false)
 }
