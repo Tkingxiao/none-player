@@ -6,6 +6,7 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -53,6 +54,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
@@ -89,14 +91,12 @@ import androidx.navigation.compose.currentBackStackEntryAsState
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpEasing
-import com.noneplayer.core.ui.NpHaptic
 import com.noneplayer.core.ui.NoneMark
 import com.noneplayer.core.ui.npDisplacementAllowed
 import com.noneplayer.core.ui.npDuration
 import com.noneplayer.core.ui.npGlassChrome
 import com.noneplayer.core.ui.npGlassSurface
 import com.noneplayer.core.ui.npMotion
-import com.noneplayer.core.ui.rememberNpHaptics
 import com.noneplayer.core.ui.silkFloat
 import com.noneplayer.core.ui.silkOffset
 import com.noneplayer.kernel.api.Navigator
@@ -233,11 +233,10 @@ fun KernelTabScaffold(
     // 必须在 `selectTab` 之前声明——它是被那个局部函数捕获的。
     val tabShiftDirection = remember { mutableIntStateOf(0) }
     // 切 Tab：栈内永远只保留一个 Tab（E53），状态靠 saveState/restoreState 成对保留。
-    val haptics = rememberNpHaptics()
     fun selectTab(route: String) {
         if (currentRoute == route) return
-        // M4（§7.5 `Tick`）：真正换了目的地才响——点当前 Tab 没有状态变化。
-        haptics.performHaptic(NpHaptic.Tick)
+        // M4 的 `Tick` 已撤（2026-10-14 用户实报"切换界面不要震动"）：换目的地是**导航**，
+        // 不是有分量的操作。触觉只留给长按、破坏性确认与进度擦洗这类直接操纵。
         val from = sortedTabs.indexOfFirst { it.route == currentRoute }
         val to = sortedTabs.indexOfFirst { it.route == route }
         tabShiftDirection.intValue = if (from >= 0 && to >= 0) to.compareTo(from) else 0
@@ -376,6 +375,11 @@ fun KernelTabScaffold(
             LocalNpTabSwitcher provides ::selectTab,
             LocalNpBottomInset provides bottomInset,
         ) {
+    // 外壳在的时候把类 PC 档记下来。转屏那一帧 Activity 会更早读它；这里补自由窗口
+    // 这类不走配置回调的尺寸变化，避免右栏拆掉之后没人把播放页打开、竖屏落在首页。
+    SideEffect {
+        NpFormHandoff.noteDesktop(windowInfo.isDesktopLike)
+    }
     if (windowInfo.isCompact) {
         // 紧凑：底部 Tab 栏 + Chrome（迷你条）贴上沿。内容层**不再被 innerPadding
         // 截断**——它延伸到条之下（设计稿 `.mini/.tabbar{position:fixed}`），
@@ -447,12 +451,30 @@ fun KernelTabScaffold(
                 val paneProgress by animateFloatAsState(
                     targetValue = if (paneInUse) 1f else 0f,
                     // 右栏进出是一次缩放，不是把画面横向拉开。Emphasized 比 Silk 更跟手。
-                    animationSpec = npMotion(Motion.Shared, easing = NpEasing.Emphasized),
+                    // 离开类 PC 时不准再播这段：列表会被拉满，剧集封面就挤进转屏那几帧。
+                    // 交接窗口里两个方向都不准播：飞行帧的**落点**就是右栏画面的矩形，
+                    // 右栏若还在长宽（转横屏那一轮它正在从 0 撑开），那一帧会落到半途的
+                    // 尺寸上，落位后右栏再自己撑大——读起来就是"落偏了又弹一下"。
+                    animationSpec = if (windowInfo.isDesktopLike && !NpFormHandoff.isSilent) {
+                        npMotion(Motion.Shared, easing = NpEasing.Emphasized)
+                    } else {
+                        snap()
+                    },
                     label = "playbackPaneWidth",
                 )
                 // 收起动画没走完之前，详情页仍按「右栏占着画面」排版。
                 // 否则 ✕ 的同一帧就会在左侧冒出封面，画面先跳到左边再弹回右边。
-                val detailPaneOccupied = paneInUse || paneProgress > 0.04f
+                // **但窗口离开类 PC 档时不成立**：那一刻右栏是"没了"而不是"在收"
+                // （`paneInUse` 已为假），转屏交接落地的播放页必须立刻拿到画面；
+                // 继续按"占着"下发，播放页会先空一帧、而右栏的 Surface 又还没释放，
+                // 屏幕上就是两层画面同框（真机实报"一大一小两层正在播放的视频重叠"）。
+                //
+                // `paneShown` 是这条纪律的**完整版**：`animateFloatAsState` 即使给 `snap()`
+                // 也要下一帧才落值，所以转屏那一帧 `paneProgress` 还是 1.0——右栏的
+                // TextureView 还挂在树上、列表还被挤成 320dp。既然右栏只在类 PC 档存在，
+                // 离开那一档就没有"正在收起"可言，进度直接按 0 算。
+                val paneShown = if (windowInfo.isDesktopLike) paneProgress else 0f
+                val detailPaneOccupied = paneInUse || paneShown > 0.04f
                 CompositionLocalProvider(LocalNpPaneOccupied provides detailPaneOccupied) {
                     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                         // §8.1 类 PC 行：列表 320–400、播放 ≥480。
@@ -463,14 +485,14 @@ fun KernelTabScaffold(
                             (maxWidth * 0.30f)
                                 .coerceIn(320.dp, 400.dp)
                                 .coerceAtMost((maxWidth - 480.dp).coerceAtLeast(280.dp))
-                        val listWidth = maxWidth + (targetListWidth - maxWidth) * paneProgress
+                        val listWidth = maxWidth + (targetListWidth - maxWidth) * paneShown
                         Row(modifier = Modifier.fillMaxSize().clipToBounds()) {
                             navHost(
                                 Modifier
                                     .fillMaxHeight()
                                     .width(listWidth),
                             )
-                            if (pane != null && paneProgress > 0.001f) {
+                            if (pane != null && paneShown > 0.001f) {
                                 // 硬分割（2026-10-07 用户口径）：内容与右栏之间不做任何
                                 // 渐变过渡——1dp 发丝线 + 两侧同宽留白（pageGutter），
                                 // 右栏右缘同样让出留白、不贴屏幕边缘。

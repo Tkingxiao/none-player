@@ -1,5 +1,6 @@
 package com.noneplayer.plugins.player.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,32 +23,43 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpIcon
+import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.formatFileSize
 import com.noneplayer.core.ui.npGlassSurface
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.kind
+import com.noneplayer.core.media.resolutionLabel
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.ui.api.DetailPaneProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
+import com.noneplayer.kernel.ui.api.NpFormHandoff
+import com.noneplayer.kernel.ui.api.NpHandoffTarget
 import com.noneplayer.kernel.ui.api.NpInlinePlayRequest
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
+import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.NpPlayerPaneMotion
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import coil.compose.AsyncImage
@@ -124,6 +136,51 @@ class PlaybackPaneChrome : DetailPaneProvider {
         SideEffect { if (currentSnapshot != null) lastSnapshot = currentSnapshot }
         val snapshot = currentSnapshot ?: lastSnapshot ?: return
         val ink = LocalNpInk.current
+        val services = LocalKernel.current.services
+        val history = remember(services) { services.get<HistoryRepository>() }
+        val scope = rememberCoroutineScope()
+        val favoriteKeys by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
+        val favorited = HistoryEntry.keyOf(snapshot.item) in favoriteKeys
+        // HDR 概况来自会话播放器的起播探测；换播放器/条目时重新订（默认 null）
+        val hdrFlow = remember(session, snapshot.item.uri) {
+            session.player?.hdrLabel ?: MutableStateFlow<String?>(null)
+        }
+        val hdr by hdrFlow.collectAsStateWithLifecycle()
+        // 右栏的画面只在**类 PC 档**存在（外壳用 `isDesktopLike` 把关）。平板转竖屏那一瞬
+        // 外壳收回这一栏、Surface 随之释放——会话还在跑，屏幕上却只剩底部迷你条，
+        // 用户读成"视频没继续播、掉进后台播放了"（2026-10-14 真机实报）。
+        // 收回之前先把它交给竖屏的播放页：不带 `fs=1`（那会反向请求横向，跟刚发生的
+        // 转屏对着干），落页只续播不重启（B1 语义）。仅听音频不交接——它本就有迷你条
+        // 与完整音频页两个承载者，画面不是它的全部内容。
+        val windowInfo = LocalNpWindowInfo.current
+        // 右栏的画面只在类 PC 档存在。离开这一档时，播放页要在第一帧竖屏画出来之前就
+        // 进栈（Activity 转屏回调读这里登记的路线）。晚一帧会先画出首页和剧集封面，
+        // 右栏 Surface 与播放页 Surface 叠成一大一小两层画面。仅听音频不交接。
+        val handoffRoute = if (
+            windowInfo.isDesktopLike &&
+            currentSnapshot != null &&
+            !audioOnly &&
+            snapshot.item.kind != MediaKind.AUDIO
+        ) {
+            "player?uri=${encode(snapshot.item.uri)}" +
+                "&title=${encode(snapshot.title)}" +
+                "&mime=${encode(snapshot.item.mimeType)}" +
+                "&id=${encode(snapshot.item.id)}"
+        } else {
+            null
+        }
+        val handOffToPlayerPage = handoffRoute == null &&
+            currentSnapshot != null &&
+            !audioOnly &&
+            snapshot.item.kind != MediaKind.AUDIO
+        SideEffect { NpFormHandoff.offerPaneRoute(handoffRoute) }
+        androidx.compose.runtime.DisposableEffect(Unit) {
+            onDispose {
+                // 用户点全屏/停播离开右栏时清**自己这条**路线。转屏交接已经把 wasDesktop
+                // 写成 false，不会误清；详情页那条归媒体库，这里不碰。
+                NpFormHandoff.clearPaneRouteWhileDesktop()
+            }
+        }
         Column(
             modifier = modifier
                 .background(ink.bg)
@@ -161,6 +218,14 @@ class PlaybackPaneChrome : DetailPaneProvider {
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
+                // 收藏（与手机播放页同一动作）：此前右栏横竖屏都没有这个出口，
+                // 平板上唯一的收藏入口藏在播放选项菜单里（用户实报）。
+                NpIconButton(
+                    icon = NpIcon.Heart,
+                    contentDescription = if (favorited) "取消收藏" else "收藏",
+                    tint = if (favorited) ink.accent else ink.fg,
+                    onClick = { scope.launch { history.toggleFavorite(snapshot.item) } },
+                )
                 if (audioOnly || snapshot.item.kind == MediaKind.AUDIO) {
                     NpIconButton(
                         icon = NpIcon.Expand,
@@ -172,6 +237,28 @@ class PlaybackPaneChrome : DetailPaneProvider {
                 }
             }
             Box(modifier = Modifier.weight(1f)) {
+                // 播放页交接过来的最后一帧：右栏重新挂载的画面出画前用它顶着，否则
+                // 飞行帧落位淡出之后会露出一段纯黑（用户实报过的"画面只剩底部迷你条"）。
+                // 只认"落点是右栏"的那一枚——转竖屏那一轮封面归播放页。
+                val panePoster = remember(snapshot.item.uri) {
+                    NpFormHandoff.posterFor(snapshot.item.uri, NpHandoffTarget.PANE)?.asImageBitmap()
+                }
+                var posterHeld by remember(panePoster) { mutableStateOf(panePoster != null) }
+                LaunchedEffect(panePoster) {
+                    if (panePoster == null) return@LaunchedEffect
+                    // 给新 Surface 三帧时间出画，之后这层静止帧就该退场了。
+                    repeat(3) { withFrameMillis { } }
+                    posterHeld = false
+                }
+                if (panePoster != null && posterHeld) {
+                    Image(
+                        bitmap = panePoster,
+                        contentDescription = null,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+                if (handOffToPlayerPage) return@Box
                 if (currentSnapshot == null) {
                     // Exit keeps only a static cover. Never remount a stopped playback surface.
                     AsyncImage(
@@ -206,10 +293,27 @@ class PlaybackPaneChrome : DetailPaneProvider {
                                 "&fs=1",
                         )
                     },
-                    modifier = Modifier.fillMaxSize().onGloballyPositioned {
-                        NpPlayerPaneMotion.recordPane(snapshot.item.uri, it.boundsInWindow())
-                    },
+                    // 画面矩形由内层 `InlinePlayerAttached` 报（画面本体，不含承载它的
+                    // 黑边/留白）；这里再报一遍整栏会把那份登记覆盖成含黑边的大框。
+                    modifier = Modifier.fillMaxSize(),
                 )
+            }
+            // 视频下方信息行：手机播放页同款 mono 元数据（大小 · 分辨率 · HDR · 容器 · 文件夹），
+            // 一排横向、文件夹收尾——此前平板横屏右栏的视频下方是一整片空白（用户要求补上）。
+            if (!audioOnly && snapshot.item.kind != MediaKind.AUDIO) {
+                val meta = paneMetaLine(snapshot.item, hdr)
+                if (meta.isNotEmpty()) {
+                    Text(
+                        text = meta,
+                        style = NpMonoSmall,
+                        color = ink.muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
             }
         }
     }
@@ -233,6 +337,23 @@ class PlaybackPaneChrome : DetailPaneProvider {
                 "&mime=${encode(snapshot.item.mimeType)}" +
                 "&id=${encode(snapshot.item.id)}&audio=1",
         )
+    }
+
+    /** 右栏视频下方的单行元数据：大小 · 分辨率 · HDR · 容器 · 文件夹（文件夹收尾） */
+    private fun paneMetaLine(item: MediaItem, hdr: String?): String {
+        val ext = item.title
+            .substringAfterLast('.', "")
+            .takeIf { it.isNotEmpty() && it.length <= 5 }
+            ?.uppercase()
+        val container = ext
+            ?: item.mimeType.substringAfter('/', "").uppercase().takeIf { it.isNotBlank() }
+        return buildList {
+            if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
+            item.resolutionLabel.takeIf { it.isNotBlank() }?.let { add(it) }
+            hdr?.takeIf { it.isNotBlank() }?.let { add(it) }
+            container?.let { add(it) }
+            item.folder?.takeIf { it.isNotBlank() }?.let { add(it) }
+        }.joinToString(" · ")
     }
 }
 

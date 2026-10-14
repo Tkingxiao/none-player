@@ -96,6 +96,14 @@ interface VideoPlayer {
         get() = MutableStateFlow(null)
 
     /**
+     * 当前媒体的 HDR 概况（起播探测自容器声明的 colorTransfer）：
+     * "HDR10" / "HLG"；SDR、未知或未探测为 null。默认恒为 null。
+     * UI 据此在信息行/详情里给 HDR 标识。
+     */
+    val hdrLabel: StateFlow<String?>
+        get() = MutableStateFlow(null)
+
+    /**
      * 当前播放队列（同文件夹连播的来源）。默认空——不支持队列的引擎退化为单曲播放。
      *
      * 队列放在引擎契约而非 UI 侧，是因为"自动连播/通知栏 ⏮⏭"只有引擎（会话侧）

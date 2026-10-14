@@ -1,6 +1,7 @@
 package com.noneplayer.plugins.player.ui
 
 import android.content.Context
+import android.util.Log
 import androidx.core.net.toUri
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
@@ -73,6 +74,14 @@ internal suspend fun ensureSessionPlaying(
      * 默认 true 保迷你条 / 详情页内嵌的既有语义不变。
      */
     autoPlay: Boolean = true,
+    /**
+     * true = **装载完不起播**，停在就绪态等用户按播放。
+     *
+     * 与 [autoPlay] 不是一回事：`autoPlay` 只在"会话里已经是同一个媒体"那半边说话
+     * （E104：暂停态进页保持暂停），新装载那半边照旧起播——媒体库点卡片要的就是它。
+     * 这里要的是连新装载也不起播：横屏剧集详情页（没在播）转竖屏的落点。
+     */
+    prepareOnly: Boolean = false,
     audioOnlyMode: Boolean? = null,
     onSubtitleMatched: ((mediaKey: String, uri: String) -> Unit)? = null,
 ): SessionStart {
@@ -83,6 +92,12 @@ internal suspend fun ensureSessionPlaying(
         session.queue.value.getOrNull(session.index.value),
         item,
         player.state.value,
+    )
+    Log.d(
+        "NpRot",
+        "boot sameMedia=$sameMedia autoPlay=$autoPlay prepareOnly=$prepareOnly " +
+            "silent=${com.noneplayer.kernel.ui.api.NpFormHandoff.isSilent} " +
+            "state=${player.state.value} uri=${item.uri}",
     )
     if (!sameMedia) {
         val queue = resolveFolderQueue(registry, item.uri, item.id)
@@ -143,7 +158,10 @@ internal suspend fun ensureSessionPlaying(
             }
         }
         player.setTextTracksEnabled(settings.subtitleEnabled.first())
-        player.play()
+        // `setQueue` 在引擎侧已经把 `playWhenReady` 置了真（A08：装载即起播），
+        // 所以"只装载不起播"必须在这里按停——不然是先播一瞬再停，位置也会往前走。
+        if (prepareOnly) player.pause() else player.play()
+        Log.d("NpRot", "boot NEW-LOAD branch -> ${if (prepareOnly) "pause()" else "play()"}")
         return SessionStart(
             accepted = true,
             resumedFromMs = startMs,
@@ -162,6 +180,7 @@ internal suspend fun ensureSessionPlaying(
             if (!restorePosition || player.state.value == PlaybackState.Ended) player.seekTo(0L)
             player.play()
         }
+        Log.d("NpRot", "boot SAME branch -> autoPlay=$autoPlay playCalled=$autoPlay")
         // 会话本来就在播同一媒体：进度是连续的，不算"从断点续播"，不弹提示。
         return SessionStart(accepted = true)
     }

@@ -1,6 +1,7 @@
 package com.noneplayer.plugins.player.ui
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -117,6 +118,7 @@ class PlaybackSession(
         item: MediaItem,
         restorePosition: Boolean = true,
         autoPlay: Boolean = true,
+        prepareOnly: Boolean = false,
         audioOnlyMode: Boolean? = null,
     ): SessionStart {
         val pending = startJob
@@ -133,6 +135,7 @@ class PlaybackSession(
                 context, registry, settings, history, player, this@PlaybackSession, item,
                 restorePosition = restorePosition,
                 autoPlay = autoPlay,
+                prepareOnly = prepareOnly,
                 audioOnlyMode = audioOnlyMode,
                 onSubtitleMatched = { key, hit -> scope.launch { settings.setSubtitleUri(key, hit) } },
             )
@@ -451,14 +454,17 @@ class PlaybackSession(
     /** 切换播放/暂停（迷你条 ▶/⏸ 直接控制会话） */
     fun toggle() {
         val p = _player.value ?: return
+        Log.d("NpRot", "session.toggle() state=${p.state.value}", Throwable())
         if (p.state.value == PlaybackState.Playing) p.pause() else p.play()
     }
 
     fun play() {
+        Log.d("NpRot", "session.play() state=${_player.value?.state?.value}", Throwable())
         _player.value?.play()
     }
 
     fun pause() {
+        Log.d("NpRot", "session.pause() state=${_player.value?.state?.value}", Throwable())
         _player.value?.pause()
     }
 

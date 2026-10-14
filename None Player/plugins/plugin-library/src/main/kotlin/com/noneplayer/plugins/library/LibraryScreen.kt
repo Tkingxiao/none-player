@@ -8,6 +8,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.tween
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
@@ -153,7 +155,10 @@ import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
-import com.noneplayer.kernel.ui.api.NpTabChannel
+import com.noneplayer.kernel.ui.api.NpDetailRequest
+import com.noneplayer.kernel.ui.api.NpFormHandoff
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.DisposableEffect
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
@@ -290,6 +295,44 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
             openPlayer(navigator, item)
         }
     }
+    // 详情页**只在类 PC 档渲染**（两个入口都拿 `isDesktopLike` 把关：横屏点卡片先进
+    // 剧集页，竖屏是直接进播放页）。但"只在类 PC 档"落在**渲染分支**上，不落进状态：
+    // 转出那一档就把它清空，转回横屏时左栏只剩列表，用户实报"竖屏播放页转横屏，
+    // 左边默认在首页/文件夹页，应该是横屏的剧集页"（2026-10-14 真机）。
+    // 留住状态、只按形态决定画不画，两个方向就都对了：竖屏不画它（不再"详情外显"），
+    // 转回横屏它自己回来。
+    val detailOpen = windowInfo.isDesktopLike && detailItem != null
+    // 剧集详情页在竖屏的对应物是播放页（这一档压根没有详情页）。右栏没在播时转屏，
+    // 若这里不登记落点，`NpFormHandoff` 就没有路线可走，人会被留在收成首页的媒体库上
+    // ——真机实报"横屏播放界面不播放时切竖屏直接返回首页"（2026-10-14 第二轮）。
+    // `play=0` = 只装载不起播：横屏那一档本来就没在播，转个屏不该把片子放起来。
+    val detailHandoff = detailItem?.takeIf { it.kind != MediaKind.AUDIO }
+    SideEffect {
+        NpFormHandoff.offerDetailRoute(
+            if (windowInfo.isDesktopLike && detailHandoff != null) playerRouteOf(detailHandoff, play = false)
+            else null,
+        )
+    }
+    DisposableEffect(Unit) {
+        onDispose { NpFormHandoff.clearDetailRouteWhileDesktop() }
+    }
+    // 竖屏点卡片是直接进播放页（这一档没有剧集页可进），窗口转横、播放页交还右栏时，
+    // 本页得把左栏落到正在播的那条上——请求由播放页发，见 [NpDetailRequest]。
+    // 只认**新鲜**请求：本页不在当前 Tab 时没人消费，迟到值会在很久以后凭空跳详情页。
+    val detailRequest by NpDetailRequest.flow.collectAsStateWithLifecycle()
+    LaunchedEffect(detailRequest, windowInfo.isDesktopLike) {
+        val tick = detailRequest ?: return@LaunchedEffect
+        if (!windowInfo.isDesktopLike) return@LaunchedEffect
+        if (System.currentTimeMillis() - tick.second > NpDetailRequest.MAX_AGE_MS) {
+            NpDetailRequest.consume(tick)
+            return@LaunchedEffect
+        }
+        if (detailItem?.uri != tick.first.uri) {
+            episodeFocus = null
+            detailItem = tick.first
+        }
+        NpDetailRequest.consume(tick)
+    }
 
     // ---- 媒体数据（扩展点聚合） ----
     // E10：不再本页自建装载器——AsyncImage 经 LocalImageLoader 默认值解析到
@@ -344,22 +387,15 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
         }
     }
 
-    // "我的"页「最近播放 · 全部」请求打开播放历史聚合 → 首页接住。
-    // 通道落在 kernel-ui-api（NpTabChannel）：两个页面分属不同插件，
-    // 插件间禁止互相依赖，共享点只能在双方都依赖的内核 UI 契约里。
-    LaunchedEffect(viewMode, mediaLoaded) {
-        if (viewMode != LibraryView.VIDEOS || !mediaLoaded) return@LaunchedEffect
-        NpTabChannel.consumeFor("home")?.let { mode -> aggregate = mode }
-    }
-
     // E54：文件夹层级是页内状态（不入返回栈），系统返回必须在此消费，
     // 否则返回事件落到导航层 → 切走 Tab / 弹回首页，用户看到"退出了文件夹页"。
     BackHandler(enabled = viewMode == LibraryView.FOLDERS && selectedFolder != null) {
         selectedFolder = selectedFolder?.substringBeforeLast('/', "")?.ifEmpty { null }
     }
     BackHandler(enabled = aggregate != null) { aggregate = null }
-    // 详情页在最上层：后注册的 BackHandler 优先，返回先退详情再谈层级
-    BackHandler(enabled = detailItem != null) { detailItem = null }
+    // 详情页在最上层：后注册的 BackHandler 优先，返回先退详情再谈层级。
+    // 认 `detailOpen` 而不是 `detailItem`：竖屏不画这一页，也就不该替返回键占位。
+    BackHandler(enabled = detailOpen) { detailItem = null }
 
     // ---- 权限与目录门控 ----
     var permissionTick by remember { mutableIntStateOf(0) }
@@ -517,7 +553,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // §8.3 起来源是 Room 历史（DataStore 断点键随 E11 迁移退役）：会话每 5s/暂停/切集
     // 写入仓库，这里一次读全量再经 CompositionLocal 下发，卡片与筛选只读
     // [LocalPlaybackProgress]，不再各开订阅。
-    val historyEntries by history.recent.collectAsStateWithLifecycle(initialValue = emptyList())
+    val historyEntries by history.recent.collectAsStateWithLifecycle()
     // 审查批次 A3：键必须是**跨来源唯一键** `sourceId:mediaId`，不能用裸 `mediaId`。
     // 历史的唯一键本来就是它（[HistoryEntry.keyOf]，E73 分命名空间），但这里退化成裸 ID：
     // 不同 MediaSourceProvider 出现相同媒体 ID 时，associate 会互相覆盖同一键，
@@ -577,7 +613,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // 收藏键（卡片红心 / 菜单文案 / 我的页联动都读它）
     val favoriteKeys by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
     // 收藏键（按收藏时间倒序）——「我的收藏」聚合的排序依据
-    val favoriteKeysList by history.favorites.collectAsStateWithLifecycle(initialValue = emptyList())
+    val favoriteKeysList by history.favorites.collectAsStateWithLifecycle()
     // 插件贡献的菜单项（ContextMenuItem 扩展点；分享是本插件自己的实现）
     val contextItems by remember { kernel.registry.observe<ContextMenuItem>() }
         .collectAsStateWithLifecycle(initialValue = kernel.registry.query<ContextMenuItem>())
@@ -599,7 +635,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val title: String
     val subtitle: String
     when {
-        detailItem != null -> {
+        detailOpen -> {
             val shown = episodeFocus?.takeIf { it.folder == detailItem!!.folder } ?: detailItem!!
             // 顶栏标题直接用视频名（卡片同款展示名），不再写死「视频详情」
             title = shown.cardTitle
@@ -651,17 +687,17 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                     titleStyle = when {
                         // 平板文件夹名用 22sp 会顶满顶栏（用户实报「标题文字过大」）
                         viewMode == LibraryView.FOLDERS && !compact -> NpTypography.titleMedium
-                        viewMode == LibraryView.FOLDERS || detailItem != null -> NpTypography.titleLarge
+                        viewMode == LibraryView.FOLDERS || detailOpen -> NpTypography.titleLarge
                         else -> null
                     },
                     titleKey = when {
-                        detailItem != null -> "detail:${detailItem!!.folder ?: detailItem!!.id}"
+                        detailOpen -> "detail:${detailItem!!.folder ?: detailItem!!.id}"
                         viewMode == LibraryView.FOLDERS -> "folder:${selectedFolder ?: ""}"
                         aggregate != null -> "agg:$aggregate"
                         else -> null
                     },
                     onBack = when {
-                        detailItem != null -> ({
+                        detailOpen -> ({
                             detailItem = null
                             episodeFocus = null
                         })
@@ -673,7 +709,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                     },
                     trailing = {
                         // 详情页是聚焦页：顶栏只留返回，不再挂搜索入口
-                        if (detailItem == null) {
+                        if (!detailOpen) {
                             // §8.3：播放历史聚合里给一个「清空」（确认后清 Room 历史）
                             if (aggregate == "history") {
                                 NpIconButton(
@@ -740,7 +776,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                         val folders = folderUris
                         val stage = when {
                             libraryPreferences == null -> LibraryStage.Loading
-                            detailItem != null -> LibraryStage.Detail(detailItem!!)
+                            detailOpen -> LibraryStage.Detail(detailItem!!)
                             sources.isEmpty() -> LibraryStage.NoSource
                             missingPermission -> LibraryStage.NoPermission
                             // 目录还没读到（冷启的头几帧）：内容已在手就直接出内容，否则给
@@ -760,14 +796,21 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                             contentKey = { if (it is LibraryStage.Detail) "detail" else it },
                             // 层级前进/后退带 8dp 方向位移（"读得出方向"的最小量），同级切换只交叉淡入；
                             // 位移在轻量档 / Reduce Motion 下并掉（§9.6）。
+                            // **转屏交接期间整块免掉**：交还右栏时详情页是"落位"而不是"下钻"，
+                            // 首页与详情页叠着交叉淡入，撞上系统转屏动画就是实报的闪屏
+                            // （真机录屏逐帧可见两层同时存在，见《播放体验与动效审查》E135）。
                             transitionSpec = {
-                                val forward = targetState.rank > initialState.rank
-                                val shift = if (stageShiftAllowed && targetState.rank != initialState.rank) {
-                                    if (forward) stageShiftPx else -stageShiftPx
-                                } else { 0 }
-                                (fadeIn(tween(stageFadeMs, easing = NpEasing.Silk)) +
-                                    slideInHorizontally(tween(stageFadeMs, easing = NpEasing.Silk)) { shift }) togetherWith
-                                    fadeOut(tween(stageExitMs, easing = NpEasing.SilkExit))
+                                if (NpFormHandoff.isSilent) {
+                                    EnterTransition.None togetherWith ExitTransition.None
+                                } else {
+                                    val forward = targetState.rank > initialState.rank
+                                    val shift = if (stageShiftAllowed && targetState.rank != initialState.rank) {
+                                        if (forward) stageShiftPx else -stageShiftPx
+                                    } else { 0 }
+                                    (fadeIn(tween(stageFadeMs, easing = NpEasing.Silk)) +
+                                        slideInHorizontally(tween(stageFadeMs, easing = NpEasing.Silk)) { shift }) togetherWith
+                                        fadeOut(tween(stageExitMs, easing = NpEasing.SilkExit))
+                                }
                             },
                             label = "libraryStage",
                         ) { stageValue ->
@@ -802,6 +845,10 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                         // 切集是播放动作，不是打开另一页。锚点 detailItem 保持不动，
                                         // 否则整页 AnimatedContent 会把列表文字淡出再淡入（重影）。
                                         episodeFocus = next
+                                    },
+                                    favorited = HistoryEntry.keyOf(detail) in favoriteKeys,
+                                    onToggleFavorite = {
+                                        scope.launch { history.toggleFavorite(detail) }
                                     },
                                 )
                             }
@@ -2518,17 +2565,33 @@ internal fun openPlayer(
     immersive: Boolean = false,
     audioOnly: Boolean = false,
 ) {
+    navigator.navigate(playerRouteOf(item, fromStart, immersive, audioOnly))
+}
+
+/**
+ * 播放页路由字符串——[openPlayer] 与转屏交接（[com.noneplayer.kernel.ui.api.NpFormHandoff.offerDetailRoute]）
+ * 共用一份，两处各拼必然在参数演进时漂。
+ *
+ * [play] = false 带 `play=0`：**只装载、不起播**。转屏交接自横屏详情页时用——
+ * 那一档本来就没在播，把设备转个方向不该替用户按下播放键。
+ */
+internal fun playerRouteOf(
+    item: MediaItem,
+    fromStart: Boolean = false,
+    immersive: Boolean = false,
+    audioOnly: Boolean = false,
+    play: Boolean = true,
+): String {
     fun enc(value: String) = android.net.Uri.encode(value, "")
-    navigator.navigate(
-        route = "player?uri=${enc(item.uri)}" +
-            "&title=${enc(item.title)}" +
-            "&mime=${enc(item.mimeType)}" +
-            "&id=${enc(item.id)}" +
-            // § 长按菜单「从头播放」：不恢复断点（路由参数带默认值，属契约增量）
-            (if (fromStart) "&from=start" else "") +
-            (if (immersive) "&fs=1" else "") +
-            (if (audioOnly) "&audio=1" else ""),
-    )
+    return "player?uri=${enc(item.uri)}" +
+        "&title=${enc(item.title)}" +
+        "&mime=${enc(item.mimeType)}" +
+        "&id=${enc(item.id)}" +
+        // § 长按菜单「从头播放」：不恢复断点（路由参数带默认值，属契约增量）
+        (if (fromStart) "&from=start" else "") +
+        (if (immersive) "&fs=1" else "") +
+        (if (audioOnly) "&audio=1" else "") +
+        (if (play) "" else "&play=0")
 }
 
 /** E20：≤此规模在组合内同步排序（零延迟、无闪烁）；超过则先原序占位，后台排完再替换 */

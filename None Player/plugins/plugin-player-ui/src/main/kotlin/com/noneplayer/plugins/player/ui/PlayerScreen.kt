@@ -38,6 +38,7 @@ import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -111,6 +112,8 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.layout
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.Key
@@ -208,9 +211,13 @@ import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
+import com.noneplayer.kernel.ui.api.NpDetailRequest
 import com.noneplayer.kernel.ui.api.PlaybackContext
 import com.noneplayer.kernel.ui.api.PlaybackMenuContributor
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
+import com.noneplayer.kernel.ui.api.NpFormHandoff
+import com.noneplayer.kernel.ui.api.NpHandoffTarget
+import com.noneplayer.kernel.ui.api.NpPicture
 import com.noneplayer.kernel.ui.api.NpPlayerPaneMotion
 import com.noneplayer.plugins.player.ui.controls.NpSeekBar
 import com.noneplayer.plugins.player.ui.controls.StatusClockBattery
@@ -434,6 +441,13 @@ fun PlayerScreen(
     immersiveEntry: Boolean = false,
     audioOnlyEntry: Boolean? = null,
     manualPipEntry: Boolean = false,
+    /**
+     * false = **只装载、不起播**（路由 `play=0`）。
+     *
+     * 转屏交接自横屏剧集详情页时用：那一档本来就没在播，落点就该是"竖屏播放页的未播放态"，
+     * 而不是被人替按了播放键。用户自己点进来的路径恒为 true（媒体库/迷你条/右栏 ⛶）。
+     */
+    startPlaying: Boolean = true,
 ) {
     val kernel = LocalKernel.current
     val context = LocalContext.current
@@ -516,6 +530,21 @@ fun PlayerScreen(
     val coverFadeMs = npDuration(Motion.ReduceFade)
     var stageRectInWindow by remember { mutableStateOf<Rect?>(null) }
     val surfaceViewRef = remember { mutableStateOf<TextureView?>(null) }
+    // 右栏交接过来的最后一帧：本页 Surface 出画前用它顶着。只认"落点是本页"的那一枚
+    // （转横屏那一轮是反方向，封面归右栏）。
+    val handoffPoster = remember(uri) {
+        NpFormHandoff.posterFor(uri, NpHandoffTarget.PLAYER_PAGE)?.asImageBitmap()
+    }
+    // 本页在栈上时，形态变化由本页自己适配（见 `LaunchedEffect(isDesktopLike)` 那段），
+    // 外壳的转屏交接不得再推第二个播放页上来。
+    DisposableEffect(Unit) {
+        NpFormHandoff.notePlayerPage(true)
+        onDispose { NpFormHandoff.notePlayerPage(false) }
+    }
+    // 转横屏（进入类 PC 档）时画面归右栏，外壳在**第一帧横屏画出来之前**先来这里取走
+    // 最后一帧与它此刻的矩形，再调 `retire` 退本页（见下面登记处）。抓帧在 FLAG_SECURE
+    // 下拿不到画面，那就交不出东西——交接退回纯黑封面，也别把一张黑图当成画面飞过去。
+    val handoffToken = remember { Any() }
     LaunchedEffect(coverTakeoff) {
         coverTakeoff ?: return@LaunchedEffect
         coverFlight.snapTo(0f)
@@ -546,7 +575,15 @@ fun PlayerScreen(
     // 队列解析都要花时间，这段时间组合已经在渲染了，而引擎状态仍是**上一个**媒体
     // 留下的值。没有这个闸门时，进新视频会先闪一屏"播放结束"（上一个视频正常播完）
     // 或旧错误面板，再开始播放。
-    var mediaOpened by remember(uri) { mutableStateOf(false) }
+    // 右栏转屏交过来时会话已经在播这一条。装载协程至少要等一帧，这段时间若整页只画
+    // 转圈，竖屏第一帧就是一块白——系统转屏截图会把它收进去。同一条媒体直接出播放页。
+    var mediaOpened by remember(uri) {
+        mutableStateOf(
+            session.nowPlayingSummary.value?.item?.let { item ->
+                (mediaId.isNotEmpty() && item.id == mediaId) || item.uri == uri
+            } == true,
+        )
+    }
 
     /**
      * 左上角「已为您定位到 xx:xx」续播提示的落点（毫秒）；null = 不显示。
@@ -597,6 +634,7 @@ fun PlayerScreen(
             // （不同媒体 / 新会话，那条分支照旧 play）。此前"进页一律 play()"与类 PC
             // 右栏的被动语义正好相反，来回按 F/⛶ 会读成"暂停只在浏览侧有效"。
             autoPlay = fromStart,
+            prepareOnly = !startPlaying,
             audioOnlyMode = audioOnlyEntry,
         )
         // 封面：装载链从权威队列项带回；拿不到（会话已在播同一媒体 / 队列里没有本项）
@@ -678,6 +716,32 @@ fun PlayerScreen(
         ?.let { mediaMemoryKey(it.sourceId, it.id) }
         ?: mediaId.takeIf { it.isNotEmpty() }?.let { mediaMemoryKey("", it) }
             .orEmpty()
+    // 转横屏（进入类 PC 档）时画面归右栏，外壳在**第一帧横屏画出来之前**调这里取走
+    // 最后一帧与它此刻的矩形（[NpPicture]），再调 `retire` 退本页。不这么做，那一帧
+    // 就是"播放内容被全屏放大成横屏版式"（用户实报"生硬且奇怪"）。
+    // 登记在 `currentItem` 之后：退页时左栏要落到正在播的那条，否则横屏里左栏还停在别处——
+    // 交接侧在退页之前顺手带走这一步，本页下面那条兜底的 `LaunchedEffect` 就不必再跑一遍。
+    DisposableEffect(handoffToken) {
+        NpFormHandoff.bindStageHandoff(
+            handoffToken,
+            capture = {
+                val bounds = NpPlayerPaneMotion.stageBounds()
+                val view = surfaceViewRef.value
+                if (bounds == null || view == null || screenshotBlocked ||
+                    view.width <= 1 || view.height <= 1
+                ) {
+                    null
+                } else {
+                    NpPicture(uri, runCatching { view.bitmap }.getOrNull(), bounds)
+                }
+            },
+            retire = {
+                currentItem?.let { NpDetailRequest.request(it) }
+                navigator.popBackStack()
+            },
+        )
+        onDispose { NpFormHandoff.releaseStageHandoff(handoffToken) }
+    }
     val headerTitle = currentItem?.cardTitle?.takeIf { it.isNotBlank() } ?: displayTitle
     val headerMimeType = currentItem?.mimeType?.takeIf { it.isNotBlank() } ?: mimeType
     // 容器名三级取值（越靠前越可信）：
@@ -781,19 +845,31 @@ fun PlayerScreen(
     }
 
     /**
+     * 类 PC 档的「交还浏览态」：先把当前画面快照交给右栏做共享元素补间，再退掉本页。
+     * 右栏靠"会话有没有当前项"自行出现（`DetailPaneProvider.isOccupied`），无需传参。
+     */
+    fun returnToBrowsePane() {
+        if (isDesktopLike && !session.audioOnly.value && !screenshotBlocked) {
+            // 起点用**画面本体**的矩形（`recordStage` 登记的），不是整块舞台黑底：
+            // 舞台在横屏形态下就是整屏，拿它当起点会让这一帧先从"整屏"缩到画面、
+            // 再缩到右栏，多出一段没有来由的形变。两端同为画面本体，补间才是纯
+            // 缩小 + 滑移，与右栏落地处严丝合缝。
+            val bounds = NpPlayerPaneMotion.stageBounds()
+            val frame = runCatching { surfaceViewRef.value?.bitmap }.getOrNull()
+            if (bounds != null && frame != null) {
+                NpPlayerPaneMotion.returnToPane(player.currentUri.value ?: uri, frame, bounds)
+            }
+        }
+        navigator.popBackStack()
+    }
+
+    /**
      * 「返回类」出口（系统返回键 / Esc / 左上角返回箭头）：**保证能出去**。
      * 有全屏可退 → 退全屏留在播放页；否则 → 离开播放页。
      */
     fun exitFullscreenOrLeave() {
         if (orientationLock != OrientationLock.Landscape) {
-            if (isDesktopLike && !session.audioOnly.value && !screenshotBlocked) {
-                val bounds = stageRectInWindow
-                val frame = runCatching { surfaceViewRef.value?.bitmap }.getOrNull()
-                if (bounds != null && frame != null) {
-                    NpPlayerPaneMotion.returnToPane(player.currentUri.value ?: uri, frame, bounds)
-                }
-            }
-            navigator.popBackStack()
+            returnToBrowsePane()
             return
         }
         // 用户点过「全屏」：这一次返回用于退出全屏（请求竖向，成功与否都不吞掉下次返回）
@@ -1625,6 +1701,47 @@ fun PlayerScreen(
         }
     }
 
+    // ---- 转屏收口（2026-10-14 真机实报）----
+    // Activity 声明了 configChanges，转屏不重建本页：弹层状态与"画面归谁"的判断都
+    // 跨形态活下来，下面两类异常同出于此。
+    var wasPortrait by remember { mutableStateOf(windowIsPortrait) }
+    // ① 弹层：横屏里打开的「详情」卡 / 选集 / 选项表，转竖屏后会原样盖在新版式上，
+    //    而竖屏直接进页时它们全是关着的（用户实报"视频详情外显"）。弹层本就锚在
+    //    随版式搬走的按钮上，转屏即收起——与锁定、进 PiP 两处同一口径。
+    LaunchedEffect(windowIsPortrait) {
+        if (wasPortrait != windowIsPortrait) {
+            wasPortrait = windowIsPortrait
+            dismissAllOverlays()
+        }
+    }
+    var wasDesktopLike by remember { mutableStateOf(isDesktopLike) }
+    // ② 画面归属：类 PC 档的画面住在右栏，本页只是它的整屏分身。竖屏期间进的本页，
+    //    窗口转横（进入类 PC 档）后仍占着整屏，读起来就是"转横屏直接全屏视频"，
+    //    而这一档本该看到"详情 + 右栏"的横屏视频界面——把画面交还右栏、退掉本页。
+    //    只认**边沿**：从右栏「⛶」进本页时窗口本就是类 PC，那次不该被弹回去。
+    //    仅听音频不交接（整屏音频页是用户主动打开的）；装载未完成时不交接——
+    //    `startPlayback` 挂在本页组合作用域上，此刻退页会把它一起取消。
+    LaunchedEffect(isDesktopLike) {
+        val entered = isDesktopLike && !wasDesktopLike
+        wasDesktopLike = isDesktopLike
+        // `currentItem != null` 与右栏的 `isOccupied()` 同一条判据：会话没有当前项
+        // （装载失败、已被清空）时右栏根本不会出现，那时退本页就等于把人丢回列表——
+        // 真机拿一条本机解不了的样本复现过（画面停在错误面板，转横屏直接回到首页）。
+        if (!entered || !mediaOpened || currentItem == null || inPipMode || audioOnly) return@LaunchedEffect
+        // 外壳（转屏回调）已经把这轮交接连退页一起发起了：这里再走一遍会多退一页，
+        // 把媒体库首页也弹掉。兜底只在外壳没接手时生效。
+        if (NpFormHandoff.tookOverToPane()) return@LaunchedEffect
+        // 右栏刚把画面交过来的那几百毫秒里，窗口尺寸可能回跳一帧。那一帧不能 pop，
+        // 否则竖屏播放页会立刻被拆掉，用户看见的是首页。
+        if (NpFormHandoff.holdsPlayer()) return@LaunchedEffect
+        // 类 PC 档的视频界面是"左栏剧集页 + 右栏画面"。竖屏点卡片进来时媒体库并没有
+        // 详情页状态（那一档压根不进详情页），交还前请它把左栏落到正在播的这条上。
+        currentItem?.let { NpDetailRequest.request(it) }
+        // 这是形态换了画面归属者，不是用户翻页：整页淡入淡出/位移必须免掉
+        NpFormHandoff.mark()
+        returnToBrowsePane()
+    }
+
     // Preferences are restored once by the session, never collected back into live UI intent.
     fun toggleAudioOnlyWithMemory() {
         // 记忆由会话写（唯一写路径，迷你条与页内两处共用同一条），页面只给反馈
@@ -1814,6 +1931,11 @@ fun PlayerScreen(
                         mirrored = mirrored,
                         rotation = rotation,
                         onSurfaceView = { surfaceViewRef.value = it },
+                        // 画面**本体**每次布局上报矩形：转屏交接的起飞与落点都要它。
+                        // `stageRectInWindow` 是整块舞台黑底（横屏形态下就是整屏），
+                        // 拿它当飞行端点会让补间两端各差一圈黑边。
+                        onVideoBounds = { NpPlayerPaneMotion.recordStage(it) },
+                        handoffPoster = handoffPoster,
                         modifier = Modifier.fillMaxSize(),
                     )
                     // M2 共享封面：从卡片机位补间到舞台（挂在舞台内，坐标相对舞台）
@@ -1827,7 +1949,10 @@ fun PlayerScreen(
                     // 播放中不出现——它只在"用户可能需要我"的时刻存在。
                     // 锁定态不出现：那是舞台上的第二个可点元素，破坏"只有解锁钮可点"。
                     CenterResumeButton(
-                        visible = state == PlaybackState.Paused && !userDragging && !inPipMode && !stageLocked,
+                        // `Ready` = 装载完没起播（横屏详情页 `play=0` 转竖屏的落点）。
+                        // 没有这枚钮，未播放态就只剩一条底部播放键，用户看不出"可以按"。
+                        visible = (state == PlaybackState.Paused || state == PlaybackState.Ready) &&
+                            !userDragging && !inPipMode && !stageLocked,
                         onPlay = ::togglePlay,
                         modifier = Modifier.align(Alignment.Center),
                     )
@@ -2222,6 +2347,9 @@ fun PlayerScreen(
                                 mirrored = mirrored,
                                 rotation = rotation,
                                 onSurfaceView = { surfaceViewRef.value = it },
+                                // 同横屏形态：竖屏舞台也要报画面本体的矩形（转横屏时的起飞点）
+                                onVideoBounds = { NpPlayerPaneMotion.recordStage(it) },
+                                handoffPoster = handoffPoster,
                                 modifier = Modifier.fillMaxSize(),
                             )
                             // M2 共享封面：从卡片机位补间到舞台（挂在舞台内，坐标相对舞台）
@@ -2401,6 +2529,8 @@ fun PlayerScreen(
                         val current = currentItem
                         // 标题不在这里重复：设计稿的标题归常驻 playerbar（`.pttl b`），
                         // 信息区首行就是 pinfo 的 mono 元数据行。
+                        // HDR 标识（HDR10/HLG）：来自起播探测的容器声明；SDR/未探测为 null。
+                        val hdrLabel by player.hdrLabel.collectAsStateWithLifecycle()
                         val meta = buildList {
                             current?.sizeBytes?.let { bytes ->
                                 if (bytes > 0) add(formatFileSize(bytes))
@@ -2408,6 +2538,7 @@ fun PlayerScreen(
                             current?.resolutionLabel
                                 ?.takeIf { it.isNotEmpty() }
                                 ?.let { add(it) }
+                            hdrLabel?.takeIf { it.isNotBlank() }?.let { add(it) }
                             headerContainer?.let { add(it) }
                             current?.folder
                                 ?.takeIf { it.isNotBlank() }
@@ -4736,8 +4867,28 @@ internal fun VideoStage(
     mirrored: Boolean = false,
     rotation: Int = 0,
     onSurfaceView: (TextureView?) -> Unit = {},
+    /**
+     * 画面**本体**每次布局上报自己在本窗口里的矩形。转屏交接的起飞与落点都要它
+     * （[com.noneplayer.kernel.ui.api.NpPlayerPaneMotion]）：登记整页/整栏会把黑边
+     * 一起算进去，补间两端各差一圈。
+     */
+    onVideoBounds: ((Rect) -> Unit)? = null,
+    /** 右栏交接过来的最后一帧。新 Surface 出画前盖住黑/白空档，只此一层，不是第二个播放器。 */
+    handoffPoster: ImageBitmap? = null,
     modifier: Modifier = Modifier,
 ) {
+    var releasePoster by remember(handoffPoster) { mutableStateOf(false) }
+    LaunchedEffect(handoffPoster) {
+        if (handoffPoster == null) return@LaunchedEffect
+        repeat(3) { withFrameMillis { } }
+        releasePoster = true
+    }
+    val posterFadeMs = if (npDisplacementAllowed()) npDuration(Motion.ReduceFade) else 0
+    val posterAlpha by animateFloatAsState(
+        targetValue = if (handoffPoster != null && !releasePoster) 1f else 0f,
+        animationSpec = tween(posterFadeMs, easing = NpEasing.SilkExit),
+        label = "handoffPoster",
+    )
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         // 视频画面：按比例模式决定布局约束；黑边/裁剪行为随模式。
         // 竖向片（比例 < 1）在 FIT 下改「先匹配高度」：横向窗口里默认的先宽后高会被
@@ -4758,7 +4909,14 @@ internal fun VideoStage(
                 }
             }
         }
-        Box(modifier = stageModifier) {
+        val reportVideoBounds = onVideoBounds
+        Box(
+            modifier = if (reportVideoBounds == null) {
+                stageModifier
+            } else {
+                stageModifier.onGloballyPositioned { reportVideoBounds(it.boundsInWindow()) }
+            },
+        ) {
             AndroidView(
                 factory = { ctx -> TextureView(ctx).also { onSurfaceView(it) } },
                 update = { view ->
@@ -4776,6 +4934,14 @@ internal fun VideoStage(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
+            if (handoffPoster != null && posterAlpha > 0.01f) {
+                Image(
+                    bitmap = handoffPoster,
+                    contentDescription = null,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().graphicsLayer { alpha = posterAlpha },
+                )
+            }
             // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
             // E131：样式由「字幕设置」面板驱动（颜色/大小/斜体/总开关）
             SubtitleLayer(

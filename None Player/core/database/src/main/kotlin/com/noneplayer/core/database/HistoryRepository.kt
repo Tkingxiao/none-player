@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -47,7 +48,16 @@ class HistoryRepository(context: Context) {
      * 一次写入会回灌两条全表查询。共享后 N 个收集者共用一条查询，
      * 无人收集 5s 后自动停订。
      */
-    val recent: Flow<List<HistoryEntry>> by lazy {
+    /**
+     * **暴露 `StateFlow` 而不是 `Flow`**：`stateIn` 产出的本来就是 StateFlow，声明成
+     * `Flow` 会逼调用方写 `collectAsStateWithLifecycle(initialValue = emptyList())`
+     * ——那**第一帧的空列表**不是"确实没有记录"，而是"还没读到"，与 E126（scanFolderUris）
+     * 和 E105（媒体列表首帧）是同一族坑，真机实报过后果：首页「继续观看」整节因这一帧
+     * 消失，`LazyListState` 又按**下标**恢复，返回时正好落到下一节的边界上，
+     * 用户看到的就是"进播放页再返回，首页莫名下滑、继续观看被挡住"。
+     * 直接给 StateFlow，初值取现值，没有那一帧。
+     */
+    val recent: StateFlow<List<HistoryEntry>> by lazy {
         dao.recent()
             .map { rows -> rows.map { it.toEntry() } }
             .stateIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
@@ -62,8 +72,9 @@ class HistoryRepository(context: Context) {
      */
     val count: Flow<Int> by lazy { dao.count() }
 
-    /** 收藏键的**唯一一条** DAO 订阅（P1-6）：下面两个视图都从它派生 */
-    private val favoriteKeysFlow: Flow<List<String>> by lazy {
+    /** 收藏键的**唯一一条** DAO 订阅（P1-6）：下面两个视图都从它派生。
+     *  StateFlow 的理由与 [recent] 同一条——见那里的说明。 */
+    private val favoriteKeysFlow: StateFlow<List<String>> by lazy {
         dao.favoriteKeys().stateIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
     }
 
@@ -71,7 +82,7 @@ class HistoryRepository(context: Context) {
     val favoriteKeys: Flow<Set<String>> by lazy { favoriteKeysFlow.map { it.toSet() } }
 
     /** 收藏键（按收藏时间倒序）——聚合列表与我的页横排的排序依据 */
-    val favorites: Flow<List<String>> by lazy { favoriteKeysFlow }
+    val favorites: StateFlow<List<String>> by lazy { favoriteKeysFlow }
 
     fun isFavorite(mediaKey: String): Flow<Boolean> = dao.isFavorite(mediaKey)
 

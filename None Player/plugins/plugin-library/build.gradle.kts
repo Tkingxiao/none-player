@@ -32,6 +32,8 @@ dependencies {
     implementation(project(":core:data"))
     implementation(project(":core:database"))
     implementation(project(":core:ui"))
+    // 详情页的 HDR 标识按需调 FormatProbe（与起播探测同一份缓存与判读口径）
+    implementation(project(":core:media-android"))
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.core.ktx)

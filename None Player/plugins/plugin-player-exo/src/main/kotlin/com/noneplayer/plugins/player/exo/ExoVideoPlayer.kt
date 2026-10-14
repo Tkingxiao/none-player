@@ -106,6 +106,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private val _decodeNotice = MutableStateFlow<String?>(null)
     override val decodeNotice: StateFlow<String?> = _decodeNotice.asStateFlow()
 
+    /** HDR 概况（"HDR10"/"HLG"；SDR/未知/未探测为 null）——起播探测结果 */
+    private val _hdrLabel = MutableStateFlow<String?>(null)
+    override val hdrLabel: StateFlow<String?> = _hdrLabel.asStateFlow()
+
     /** 邻域预探测的协程句柄：真实装载一开始就取消它（见 [prefetchProbeWindow]） */
     private var prefetchJob: Job? = null
 
@@ -445,6 +449,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         terminalFailure = false
         _state.value = PlaybackState.Buffering
         _decodeNotice.value = null
+        _hdrLabel.value = null
         val myGeneration = ++prepareGeneration
         NpPerf.begin("probe uri=${uri.substringAfterLast('/')}")
         prepareJob = scope.launch {
@@ -476,6 +481,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     probedContainer = probe.container
                     probedVideoCodec = probe.videoCodec
                     probedAudioCodec = probe.audioCodec
+                    _hdrLabel.value = probe.hdr
                     // C21：仅软解可用时给前置提示（能播，但可能发热/掉帧）
                     _decodeNotice.value = if (probe.softwareVideoOnly) {
                         "该视频仅有软件解码器可用，高码率下可能掉帧或发热"
@@ -745,6 +751,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         _state.value = PlaybackState.Idle
         clearCues()
         _decodeNotice.value = null
+        _hdrLabel.value = null
     }
 
     override fun playNext() {

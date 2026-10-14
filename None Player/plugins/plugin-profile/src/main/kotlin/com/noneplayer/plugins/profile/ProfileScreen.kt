@@ -14,11 +14,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -40,6 +46,7 @@ import com.noneplayer.core.media.episodeLabel
 import com.noneplayer.core.media.kind
 import com.noneplayer.core.media.resolutionLabel
 import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.NpAppTopBar
 import com.noneplayer.core.ui.NpCarouselItem
 import com.noneplayer.core.ui.NpCoverBox
 import com.noneplayer.core.ui.NpCoverPlaceholder
@@ -62,9 +69,7 @@ import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.rememberMediaItems
-import com.noneplayer.kernel.ui.api.LocalNpTabSwitcher
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
-import com.noneplayer.kernel.ui.api.NpTabChannel
 import com.noneplayer.kernel.ui.api.TabProvider
 import com.noneplayer.core.ui.LocalNpTopBarInset
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
@@ -88,6 +93,20 @@ class ProfileTabProvider : TabProvider {
 }
 
 /**
+ * 「我的」的两块内容页（播放历史 / 我的收藏）。
+ *
+ * 它们是**本 Tab 内的准二级页**，不是首页的聚合视图：早先这里走跨 Tab 通道
+ * `NpTabChannel.request("home", …)` + `switchTab("home")`，点一下「播放历史」
+ * 底部条/Rail 的选中态就跑到「首页」，返回也落回首页——用户实报"我明明在『我的』
+ * 里点的东西"（2026-10-14 真机）。页内状态 + 顶栏返回键才是这一族入口该有的样子
+ * （与媒体库详情页同一手法：选中态不动，返回回到本页）。
+ */
+private enum class ProfileSubPage(val title: String) {
+    HISTORY("播放历史"),
+    FAVORITES("我的收藏"),
+}
+
+/**
  * "我的"页——设计稿 `mineView()`。
  *
  * 结构：四个入口行 → 最近播放横滑 → 播放列表/插件清单 → 关于。
@@ -104,8 +123,11 @@ private fun ProfileScreen(navigator: Navigator) {
     val ink = LocalNpInk.current
     val windowInfo = LocalNpWindowInfo.current
     val compact = windowInfo.isCompact
-    // 跳到同为顶层标签的设置页（见 [LocalNpTabSwitcher] 的说明）
-    val switchTab = LocalNpTabSwitcher.current
+
+    var subPage by rememberSaveable { mutableStateOf<ProfileSubPage?>(null) }
+    val page = subPage
+    // 返回键先退本页的准二级页，再谈 Tab/导航层（与 E54 的文件夹层级同一规则）
+    androidx.activity.compose.BackHandler(enabled = page != null) { subPage = null }
 
     // 最近播放：**真实播放记录**——有进度（>0）的条目按"上次播放时间"倒序。
     // 此前是按 joinedAtMs（入库时间）倒序的临时近似；D2/D7 接线后：
@@ -114,41 +136,24 @@ private fun ProfileScreen(navigator: Navigator) {
     val mediaState = rememberMediaItems()
     // §8.3：播放历史/收藏（进度与时间序都读 Room 仓库）
     val history = remember { kernel.services.get<HistoryRepository>() }
-    val historyEntries by history.recent.collectAsStateWithLifecycle(initialValue = emptyList())
+    val historyEntries by history.recent.collectAsStateWithLifecycle()
     // 审查批次 A3：键用跨来源唯一键 `sourceId:mediaId`（= [HistoryEntry.keyOf]），
     // 与媒体库页同口径。裸 mediaId 会让不同来源的同 ID 条目互相覆盖。
     val positions = remember(historyEntries) { historyEntries.associate { it.mediaKey to it.positionMs } }
     val lastAt = remember(historyEntries) { historyEntries.associate { it.mediaKey to it.lastPlayedAt } }
-    val recent = remember(mediaState, positions, lastAt) {
+    // 有进度且按最近播放倒序的全量列表——首页横滑取前 12 条，准二级页取全部
+    val playedItems = remember(mediaState, positions, lastAt) {
         (mediaState ?: emptyList())
             .filter { (positions[HistoryEntry.keyOf(it)] ?: 0L) > 0L }
             .sortedByDescending { lastAt[HistoryEntry.keyOf(it)] ?: 0L }
-            .take(12)
     }
+    val recent = remember(playedItems) { playedItems.take(12) }
     val historyCount = remember(positions) { positions.count { it.value > 0L } }
     // §8.3 收藏：与媒体库长按菜单的「加入收藏」共用同一个仓库 → 天然联动
-    val favorites by history.favorites.collectAsStateWithLifecycle(initialValue = emptyList())
+    val favorites by history.favorites.collectAsStateWithLifecycle()
     val favoriteItems = remember(mediaState, favorites) {
         val list = mediaState ?: emptyList()
         favorites.mapNotNull { key -> list.firstOrNull { HistoryEntry.keyOf(it) == key } }
-    }
-
-    /**
-     * 打开首页的「播放历史」聚合。
-     *
-     * 两步走：意图交给内核的 [NpTabChannel]（首页取用后打开对应聚合），
-     * 再切到首页 Tab。`switchTab` 必须在意图之后调用——先切 Tab 再写意图，
-     * 首页可能已经完成本轮组合而消费不到。
-     */
-    fun openHistory() {
-        NpTabChannel.request("home", "history")
-        switchTab("home")
-    }
-
-    /** 打开首页的「我的收藏」聚合（与 [openHistory] 同一套跨 Tab 通道） */
-    fun openFavorites() {
-        NpTabChannel.request("home", "favorites")
-        switchTab("home")
     }
 
     fun notYet(name: String) {
@@ -160,12 +165,36 @@ private fun ProfileScreen(navigator: Navigator) {
     // 它下面的卡片就整体再错峰入场一遍，滚动全程都背着几十个入场动画。
     val staggerWindow = npStaggerWindow()
 
+    // 准二级页的数据：历史 = 有进度的全量（按最近播放倒序）；收藏 = 收藏键命中的条目。
+    // 与首页两块读同一份派生结果，两处不会再各排一次序。
+    val pageItems = if (page == ProfileSubPage.FAVORITES) favoriteItems else playedItems
+
     NpPageScaffold(
         maxContentWidth = if (compact) Dp.Unspecified else windowInfo.maxContentWidth,
         topBar = {
-            ProfileTopBar(compact = compact)
+            if (page == null) {
+                ProfileTopBar(compact = compact)
+            } else {
+                NpAppTopBar(
+                    title = page.title,
+                    subtitle = "${pageItems.size} 项",
+                    compact = compact,
+                    onBack = { subPage = null },
+                )
+            }
         },
     ) { contentModifier ->
+        if (page != null) {
+            ProfileSubPage(
+                page = page,
+                items = pageItems,
+                positions = positions,
+                contentModifier = contentModifier,
+                compact = compact,
+                onOpen = { openPlayer(navigator, it) },
+            )
+            return@NpPageScaffold
+        }
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
             LazyColumn(
                 modifier = contentModifier.fillMaxSize(),
@@ -190,14 +219,14 @@ private fun ProfileScreen(navigator: Navigator) {
                             // 设计稿是「128 条记录 · 今日 6 条」的假数据；
                             // 这里给真实条数（有播放记录即 > 0），拿不到就不显示数字
                             subtitle = if (historyCount > 0) "$historyCount 条记录" else null,
-                            onClick = { openHistory() },
+                            onClick = { subPage = ProfileSubPage.HISTORY },
                         )
                         EntryRow(
                             icon = NpIcon.Heart,
                             title = "我的收藏",
                             // §8.3：真实收藏条数（数据来自与媒体库长按菜单同一个仓库）
                             subtitle = if (favorites.isNotEmpty()) "${favorites.size} 个" else null,
-                            onClick = { openFavorites() },
+                            onClick = { subPage = ProfileSubPage.FAVORITES },
                         )
                         EntryRow(
                             icon = NpIcon.List,
@@ -225,7 +254,10 @@ private fun ProfileScreen(navigator: Navigator) {
                                 ) {
                                     NpEyebrow(text = "我的收藏")
                                     Box(modifier = Modifier.weight(1f))
-                                    NpMoreLink(text = "全部", onClick = { openFavorites() })
+                                    NpMoreLink(
+                                        text = "全部",
+                                        onClick = { subPage = ProfileSubPage.FAVORITES },
+                                    )
                                 }
                             }
                             Spacer(modifier = Modifier.height(14.dp))
@@ -267,9 +299,7 @@ private fun ProfileScreen(navigator: Navigator) {
                                 if (recent.isNotEmpty()) {
                                     NpMoreLink(
                                         text = "全部",
-                                        // data-more="history"：进首页的「播放历史」聚合
-                                        // （跨 Tab 通道见 [NpTabChannel]）
-                                        onClick = { openHistory() },
+                                        onClick = { subPage = ProfileSubPage.HISTORY },
                                     )
                                 }
                             }
@@ -371,6 +401,63 @@ private fun ProfileTopBar(compact: Boolean) {
     }
 }
 
+/**
+ * 「我的」的准二级页整页：顶栏返回由外层给（[NpAppTopBar]），这里只铺内容。
+ *
+ * 卡片复用首页横滑那一份 [RecentCard]——同一套展示名、同一条"已看 x%"口径，
+ * 不至于历史条目在同一个页面里长出两种长相。
+ */
+@Composable
+private fun ProfileSubPage(
+    page: ProfileSubPage,
+    items: List<MediaItem>,
+    positions: Map<String, Long>,
+    contentModifier: Modifier,
+    compact: Boolean,
+    onOpen: (MediaItem) -> Unit,
+) {
+    val staggerWindow = npStaggerWindow()
+    Box(
+        modifier = contentModifier.fillMaxSize(),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        if (items.isEmpty()) {
+            NpEmptyState(
+                modifier = Modifier.padding(top = 64.dp),
+                title = if (page == ProfileSubPage.HISTORY) "还没有播放记录" else "还没有收藏",
+                message = if (page == ProfileSubPage.HISTORY) {
+                    "播放过的条目会出现在这里。先在媒体库里开始播放任意一条。"
+                } else {
+                    "长按任意卡片选「加入收藏」，它们会出现在这里。"
+                },
+            )
+        } else {
+            LazyVerticalGrid(
+                // 与媒体库同一口径：紧凑档按用户列数偏好定列，宽窗按最小格宽自适应
+                columns = if (compact) GridCells.Fixed(2) else GridCells.Adaptive(176.dp),
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(
+                    top = LocalNpTopBarInset.current,
+                    bottom = LocalNpBottomInset.current + 24.dp,
+                    start = if (compact) 14.dp else 20.dp,
+                    end = if (compact) 14.dp else 20.dp,
+                ),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                gridItemsIndexed(items, key = { _, item -> HistoryEntry.keyOf(item) }) { index, item ->
+                    RecentCard(
+                        item = item,
+                        onOpen = { onOpen(item) },
+                        progress = fractionOf(item, positions),
+                        modifier = Modifier.npStaggeredEntry(index, staggerWindow),
+                    )
+                }
+            }
+        }
+    }
+}
+
 /** 入口行：`NpSettingRow` 的薄封装，只为把"图标 → 行"的样板收在一处。 */
 @Composable
 private fun EntryRow(
@@ -399,10 +486,16 @@ private fun EntryRow(
 
 /** 横滑卡片：封面 + 标题 + 时长（与媒体库同款密度）。 */
 @Composable
-private fun RecentCard(item: MediaItem, onOpen: () -> Unit, progress: Float = 0f) {
+private fun RecentCard(
+    item: MediaItem,
+    onOpen: () -> Unit,
+    progress: Float = 0f,
+    modifier: Modifier = Modifier,
+) {
     val isAudio = item.kind == MediaKind.AUDIO
     val hue = NpMediaColor.itemHue(item.folder, isAudio)
     NpMediaCard(
+        modifier = modifier,
         // E42：与媒体库卡片同一套展示名（富化短标题 + 「第 N 集」）
         title = item.cardTitle,
         // 设计稿 medCard 的 meta：`已看 x% · 时长 · 分辨率`

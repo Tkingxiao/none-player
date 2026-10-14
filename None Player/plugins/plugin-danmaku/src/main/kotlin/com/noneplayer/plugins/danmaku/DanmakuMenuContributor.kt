@@ -26,8 +26,8 @@ import kotlinx.coroutines.launch
  * 弹幕选项表 ↔ 覆盖层之间的进程级通道（2026-10-12 用户裁定：开关进「播放选项」表）。
  *
  * 两处组合没有共同的 `remember` 作用域：选项表行活在播放页的弹层里，覆盖层活在
- * 视频舞台子树里，而插件之间禁止互相依赖——与 `NpTabChannel`/`NpInlinePlayRequest`
- * 同一姿势，共享点落在插件自己的进程级对象里（内核不感知"弹幕"这个概念）。
+ * 视频舞台子树里，而插件之间禁止互相依赖——与 `NpInlinePlayRequest` 同一姿势，
+ * 共享点落在插件自己的进程级对象里（内核不感知"弹幕"这个概念）。
  *
  * [Command.PickFile] 走命令通道而不是在菜单行里直接开 SAF：
  * `rememberLauncherForActivityResult` 的回调随组合一起销毁，而菜单是弹层——

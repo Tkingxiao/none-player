@@ -186,6 +186,19 @@ private const val TABLET_SMALLEST_WIDTH_DP = 600
 /** "类 PC" 判据：宽高比 > 1.4（§13.2 定义） */
 private const val DESKTOP_LIKE_ASPECT = 1.4f
 
+/**
+ * 与 [buildNpWindowInfo] 的 `isDesktopLike` 同一条判据，供转屏回调在组合之前使用。
+ * 宽度 Expanded ≥840dp，高度非 Compact ≥480dp，且横向、宽高比 > 1.4。
+ */
+internal fun isDesktopLikeWindow(screenWidthDp: Int, screenHeightDp: Int): Boolean {
+    if (screenWidthDp <= 0 || screenHeightDp <= 0) return false
+    val aspect = screenWidthDp.toFloat() / screenHeightDp
+    return screenWidthDp >= 840 &&
+        screenHeightDp >= 480 &&
+        screenWidthDp > screenHeightDp &&
+        aspect > DESKTOP_LIKE_ASPECT
+}
+
 /** 桌面平台（ChromeOS / Android PC 模式） */
 // FEATURE_PC 常量自 API 27 才进入 SDK，但 String 常量编译期内联，
 // hasSystemFeature 在 API 26 上同样可用——抑制 InlinedApi。

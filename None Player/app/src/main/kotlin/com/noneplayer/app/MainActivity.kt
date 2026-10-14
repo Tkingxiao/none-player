@@ -3,11 +3,13 @@ package com.noneplayer.app
 import android.annotation.SuppressLint
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.app.Activity
 import android.app.PictureInPictureParams
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -54,6 +56,7 @@ import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.KernelNavHost
+import com.noneplayer.kernel.ui.api.NpFormHandoff
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.rememberNpWindowInfo
@@ -195,6 +198,13 @@ class MainActivity : ComponentActivity() {
         ViewCompat.getRootWindowInsets(window.decorView)
             ?.isVisible(WindowInsetsCompat.Type.ime()) == true
 
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        // 必须先于 super：super 会让 Compose 用新尺寸组出第一帧。那一帧若还是首页，
+        // 系统转屏截图和用户看见的就是剧集封面，而不是竖屏播放页。
+        NpFormHandoff.handoffForWindowSize(newConfig.screenWidthDp, newConfig.screenHeightDp)
+        super.onConfigurationChanged(newConfig)
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (super.onKeyDown(keyCode, event)) return true
         unclaimedDownKeyCode = keyCode
@@ -217,6 +227,11 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // 系统默认的 3D 转屏会把转场中间帧（首页、封面、两层画面）一起旋进录屏。
+        // 交接动画只留在播放页里，窗口本身硬切。
+        window.attributes = window.attributes.apply {
+            rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_JUMPCUT
+        }
         val kernel = (application as NonePlayerApplication).kernel
 
         setContent {

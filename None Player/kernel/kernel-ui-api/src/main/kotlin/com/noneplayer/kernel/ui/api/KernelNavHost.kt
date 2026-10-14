@@ -10,14 +10,11 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -89,6 +86,11 @@ fun KernelNavHost(
 
     val navController = rememberNavController()
     val navigator = remember(navController) { NavControllerNavigator(navController) }
+    // 转屏回调发生在组合之前，播放页必须在那一刻就能被推进栈（见 NpFormHandoff）。
+    DisposableEffect(navigator) {
+        NpFormHandoff.bindNavigator { route -> navigator.navigate(route) }
+        onDispose { NpFormHandoff.bindNavigator(null) }
+    }
 
     /**
      * Tab 导航控制器**必须在本层创建**（E53）——早前它在 [KernelTabScaffold] 内部
@@ -130,41 +132,59 @@ fun KernelNavHost(
     val navExitMs = if (reduceMotion) npDuration(Motion.ReduceFade) else npDuration(Motion.NavExit)
     val navSlideAllowed = npDisplacementAllowed()
 
-    var hostBounds by remember { mutableStateOf(Rect.Zero) }
-    Box(modifier = modifier.fillMaxSize().onGloballyPositioned { hostBounds = it.boundsInWindow() }) {
-    NavHost(
-        navController = navController,
-        startDestination = SHELL_ROUTE,
-        // 主题底铺在**整个导航宿主**上，而不是只铺在 Shell 里：
-        // Tab 页由 KernelTabScaffold 自己画底，但**外层路由**（搜索页、播放页、
-        // 关于/插件页）不经过 Shell——不在这里铺底，它们会露出窗口默认背景
-        // （浅色系统主题下的白色），暗色主题下就是"顶栏黑、内容白"的断头效果。
-        modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
-        // iOS push 式转场：新页自右轻滑入场，返回时反向滑出；进出伴随淡入淡出。
-        // 时长走 §7.2 的 Nav* 令牌（Q20：裸 tween 例外清零），档位换算在组合期完成——
-        // 下面的 lambda 跑在 EnterTransitionScope 里，读不到组合上下文。
-        enterTransition = {
-            fadeIn(tween(navFadeMs, easing = NpEasing.Silk)) +
-                slideInHorizontally(tween(navEnterMs, easing = NpEasing.Silk)) { if (navSlideAllowed) it / 4 else 0 }
-        },
-        exitTransition = { fadeOut(tween(navExitMs, easing = NpEasing.SilkExit)) },
-        popEnterTransition = {
-            if (NpPlayerPaneMotion.flight != null) EnterTransition.None
-            else fadeIn(tween(navFadeMs, easing = NpEasing.Silk))
-        },
-        popExitTransition = {
-            if (NpPlayerPaneMotion.flight != null) return@NavHost ExitTransition.None
-            // 返回时旧页往**左**退出（`-it/4`）：与 push 的入场方向成对，
-            // 写成 `it / 4` 会让"返回"读成"又推进了一页"。
-            // E119：滑出时长原本错用了 navEnterMs(280)——alpha 在 navExitMs(180) 就归零了，
-            // 多出来的 100ms 是一帧都看不见的动画，还让退场比进场更慢（违反 §3.9 的
-            // "退场加速离开"）。两条 spec 同长才是"一次离开"，不是"淡出后再溜一段"。
-            fadeOut(tween(navExitMs, easing = NpEasing.SilkExit)) +
-                slideOutHorizontally(tween(navExitMs, easing = NpEasing.SilkExit)) { if (navSlideAllowed) -it / 4 else 0 }
-        },
-        builder = graphBuilder,
-    )
-    PlayerPaneMotionOverlay(hostBounds)
+    // 整页不淡不滑的两种情形：共享元素正在飞（画面由那枚飞行帧连着），以及**转屏交接**
+    // ——形态换了画面归属者而自动导航一次，页面位移叠在系统转屏动画上就是用户实报的
+    // "切换动画会闪屏、很难看"（见 [NpFormHandoff]）。交接的目标形态本身就是新落点，
+    // 没有"从哪一页来"的叙事要表达。
+    fun noPageMotion(): Boolean = NpFormHandoff.isSilent || NpPlayerPaneMotion.flight != null
+
+    // 共享元素「飞行帧」挂**在导航宿主之上**，不能挂在 Shell 里（E120）。转屏交接的
+    // 两条路径都会整页换目的地——右栏 → 播放页是 push、播放页 → 右栏是 pop——Shell
+    // 一旦离场，挂在它内部的飞行层就随之被取消（`LaunchedEffect` 的 `finally` 会清掉
+    // 这一轮飞行）。此前只有"pop 回 Shell"那一向还留着层可画，另外两向是**零动画**，
+    // 用户实报的"几乎看不到切换动画"正是这一条。挪到本层后任何一个目的地都在组合中。
+    // 坐标仍是窗口原点：本层 `fillMaxSize`，与各侧上报的 `boundsInWindow()` 同一套。
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .onGloballyPositioned { NpPlayerPaneMotion.recordWindow(it.size) },
+    ) {
+        NavHost(
+            navController = navController,
+            startDestination = SHELL_ROUTE,
+            // 主题底铺在**整个导航宿主**上，而不是只铺在 Shell 里：
+            // Tab 页由 KernelTabScaffold 自己画底，但**外层路由**（搜索页、播放页、
+            // 关于/插件页）不经过 Shell——不在这里铺底，它们会露出窗口默认背景
+            // （浅色系统主题下的白色），暗色主题下就是"顶栏黑、内容白"的断头效果。
+            modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
+            // iOS push 式转场：新页自右轻滑入场，返回时反向滑出；进出伴随淡入淡出。
+            // 时长走 §7.2 的 Nav* 令牌（Q20：裸 tween 例外清零），档位换算在组合期完成——
+            // 下面的 lambda 跑在 EnterTransitionScope 里，读不到组合上下文。
+            enterTransition = {
+                if (noPageMotion()) EnterTransition.None
+                else fadeIn(tween(navFadeMs, easing = NpEasing.Silk)) +
+                    slideInHorizontally(tween(navEnterMs, easing = NpEasing.Silk)) { if (navSlideAllowed) it / 4 else 0 }
+            },
+            exitTransition = {
+                if (noPageMotion()) ExitTransition.None else fadeOut(tween(navExitMs, easing = NpEasing.SilkExit))
+            },
+            popEnterTransition = {
+                if (noPageMotion()) EnterTransition.None
+                else fadeIn(tween(navFadeMs, easing = NpEasing.Silk))
+            },
+            popExitTransition = {
+                // 返回时旧页往**左**退出（`-it/4`）：与 push 的入场方向成对，
+                // 写成 `it / 4` 会让"返回"读成"又推进了一页"。
+                // E119：滑出时长原本错用了 navEnterMs(280)——alpha 在 navExitMs(180) 就归零了，
+                // 多出来的 100ms 是一帧都看不见的动画，还让退场比进场更慢（违反 §3.9 的
+                // "退场加速离开"）。两条 spec 同长才是"一次离开"，不是"淡出后再溜一段"。
+                if (noPageMotion()) ExitTransition.None
+                else fadeOut(tween(navExitMs, easing = NpEasing.SilkExit)) +
+                    slideOutHorizontally(tween(navExitMs, easing = NpEasing.SilkExit)) { if (navSlideAllowed) -it / 4 else 0 }
+            },
+            builder = graphBuilder,
+        )
+        PlayerPaneMotionOverlay()
     }
 }
 

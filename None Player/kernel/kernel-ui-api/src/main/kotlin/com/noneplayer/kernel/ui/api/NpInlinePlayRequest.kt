@@ -14,8 +14,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * 期望语义是**就地播在右栏**：右栏本来就是这台平板的播放面。
  *
  * 为什么是值型通道而不是接口方法：发起方在 `plugin-library`（详情页），
- * 消费方在 `plugin-player-ui`（右栏），插件之间禁止互相依赖——与 `NpTabChannel`
- * （首页 ↔ 我的 的聚合跳转）同一姿势，共享点落在双方都依赖的内核 UI 契约里。
+ * 消费方在 `plugin-player-ui`（右栏），插件之间禁止互相依赖，共享点只能落在
+ * 双方都依赖的内核 UI 契约里。
  * **消费即清空**，同一请求不会被消费两次；时间戳做 key，连续两次点同一媒体也能触发。
  */
 object NpInlinePlayRequest {

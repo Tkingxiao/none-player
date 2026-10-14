@@ -27,12 +27,14 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -42,6 +44,7 @@ import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.cardTitle
 import com.noneplayer.core.media.episodeLabel
 import com.noneplayer.core.media.kind
+import com.noneplayer.core.media.probe.FormatProbe
 import com.noneplayer.core.media.resolutionLabel
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.LocalNpTopBarInset
@@ -99,6 +102,8 @@ internal fun VideoDetailScreen(
     onFullscreen: (MediaItem) -> Unit,
     onAudioOnly: (MediaItem) -> Unit,
     onSelect: (MediaItem) -> Unit,
+    favorited: Boolean,
+    onToggleFavorite: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val bottomInset = LocalNpBottomInset.current
@@ -108,6 +113,25 @@ internal fun VideoDetailScreen(
     val topPad = if (topInsetRaw == Dp.Unspecified) 0.dp else topInsetRaw
     val gutter = LocalNpWindowInfo.current.pageGutter
     val desktopLike = LocalNpWindowInfo.current.isDesktopLike
+    val context = LocalContext.current
+    // HDR 标识：与起播探测同源（同一个 FormatProbe 与结果缓存，判读口径不另写一份）。
+    // 音频不探；探测跑在后台、命中缓存时几乎零成本；拿不到结论就是 null（不编造）。
+    val hdr by produceState<String?>(null, item.uri, item.sizeBytes, item.lastModifiedSec) {
+        if (item.kind == MediaKind.AUDIO || item.uri.isBlank()) return@produceState
+        value = runCatching {
+            val result = FormatProbe.probe(
+                context.applicationContext,
+                item.uri,
+                item.mimeType,
+                item.sizeBytes,
+                item.lastModifiedSec,
+                recordMemo = false,
+            )
+            (result as? FormatProbe.Result.Playable)?.hdr
+        }.getOrNull()
+    }
+    // 视频下方的一排元数据：大小 · 分辨率 · HDR · 容器 · 文件夹（文件夹收尾）
+    val heroMeta = videoMetaLine(item, hdr)
     // 内嵌播放：详情页里直接开播（封面框就地变播放器）；全屏键才进独占播放页。
     // 会话是同一个——落全屏只续播不重启，退出全屏回详情、画面仍在原处继续。
     // 状态**不按键**：在详情页里切换同文件夹条目时保持"继续播新选的那一集"
@@ -157,21 +181,15 @@ internal fun VideoDetailScreen(
             bottom = bottomInset + 28.dp,
         )
         if (siblings.size <= 1 && maxWidth >= 600.dp && !paneOccupied) {
-            // 与多剧集同一侧：详情在左、画面在右。封面若放在左边，右栏点 ✕ 收起时
-            // 画面会先跳到左封面再弹回右边。
-            Row(
+            // 平板竖屏/宽窗单文件：**不再常显左侧详情列**——详细信息收进「详情」按钮的
+            // 浮窗（与两栏分支同一口径；用户实报"详细信息展示删除，只有点击按钮再显示"）。
+            // 视频下方保留一排元数据（大小 · 分辨率 · HDR · 容器 · 文件夹）。
+            Box(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(pad),
-                horizontalArrangement = Arrangement.spacedBy(28.dp),
+                contentAlignment = Alignment.TopCenter,
             ) {
-                Column(
-                    modifier = Modifier
-                        .weight(1f)
-                        .verticalScroll(rememberScrollState()),
-                ) {
-                    DetailMeta(item = item)
-                }
                 DetailHero(
                     item = item,
                     hue = hue,
@@ -186,7 +204,10 @@ internal fun VideoDetailScreen(
                     onFullscreen = { onFullscreen(item) },
                     onAudioOnly = { onAudioOnly(item) },
                     onOpenInfo = { showDetail = true },
-                    modifier = Modifier.weight(1.05f),
+                    metaLine = heroMeta,
+                    favorited = favorited,
+                    onToggleFavorite = onToggleFavorite,
+                    modifier = Modifier.widthIn(max = 640.dp),
                 )
             }
         } else if (paneOccupied && siblings.size <= 1) {
@@ -197,7 +218,7 @@ internal fun VideoDetailScreen(
                     .padding(pad)
                     .verticalScroll(rememberScrollState()),
             ) {
-                DetailMeta(item = item)
+                DetailMeta(item = item, hdr = hdr)
             }
         } else if (paneOccupied) {
             // The shell already owns the video surface; keep this narrow pane focused on episodes.
@@ -214,6 +235,13 @@ internal fun VideoDetailScreen(
                                 onClick = ::startPlayback,
                             )
                             Spacer(Modifier.weight(1f))
+                            // 收藏（与手机播放页同一动作）：此前平板的操作行没有这个出口
+                            NpIconButton(
+                                icon = NpIcon.Heart,
+                                contentDescription = if (favorited) "取消收藏" else "收藏",
+                                tint = if (favorited) LocalNpInk.current.accent else LocalNpInk.current.fg,
+                                onClick = onToggleFavorite,
+                            )
                             NpIconButton(
                                 icon = NpIcon.Headphones,
                                 contentDescription = "仅听音频",
@@ -268,6 +296,9 @@ internal fun VideoDetailScreen(
                         onFullscreen = { onFullscreen(item) },
                         onAudioOnly = { onAudioOnly(item) },
                         onOpenInfo = { showDetail = true },
+                        metaLine = heroMeta,
+                        favorited = favorited,
+                        onToggleFavorite = onToggleFavorite,
                     )
                 }
             }
@@ -298,6 +329,8 @@ internal fun VideoDetailScreen(
                         onFullscreen = { onFullscreen(item) },
                         onAudioOnly = { onAudioOnly(item) },
                         onOpenInfo = { showDetail = true },
+                        favorited = favorited,
+                        onToggleFavorite = onToggleFavorite,
                         modifier = if (desktopLike && siblings.size <= 1) {
                             Modifier.widthIn(max = 640.dp)
                         } else {
@@ -309,7 +342,7 @@ internal fun VideoDetailScreen(
                 if (!desktopLike) item(key = "detail-meta") {
                     Column {
                         Spacer(Modifier.height(22.dp))
-                        DetailMeta(item = item)
+                        DetailMeta(item = item, hdr = hdr)
                     }
                 }
                 if (siblings.size > 1) {
@@ -323,7 +356,7 @@ internal fun VideoDetailScreen(
             }
         }
     }
-    if (showDetail) DetailPopup(item = item, onDismiss = { showDetail = false })
+    if (showDetail) DetailPopup(item = item, hdr = hdr, onDismiss = { showDetail = false })
 }
 
 /** 封面 + 主操作：点封面即播；「继续观看」带上断点时刻，播放器仍会把断点还原 */
@@ -343,6 +376,10 @@ private fun DetailHero(
     onAudioOnly: () -> Unit,
     /** 详情浮窗入口（null/省略 = 窄窗常显详情，不渲染「详情」键） */
     onOpenInfo: (() -> Unit)? = null,
+    /** 视频下方一排元数据（大小 · 分辨率 · HDR · 容器 · 文件夹）；null = 不渲染 */
+    metaLine: String? = null,
+    favorited: Boolean = false,
+    onToggleFavorite: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     Column(modifier = modifier) {
@@ -394,20 +431,28 @@ private fun DetailHero(
                 }
             }
         }
+        // 视频下方信息行（平板横屏/竖屏都补上）：一排横向、文件夹收尾
+        metaLine?.takeIf { it.isNotBlank() }?.let { line ->
+            Text(
+                text = line,
+                style = NpMonoSmall,
+                color = LocalNpInk.current.muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp),
+            )
+        }
         Spacer(Modifier.height(14.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (inline) {
-                // 已在内嵌播放：主操作只剩"去哪看"——全屏
-                NpPrimaryButton(
-                    text = "全屏观看",
-                    icon = NpIcon.Expand,
-                    onClick = onFullscreen,
-                )
-            } else {
+            // 内嵌播放中不再单独放「全屏观看」主钮（用户裁定）：全屏入口就是内嵌
+            // 控制层里的 ⛶，详情页再放一个只是同一动作的重复按钮。
+            if (!inline) {
                 NpPrimaryButton(
                     text = if (canResume) "继续观看 · ${formatTimestamp(resumeMs)}" else "播放",
                     icon = NpIcon.Play,
@@ -415,6 +460,15 @@ private fun DetailHero(
                 )
             }
             Spacer(Modifier.weight(1f))
+            if (onToggleFavorite != null) {
+                // 收藏（与手机播放页同一动作与选中态）：平板的操作行此前没有这个出口
+                NpIconButton(
+                    icon = NpIcon.Heart,
+                    contentDescription = if (favorited) "取消收藏" else "收藏",
+                    tint = if (favorited) LocalNpInk.current.accent else LocalNpInk.current.fg,
+                    onClick = onToggleFavorite,
+                )
+            }
             NpIconButton(
                 icon = NpIcon.Headphones,
                 contentDescription = "仅听音频",
@@ -436,21 +490,18 @@ private fun DetailHero(
 @Composable
 private fun DetailMeta(
     item: MediaItem,
+    hdr: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
+    // 用户口径：一排横向、文件夹在最后（旧版文件夹单独一行再叠一条元数据 = 两排）
+    val meta = videoMetaLine(item, hdr, lead = item.episodeLabel)
     val ext = item.title
         .substringAfterLast('.', "")
         .takeIf { it.isNotEmpty() && it.length <= 5 }
         ?.uppercase()
-    val container = ext ?: item.mimeType.substringAfter('/', "").uppercase().takeIf { it.isNotBlank() }
-    val meta = buildList {
-        item.episodeLabel?.let { add(it) }
-        if (item.resolutionLabel.isNotBlank()) add(item.resolutionLabel)
-        if (item.durationMs > 0) add(formatTimestamp(item.durationMs))
-        if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
-        container?.let { add(it) }
-    }
+    val container = ext
+        ?: item.mimeType.substringAfter('/', "").uppercase().takeIf { it.isNotBlank() }
 
     Column(modifier = modifier) {
         Text(
@@ -459,19 +510,9 @@ private fun DetailMeta(
             style = NpTypography.headlineSmall,
             color = ink.fg,
         )
-        item.folder?.takeIf { it.isNotBlank() }?.let { path ->
-            Text(
-                text = path,
-                style = NpMonoSmall,
-                color = ink.muted,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(top = 8.dp),
-            )
-        }
         if (meta.isNotEmpty()) {
             Text(
-                text = meta.joinToString("  ·  "),
+                text = meta,
                 style = NpMonoSmall,
                 color = ink.muted,
                 modifier = Modifier.padding(top = 8.dp),
@@ -481,6 +522,8 @@ private fun DetailMeta(
         if (item.width > 0 && item.height > 0) {
             DetailInfoRow("分辨率", "${item.width} × ${item.height}")
         }
+        // HDR 标识（HDR10/HLG）：探测自容器声明的 colorTransfer；SDR/未知不显示
+        hdr?.takeIf { it.isNotBlank() }?.let { DetailInfoRow("HDR", it) }
         if (item.durationMs > 0) {
             DetailInfoRow("时长", formatTimestamp(item.durationMs))
         }
@@ -492,6 +535,27 @@ private fun DetailMeta(
             DetailInfoRow("加入时间", formatRelativeDate(item.addedAtMs), divider = false)
         }
     }
+}
+
+/**
+ * 一排横向的元数据：大小 · 分辨率 · HDR · 容器 · 文件夹（文件夹收尾）。
+ * 视频下方信息行与详情共用同一份拼装，两处不会各写一份而漂移。
+ */
+private fun videoMetaLine(item: MediaItem, hdr: String?, lead: String? = null): String {
+    val ext = item.title
+        .substringAfterLast('.', "")
+        .takeIf { it.isNotEmpty() && it.length <= 5 }
+        ?.uppercase()
+    val container = ext
+        ?: item.mimeType.substringAfter('/', "").uppercase().takeIf { it.isNotBlank() }
+    return buildList {
+        lead?.takeIf { it.isNotBlank() }?.let { add(it) }
+        if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
+        item.resolutionLabel.takeIf { it.isNotBlank() }?.let { add(it) }
+        hdr?.takeIf { it.isNotBlank() }?.let { add(it) }
+        container?.let { add(it) }
+        item.folder?.takeIf { it.isNotBlank() }?.let { add(it) }
+    }.joinToString(" · ")
 }
 
 /**
@@ -574,6 +638,7 @@ private fun SiblingRow(
 @Composable
 private fun DetailPopup(
     item: MediaItem,
+    hdr: String? = null,
     onDismiss: () -> Unit,
 ) {
     val ink = LocalNpInk.current
@@ -607,7 +672,7 @@ private fun DetailPopup(
                 )
             }
             Spacer(Modifier.height(12.dp))
-            DetailMeta(item = item)
+            DetailMeta(item = item, hdr = hdr)
         }
     }
 }

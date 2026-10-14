@@ -33,6 +33,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -40,9 +41,11 @@ import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.cardTitle
 import com.noneplayer.core.media.kind
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpToastHost
+import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.rememberNpToastState
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.database.HistoryEntry
@@ -57,6 +60,9 @@ import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
+import com.noneplayer.kernel.ui.api.NpFormHandoff
+import com.noneplayer.kernel.ui.api.NpPicture
+import com.noneplayer.kernel.ui.api.NpPlayerPaneMotion
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
@@ -208,6 +214,28 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         val sleepEndsAt by session.sleepTimerEndsAtMs.collectAsStateWithLifecycle()
         val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
         val surfaceRef = remember { mutableStateOf<android.view.TextureView?>(null) }
+        if (!autoPlay) {
+            val handoffToken = remember { Any() }
+            // 转屏回调用：拆栏**之前**抓这一帧，并连它此刻的矩形一起交给飞行帧
+            // （[NpPicture]）。FLAG_SECURE 下 getBitmap 只会拿到空白，那就交不出东西——
+            // 交接退回纯黑封面，别把一张黑图当成"画面"飞过去。
+            DisposableEffect(handoffToken) {
+                NpFormHandoff.bindPaneHandoff(handoffToken) {
+                    val view = surfaceRef.value
+                    val bounds = NpPlayerPaneMotion.paneBounds()
+                    if (view == null || bounds == null || screenshotBlocked ||
+                        view.width <= 1 || view.height <= 1
+                    ) {
+                        null
+                    } else {
+                        val w = view.width.coerceAtMost(960)
+                        val h = (w.toFloat() * view.height / view.width).toInt().coerceAtLeast(1)
+                        NpPicture(media.uri, runCatching { view.getBitmap(w, h) }.getOrNull(), bounds)
+                    }
+                }
+                onDispose { NpFormHandoff.releasePaneHandoff(handoffToken) }
+            }
+        }
         val audioManager = remember {
             context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
         }
@@ -334,6 +362,11 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 mirrored = mirrored,
                 rotation = rotation,
                 onSurfaceView = { surfaceRef.value = it },
+                // 右栏的画面本体每次布局上报矩形：转屏交接得从这里起飞、也落到这里。
+                // 详情页的内联画面（autoPlay）不参与交接，别去覆盖右栏的登记。
+                onVideoBounds = if (autoPlay) null else {
+                    { bounds -> NpPlayerPaneMotion.recordPane(media.uri, bounds) }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
             // 暂停时中央播放钮（与播放页同款玻璃大钮）
@@ -356,9 +389,26 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 visible = controlsVisible && !locked,
                 enter = fadeIn(tween(npDuration(Motion.Field))),
                 exit = fadeOut(tween(npDuration(Motion.Field))),
-                modifier = Modifier.align(Alignment.TopEnd).background(Color.Black.copy(alpha = 0.62f)),
+                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
             ) {
-                Row {
+                // 与手机竖屏的舞台顶栏同款：**通栏**一条浅黑底 + 左标题 + 右动作。
+                // 旧版把「选集 + ⋯」画成压在画面右上角的一小块 62% 黑底——
+                // 平板实拍就是"两个黑色方框浮在画面上"，观感很脏（用户实报）。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .padding(start = 12.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = media.title.ifBlank { media.cardTitle },
+                        style = NpTypography.bodyMedium,
+                        color = Color.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
                     if (queue.size > 1) BarCtlButton(
                         icon = NpIcon.QueueMusic,
                         contentDescription = "选集",

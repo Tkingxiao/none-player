@@ -44,7 +44,6 @@ import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpCoverAccent
 import com.noneplayer.core.ui.NpDimens
-import com.noneplayer.core.ui.NpHaptic
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMediaColor
@@ -57,7 +56,6 @@ import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npClickable
 import com.noneplayer.core.ui.npGlassSurface
 import com.noneplayer.core.ui.npMotion
-import com.noneplayer.core.ui.rememberNpHaptics
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.BottomChromeProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
@@ -101,16 +99,8 @@ class MiniPlayerChrome : BottomChromeProvider {
         val desktopLike = LocalNpWindowInfo.current.isDesktopLike
 
         val miniVisible = summary != null
-        val haptics = rememberNpHaptics()
-        // M3（§7.5 `LightTap`）：出现与收起各回执一次，与 `Panel` 动画同帧起步。
-        // 冷启动就带着会话时条是"一直在那"，不是刚出现——初值直接取当前状态把它滤掉。
-        var lastVisible by remember { mutableStateOf(miniVisible) }
-        LaunchedEffect(miniVisible) {
-            if (miniVisible != lastVisible) {
-                lastVisible = miniVisible
-                haptics.performHaptic(NpHaptic.LightTap)
-            }
-        }
+        // M3 的"出现/收起各响一次"已撤（2026-10-14 用户实报"不要切换界面就震动"）：
+        // 迷你条随退页/回页自动进出，那是**界面变化**不是用户操作，用户没碰任何东西。
 
         AnimatedVisibility(
             visible = summary != null,

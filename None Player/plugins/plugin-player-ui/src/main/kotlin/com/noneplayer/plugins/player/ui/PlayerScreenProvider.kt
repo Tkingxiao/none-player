@@ -17,7 +17,8 @@ import com.noneplayer.kernel.ui.api.ScreenProvider
 class PlayerScreenProvider : ScreenProvider {
 
     override val route: String =
-        "player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}&audio={audio}&pip={pip}"
+        "player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}&audio={audio}" +
+            "&pip={pip}&play={play}"
 
     // 深链带全量可选参数（都有 defaultValue，query 参数可省略）：
     // 只声明 uri 的话，外部传入的 id/title/mime 会被导航静默丢弃——
@@ -52,6 +53,8 @@ class PlayerScreenProvider : ScreenProvider {
                 navArgument("fs") { type = NavType.StringType; defaultValue = "" },
                 navArgument("audio") { type = NavType.StringType; defaultValue = "" },
                 navArgument("pip") { type = NavType.StringType; defaultValue = "" },
+                // `play=0` = 只装载不起播（横屏剧集详情页转竖屏的落点）。缺省即"要播"。
+                navArgument("play") { type = NavType.StringType; defaultValue = "1" },
             ),
             // E26：deepLinks 声明必须真正进入导航图，否则 Manifest 注册了 scheme
             // 也落不到本页面（此前该属性在内核中从未被消费）
@@ -71,6 +74,7 @@ class PlayerScreenProvider : ScreenProvider {
                     else -> null
                 },
                 manualPipEntry = entry.arguments?.getString("pip") == "1",
+                startPlaying = entry.arguments?.getString("play") != "0",
             )
         }
     }

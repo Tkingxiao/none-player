@@ -8,7 +8,7 @@
 - The waveform translates under a fixed center reference. Dragging previews time; release commits one seek; cancellation commits none.
 - Audio-only playback disables video tracks. Returning to video restores decoding without restarting the audio session.
 - Surface detach is identity-checked; attaching a new surface while paused refreshes the current frame without resuming playback.
-- Audio/video navigation, pure-audio entry, equalizer removal and fullscreen-to-pane motion are included.
+- Audio/video navigation, pure-audio entry and fullscreen-to-pane motion are included.
 
 ## Verification
 

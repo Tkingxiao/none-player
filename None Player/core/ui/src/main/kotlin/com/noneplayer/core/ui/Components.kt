@@ -126,13 +126,12 @@ fun Modifier.npPressScale(
         durationMs = Motion.Press,
         label = "npPressScale",
     )
-    // M1 触觉（§7.5 `Tap`）在**抬起成键**时下发：按下去滑走、或长按改走 `Long`，
-    // 都不该响。放在这一处=卡片/图标按钮/底栏按钮一次铺满（§6 M1「补铺到 BarCtlButton」）。
+    // M1 的"每次抬起都响"**已撤**（2026-10-14 用户实报：手机版切界面一路震）。
+    // 这一处铺满卡片 / 图标钮 / 底栏钮，等于给每一次**导航**都加了触觉——而触觉
+    // 该表达的是"这件事有分量"：长按（下面的 `Long`，删除等破坏性菜单的入口）、
+    // 破坏性确认（`Warning`）、进度条擦洗与舞台手势这类直接操纵反馈。
     val haptics = rememberNpHaptics()
-    val tap = {
-        haptics.performHaptic(NpHaptic.Tap)
-        onClick()
-    }
+    val tap: () -> Unit = onClick
     val clickModifier = if (onLongClick == null) {
         Modifier.clickable(
             interactionSource = source,
