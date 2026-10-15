@@ -1,7 +1,6 @@
 package com.noneplayer.plugins.player.ui
 
 import android.content.Context
-import android.util.Log
 import androidx.core.net.toUri
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
@@ -93,12 +92,6 @@ internal suspend fun ensureSessionPlaying(
         item,
         player.state.value,
     )
-    Log.d(
-        "NpRot",
-        "boot sameMedia=$sameMedia autoPlay=$autoPlay prepareOnly=$prepareOnly " +
-            "silent=${com.noneplayer.kernel.ui.api.NpFormHandoff.isSilent} " +
-            "state=${player.state.value} uri=${item.uri}",
-    )
     if (!sameMedia) {
         val queue = resolveFolderQueue(registry, item.uri, item.id)
         // 先 id 再 uri（与 E79 同一纪律）：`.cue` 分轨的 N 轨共享同一 uri，
@@ -157,7 +150,7 @@ internal suspend fun ensureSessionPlaying(
                 // 只有"记住过的字幕挂不上"才提示：同名自动匹配落空等于"这文件夹里没有
                 // 字幕"，不是失效——对没主动挂过字幕的用户报错是噪音（L7）
                 subtitleMissing = savedSubtitle != null && prepared.sourceMissing
-                player.setSubtitle(prepared.uri)
+                player.setSubtitle(prepared.uri, prepared.format)
             }
         }
         player.setTextTracksEnabled(settings.subtitleEnabled.first())
@@ -167,7 +160,6 @@ internal suspend fun ensureSessionPlaying(
         // （真机实报：横屏剧集详情转竖屏，未播放的落点自己播起来）。意图现在随
         // `startPlaying` 一起进会话与引擎，这里保留按停是为了探测窗口内不串播。
         if (prepareOnly) player.pause() else player.play()
-        Log.d("NpRot", "boot NEW-LOAD branch -> ${if (prepareOnly) "pause()" else "play()"}")
         return SessionStart(
             accepted = true,
             resumedFromMs = startMs,
@@ -186,7 +178,6 @@ internal suspend fun ensureSessionPlaying(
             if (!restorePosition || player.state.value == PlaybackState.Ended) player.seekTo(0L)
             player.play()
         }
-        Log.d("NpRot", "boot SAME branch -> autoPlay=$autoPlay playCalled=$autoPlay")
         // 会话本来就在播同一媒体：进度是连续的，不算"从断点续播"，不弹提示。
         return SessionStart(accepted = true)
     }

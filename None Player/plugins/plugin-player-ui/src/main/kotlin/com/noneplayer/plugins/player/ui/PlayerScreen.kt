@@ -4,7 +4,6 @@ import android.app.PendingIntent
 import android.app.PictureInPictureParams
 import android.app.RemoteAction
 import android.content.Context
-import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.graphics.Point
 import android.media.AudioManager
@@ -12,7 +11,6 @@ import android.os.Build
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
-import android.view.KeyEvent
 import android.view.TextureView
 import android.view.WindowManager
 import android.widget.Toast
@@ -206,6 +204,7 @@ import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.NpLoopMode
+import com.noneplayer.kernel.api.NpMediaButtonAction
 import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
@@ -1004,7 +1003,8 @@ fun PlayerScreen(
                 // E40：GBK/Big5 字幕先转 UTF-8 副本再挂载，否则整片乱码
                 // 手动选择的是刚拿到的文件，源必然存在——只取转码后的地址（L7 的
                 // sourceMissing 只对"记忆里的地址"有意义）
-                player.setSubtitle(prepareSubtitleUri(context, uriResult).uri)
+                val prepared = prepareSubtitleUri(context, uriResult)
+                player.setSubtitle(prepared.uri, prepared.format)
                 // 记忆原始地址：缓存目录可能被清理，恢复时重新转码
                 settings.setSubtitleUri(mediaKey, uriResult.toString())
             }
@@ -1491,7 +1491,13 @@ fun PlayerScreen(
         }
         val entered = runCatching {
             a.enterPictureInPictureMode(
-                manualPipParams(context, videoAspectRatio, state == PlaybackState.Playing, sourceRect),
+                manualPipParams(
+                    context,
+                    videoAspectRatio,
+                    state == PlaybackState.Playing,
+                    player::mediaButtonIntent,
+                    sourceRect,
+                ),
             )
         }.getOrDefault(false)
         toast.show(if (entered) "已进入画中画" else "画中画不可用")
@@ -1689,7 +1695,12 @@ fun PlayerScreen(
         val act = activity ?: return@LaunchedEffect
         runCatching {
             act.setPictureInPictureParams(
-                manualPipParams(context, videoAspectRatio, state == PlaybackState.Playing),
+                manualPipParams(
+                    context,
+                    videoAspectRatio,
+                    state == PlaybackState.Playing,
+                    player::mediaButtonIntent,
+                ),
             )
         }
     }
@@ -1946,9 +1957,9 @@ fun PlayerScreen(
                     // 播放中不出现——它只在"用户可能需要我"的时刻存在。
                     // 锁定态不出现：那是舞台上的第二个可点元素，破坏"只有解锁钮可点"。
                     CenterResumeButton(
-                        // `Ready` = 装载完没起播（横屏详情页 `play=0` 转竖屏的落点）。
-                        // 没有这枚钮，未播放态就只剩一条底部播放键，用户看不出"可以按"。
-                        visible = (state == PlaybackState.Paused || state == PlaybackState.Ready) &&
+                        // 未播放态（横屏详情页 `play=0` 转竖屏的落点）读的就是 `Paused`：
+                        // 引擎不再对外发 `Ready`（A5），"装载完没起播"是停着的就绪态。
+                        visible = state == PlaybackState.Paused &&
                             !userDragging && !inPipMode && !stageLocked,
                         onPlay = ::togglePlay,
                         modifier = Modifier.align(Alignment.Center),
@@ -5457,20 +5468,19 @@ private suspend fun MediaSourceProvider.awaitSelfList(
     return withTimeoutOrNull(budget) { observeMedia().first { matches(it) } } ?: snapshot
 }
 
-// ---- PiP 动作（§5.3）：经标准 MEDIA_BUTTON 事件驱动会话，引擎无关 ----
-
-private const val PIP_REQUEST_CODE_BASE = 2000
+// ---- PiP 动作（§5.3）：PendingIntent 归引擎（A2），UI 只贴图标与文案 ----
 
 private fun manualPipParams(
     context: Context,
     aspectRatio: Float,
     playing: Boolean,
+    mediaButtonIntent: (NpMediaButtonAction) -> Any?,
     sourceRect: android.graphics.Rect? = null,
 ): PictureInPictureParams {
     val ratio = pipAspectRatio(aspectRatio)
     val builder = PictureInPictureParams.Builder()
         .setAspectRatio(android.util.Rational((ratio * 1000).roundToInt(), 1000))
-        .setActions(pipActions(context, playing))
+        .setActions(pipActions(context, playing, mediaButtonIntent))
     // 手动进小窗的源矩形（lint PictureInPictureIssue 的落点之一）：过渡动画从视频
     // 区域收拢。自动进入保持关闭是产品决策——小窗只允许播放菜单手动入口
     // （MainActivity.onPictureInPictureRequested），lint 只要求两种新式调用在工程内并存。
@@ -5483,36 +5493,38 @@ private fun manualPipParams(
     return builder.build()
 }
 
-private fun pipActions(context: Context, playing: Boolean): List<RemoteAction> {
-    fun mediaButton(keyCode: Int): PendingIntent {
-        val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-            `package` = context.packageName
-            putExtra(
-                Intent.EXTRA_KEY_EVENT,
-                KeyEvent(KeyEvent.ACTION_DOWN, keyCode),
-            )
-        }
-        return PendingIntent.getService(
-            context,
-            PIP_REQUEST_CODE_BASE + keyCode,
-            intent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
-        )
+/**
+ * 小窗上的两颗动作按钮。
+ *
+ * 按键通路经 [VideoPlayer.mediaButtonIntent] 由引擎给出（A2）：UI 侧自己
+ * `PendingIntent.getService` 造出来的 Intent 只有 action + package、没有组件，本包内
+ * 没有 service 接得住，`send()` 静默无操作——按钮画得出来、点了没反应（模拟器尤其如此）。
+ * 引擎没给通路时**不画这颗钮**，不留死控件。
+ */
+private fun pipActions(
+    context: Context,
+    playing: Boolean,
+    mediaButtonIntent: (NpMediaButtonAction) -> Any?,
+): List<RemoteAction> {
+    fun icon(resId: Int) = android.graphics.drawable.Icon.createWithResource(context, resId)
+
+    fun action(kind: NpMediaButtonAction, iconRes: Int, label: String, desc: String): RemoteAction? {
+        val intent = mediaButtonIntent(kind) as? PendingIntent ?: return null
+        return RemoteAction(icon(iconRes), label, desc, intent)
     }
 
-    fun icon(resId: Int) = android.graphics.drawable.Icon.createWithResource(context, resId)
-    return listOf(
-        RemoteAction(
-            icon(if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play),
+    return listOfNotNull(
+        action(
+            if (playing) NpMediaButtonAction.PAUSE else NpMediaButtonAction.PLAY,
+            if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,
             if (playing) "暂停" else "播放",
             if (playing) "暂停播放" else "继续播放",
-            mediaButton(if (playing) KeyEvent.KEYCODE_MEDIA_PAUSE else KeyEvent.KEYCODE_MEDIA_PLAY),
         ),
-        RemoteAction(
-            icon(android.R.drawable.ic_media_next),
+        action(
+            NpMediaButtonAction.NEXT,
+            android.R.drawable.ic_media_next,
             "下一集",
             "播放下一集",
-            mediaButton(KeyEvent.KEYCODE_MEDIA_NEXT),
         ),
     )
 }

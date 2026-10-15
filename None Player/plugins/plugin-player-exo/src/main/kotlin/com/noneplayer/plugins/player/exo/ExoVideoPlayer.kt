@@ -1,8 +1,11 @@
 package com.noneplayer.plugins.player.exo
 
+import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.SurfaceView
 import android.view.TextureView
 import androidx.annotation.OptIn
@@ -25,6 +28,7 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.extractor.metadata.Chapter
+import androidx.media3.session.MediaButtonReceiver
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
@@ -37,6 +41,8 @@ import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.NpLoopMode
+import com.noneplayer.kernel.api.NpMediaButtonAction
+import com.noneplayer.kernel.api.NpSubtitleFormat
 import com.noneplayer.kernel.api.VideoPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -128,8 +134,15 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var currentMimeType: String = "video/mp4"
     private var currentTitle: String = ""
     private var currentArtworkUri: String? = null
-    private var subtitleUri: String? = null
-    private var mountedSubtitleUri: String? = null
+    /**
+     * 当前**选定**的外挂字幕（地址 + 容器格式，A3）。格式必须跟着地址走：
+     * 引擎按 uri 末段猜 mime 时，MediaStore 的 `content://media/external/file/1234`
+     * 与 SAF 的文档 uri 末段都是 id，一律落到 SubRip——自动匹配的 `.ass` 于是零 Cue。
+     */
+    private var subtitle: SubtitleMount? = null
+
+    /** 已经烘进当前媒体项的那一条（与 [subtitle] 不同 = 待重建） */
+    private var mountedSubtitle: SubtitleMount? = null
     private var textTracksEnabled = true
     private var videoTracksEnabled = true
 
@@ -242,12 +255,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                                 // 就绪才预热邻域探测：这一刻之前磁盘都在回填当前集的缓冲
                                 prefetchProbeWindow()
                             }
-                            _state.value = when (playbackState) {
-                                Player.STATE_BUFFERING -> PlaybackState.Buffering
-                                Player.STATE_READY -> PlaybackState.Ready
-                                Player.STATE_ENDED -> PlaybackState.Ended
-                                else -> PlaybackState.Idle
-                            }
+                            _state.value = npEngineStateOf(playbackState, c.playWhenReady)
                         }
 
                         override fun onVideoSizeChanged(videoSize: VideoSize) {
@@ -280,9 +288,14 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                             currentMediaUri = _currentUri.value
                             appliedUri = currentMediaUri
                             currentMediaId = mediaItem?.mediaId.orEmpty()
-                            mountedSubtitleUri = localItem?.localConfiguration?.subtitleConfigurations
-                                ?.firstOrNull()?.uri?.toString()
-                            subtitleUri = mountedSubtitleUri
+                            mountedSubtitle = localItem?.localConfiguration?.subtitleConfigurations
+                                ?.firstOrNull()
+                                ?.let { config ->
+                                    config.uri?.toString()?.let {
+                                        SubtitleMount(it, npSubtitleFormatOfMime(config.mimeType))
+                                    }
+                                }
+                            subtitle = mountedSubtitle
                             // 队列下标跟随会话（自动连播推进到下一集时也要更新，
                             // 否则迷你条/选集面板会一直停在旧下标）
                             // Clearing the engine after a failed probe is not a queue transition.
@@ -652,7 +665,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // 批次 3 修复：队列路径此前从不带 SubtitleConfiguration——字幕记忆/同名挂载
         // 在"进页即 setQueue"的主流程上整体失效（applyMedia 只服务单媒体项路径）。
         // 给**即将播放的那一项**烘上当前字幕地址；切集后由 setSubtitle 走重建路径。
-        val subtitle = subtitleUri
+        val mount = subtitle
         // 建表必须在 IO：整表 MediaItem 会为**每一项**准备封面元数据，此前还逐项把封面
         // 文件读成 artworkData——一季 100 集就是 100 次同步读盘 + 一次超大 Binder 事务，
         // 全压在装载协程（主线程）上，表现就是"点播放转圈很久 / 切集卡死"。
@@ -661,9 +674,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val items = withContext(Dispatchers.IO) {
             coreItems.mapIndexed { index, src ->
                 val built = src.toMediaItem(withArtwork = index == safeIndex)
-                if (subtitle != null && index == safeIndex) {
+                if (mount != null && index == safeIndex) {
                     built.buildUpon()
-                        .setSubtitleConfigurations(listOf(subtitleConfiguration(subtitle)))
+                        .setSubtitleConfigurations(listOf(subtitleConfiguration(mount)))
                         .build()
                 } else {
                     built
@@ -676,7 +689,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentCoroutineContext().ensureActive()
         appliedUri = items[safeIndex].localConfiguration?.uri?.toString()
         appliedItems = items
-        mountedSubtitleUri = subtitle
+        mountedSubtitle = mount
         loadPending = false
         c.setMediaItems(items, safeIndex, startPositionMs.coerceAtLeast(0L))
         c.prepare()
@@ -718,9 +731,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         if (queueMounted && !terminalFailure) {
             _currentIndex.value = index
             val target = items[index]
-            // 新一集不该继承上一集的外挂字幕（与整表重建分支同一语义）
-            subtitleUri = null
-            mountedSubtitleUri = null
+            // 新一集不该继承上一集的外挂字幕（与整表重建分支同一语义）。
+            // 该集自己的记忆字幕由会话层在切下标后解析并重挂（A4）。
+            subtitle = null
+            mountedSubtitle = null
             setCurrentTarget(target)
             _currentUri.value = target.uri
             appliedUri = target.uri
@@ -731,8 +745,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         }
         _currentIndex.value = index
         val target = items[index]
-        subtitleUri = null
-        mountedSubtitleUri = null
+        subtitle = null
+        mountedSubtitle = null
         pendingSeekMs = null
         setCurrentTarget(target)
         probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
@@ -771,8 +785,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentMediaId = ""
         currentArtworkUri = null
         currentTitle = ""
-        subtitleUri = null
-        mountedSubtitleUri = null
+        subtitle = null
+        mountedSubtitle = null
         _state.value = PlaybackState.Idle
         clearCues()
         _decodeNotice.value = null
@@ -793,6 +807,37 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             NpPerf.begin("nav previous")
             selectQueueIndex(previous)
         }
+    }
+
+    /**
+     * 媒体键按钮 → 广播给 media3 的 `MediaButtonReceiver`（A2）。
+     *
+     * 该接收器收到 `ACTION_MEDIA_BUTTON` 后按 `EXTRA_KEY_EVENT` 找到本包的
+     * `MediaSessionService` 并 `startForegroundService` 把 Intent 交给它，会话侧播放器
+     * 就地执行暂停 / 跳到下一项。请求码用 keycode 本身：一颗钮一份 PendingIntent，
+     * 互不覆盖。
+     *
+     * 注意这条链路自带"服务已被系统杀掉也能被叫回来"的语义，但 media3 在 API 26+
+     * **只允许 PLAY 类按键冷启动前台服务**（避免 `ForegroundServiceDidNotStartInTime`），
+     * 所以服务不在时 PAUSE / NEXT 会被丢弃——小窗按钮只在播放期间出现，服务必然活着。
+     */
+    @OptIn(UnstableApi::class)
+    override fun mediaButtonIntent(action: NpMediaButtonAction): Any? {
+        val keyCode = when (action) {
+            NpMediaButtonAction.PLAY -> KeyEvent.KEYCODE_MEDIA_PLAY
+            NpMediaButtonAction.PAUSE -> KeyEvent.KEYCODE_MEDIA_PAUSE
+            NpMediaButtonAction.NEXT -> KeyEvent.KEYCODE_MEDIA_NEXT
+        }
+        val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
+            component = ComponentName(appContext, MediaButtonReceiver::class.java)
+            putExtra(Intent.EXTRA_KEY_EVENT, KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        }
+        return PendingIntent.getBroadcast(
+            appContext,
+            keyCode,
+            intent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
     }
 
     /**
@@ -879,17 +924,20 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     /**
      * 挂载/清除外挂字幕（E32）：清除与"复原已挂载文件"改走文本轨开关，
      * 不重建媒体项、不重新缓冲；只有更换新文件才更新媒体项。
+     *
+     * [format] 与地址一起来（A3）：只换格式不换地址（例如记忆里的字幕重新判出
+     * `.ass`）同样要重建，所以比较用整个挂载对，不用裸 uri。
      */
-    override fun setSubtitle(uri: String?) {
-        val previous = subtitleUri
-        subtitleUri = uri
+    override fun setSubtitle(uri: String?, format: NpSubtitleFormat?) {
+        val previous = subtitle
+        subtitle = uri?.let { SubtitleMount(it, format) }
         val media = currentMediaUri ?: return
         controller ?: return
         when {
-            uri == previous -> Unit
-            uri == null && mountedSubtitleUri != null ->
+            subtitle == previous -> Unit
+            subtitle == null && mountedSubtitle != null ->
                 setTextTracksEnabled(false)
-            uri != null && uri == mountedSubtitleUri ->
+            subtitle != null && subtitle == mountedSubtitle ->
                 setTextTracksEnabled(true)
             // 更换字幕文件：唯一需要重建媒体项的分支（探测未完成时由 applyMedia 带上）
             canRemountCurrentItem(media) -> replaceCurrentSubtitle()
@@ -927,7 +975,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val local = items[index]
         val position = pendingSeekMs ?: c.currentPosition.coerceAtLeast(0L)
         val playWhenReady = c.playWhenReady
-        val subtitles = subtitleUri?.let { listOf(subtitleConfiguration(it)) }.orEmpty()
+        val subtitles = subtitle?.let { listOf(subtitleConfiguration(it)) }.orEmpty()
         // 控制器回传的 MediaItem 会丢掉 LocalConfiguration，不能拿它的 mediaId/uri 当闸门。
         // replaceMediaItem 对当前项的外挂字幕经常不重新挂上；整表 setMediaItems 是
         // 探测期间挂字幕已经验证过的路径，同时保留队列、mediaId、标题和裁剪窗口。
@@ -944,7 +992,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         c.setMediaItems(updated, index, position.coerceAtLeast(0L))
         c.prepare()
         c.playWhenReady = playWhenReady
-        mountedSubtitleUri = subtitleUri
+        mountedSubtitle = subtitle
         setTextTracksEnabled(textTracksEnabled)
     }
 
@@ -1270,7 +1318,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     }
                     .build(),
             )
-        subtitleUri?.let { sub ->
+        subtitle?.let { sub ->
             builder.setSubtitleConfigurations(listOf(subtitleConfiguration(sub)))
         }
         val item = builder.build()
@@ -1301,24 +1349,66 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             pendingSeekMs = null
         }
         appliedUri = mediaUri
-        mountedSubtitleUri = subtitleUri
+        mountedSubtitle = subtitle
         setTextTracksEnabled(textTracksEnabled)
         if (wasPlaying) c.play()
     }
 
-    private fun subtitleConfiguration(fileUri: String): MediaItem.SubtitleConfiguration =
-        MediaItem.SubtitleConfiguration.Builder(fileUri.toUri())
-            .setMimeType(subtitleMime(fileUri))
+    private fun subtitleConfiguration(mount: SubtitleMount): MediaItem.SubtitleConfiguration =
+        MediaItem.SubtitleConfiguration.Builder(mount.uri.toUri())
+            .setMimeType(npSubtitleMime(mount.uri, mount.format))
             .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
             .build()
+}
 
-    private fun subtitleMime(uri: String): String = when (uri.substringAfterLast('.').lowercase()) {
+/** 一条外挂字幕：地址 + 容器格式（A3）。两者必须成对流转，缺格式就退回按 uri 猜。 */
+internal data class SubtitleMount(val uri: String, val format: NpSubtitleFormat?)
+
+/**
+ * 外挂字幕的 media3 mime（A3）。
+ *
+ * 优先用挂载方显式给出的 [format]；没给才退回按 uri 末段猜。末段那条路对
+ * `content://media/external/file/1234`（MediaStore）与 SAF 的文档 uri 一律落到 SubRip——
+ * 自动匹配到的 `.ass` 于是零 Cue，所以格式必须由认得文件名的那一侧带进来。
+ */
+internal fun npSubtitleMime(uri: String, format: NpSubtitleFormat?): String = when (format) {
+    NpSubtitleFormat.SUBRIP -> MimeTypes.APPLICATION_SUBRIP
+    NpSubtitleFormat.WEBVTT -> MimeTypes.TEXT_VTT
+    NpSubtitleFormat.SSA -> MimeTypes.TEXT_SSA
+    NpSubtitleFormat.TTML -> MimeTypes.APPLICATION_TTML
+    null -> when (uri.substringAfterLast('.', "").substringBefore('/').lowercase()) {
         "vtt" -> MimeTypes.TEXT_VTT
         "ass", "ssa" -> MimeTypes.TEXT_SSA
         "ttml", "xml", "dfxp" -> MimeTypes.APPLICATION_TTML
         else -> MimeTypes.APPLICATION_SUBRIP
     }
 }
+
+/** 从已烘进媒体项的 mime 读回格式（`onMediaItemTransition` 的读回侧）。 */
+internal fun npSubtitleFormatOfMime(mimeType: String?): NpSubtitleFormat? = when (mimeType) {
+    MimeTypes.APPLICATION_SUBRIP -> NpSubtitleFormat.SUBRIP
+    MimeTypes.TEXT_VTT -> NpSubtitleFormat.WEBVTT
+    MimeTypes.TEXT_SSA -> NpSubtitleFormat.SSA
+    MimeTypes.APPLICATION_TTML -> NpSubtitleFormat.TTML
+    else -> null
+}
+
+/**
+ * media3 的 `(playbackState, playWhenReady)` → 引擎对外状态（A5）。
+ *
+ * `STATE_READY` **不再映射成独立的 `Ready`**：那个状态全仓没有消费者，只被
+ * `onIsPlayingChanged` 越过，于是"暂停后拖进度条"（BUFFERING → READY，`isPlaying`
+ * 全程 false，不会再回调）会把状态永久停在 `Ready` 上——中央播放钮消失、
+ * `FLAG_KEEP_SCREEN_ON` 与播放降档与弹幕判定一起错。就绪态本来就是二者之一：
+ * 该播的（`playWhenReady`）是 `Playing`，停着的（含 `play=0` 只装载）是 `Paused`。
+ */
+internal fun npEngineStateOf(playbackState: Int, playWhenReady: Boolean): PlaybackState =
+    when (playbackState) {
+        Player.STATE_BUFFERING -> PlaybackState.Buffering
+        Player.STATE_READY -> if (playWhenReady) PlaybackState.Playing else PlaybackState.Paused
+        Player.STATE_ENDED -> PlaybackState.Ended
+        else -> PlaybackState.Idle
+    }
 
 /**
  * media3 Cue → 内核 SubtitleCue（E1）。

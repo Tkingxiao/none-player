@@ -292,10 +292,6 @@ object NpFormHandoff {
         // 档位没变 = 不是交接，同一份配置的第二次上报也在这里被拒。
         if (!changed) return
         val leaving = !next.desktop
-        android.util.Log.d(
-            "NpRot",
-            "handoff.noteForm config=$config desktop=$leaving gen=$formGeneration playerPageAlive=$playerPageAlive",
-        )
         // **换版式之前**冻结这一批部件矩形：morph 的起点就是"上一形态里它们所在的位置"，
         // 晚一步登记上来的已经是新形态的矩形，起点就没了（E133）。
         // 带上这一下显示转过的角度：起点要按刚体旋转折进新窗口，而不是按「窗口归一化位置」
@@ -324,10 +320,6 @@ object NpFormHandoff {
             playerPageAlive = false,
             paneRoute = paneRoute,
             detailRoute = detailRoute,
-        )
-        android.util.Log.d(
-            "NpRot",
-            "handoff.case2 route=$route paneRoute=$paneRoute detailRoute=$detailRoute navigator=${go != null}",
         )
         if (route == null || go == null) return
         paneRoute = null

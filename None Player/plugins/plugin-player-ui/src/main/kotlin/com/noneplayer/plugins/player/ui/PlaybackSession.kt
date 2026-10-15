@@ -1,7 +1,7 @@
 package com.noneplayer.plugins.player.ui
 
 import android.content.Context
-import android.util.Log
+import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -209,6 +209,7 @@ class PlaybackSession(
      */
     private val _audioOnly = MutableStateFlow(false)
     private var audioModeRevision = 0L
+    private var subtitleRevision = 0L
 
     /** 仅听音频模式状态（UI collectAsState 用） */
     val audioOnly: StateFlow<Boolean> = _audioOnly.asStateFlow()
@@ -250,6 +251,39 @@ class PlaybackSession(
         val key = currentMediaKey
         if (key.isNotEmpty()) {
             scope.launch { settings.setAudioOnlyPreferred(key, target) }
+        }
+    }
+
+    /**
+     * 切下标后重挂**该集自己的**外挂字幕（A4）。
+     *
+     * 引擎在切下标时一定会清掉字幕（新一集不许继承上一集的字幕），而字幕记忆是按
+     * `sourceId:mediaId` 逐集存的——所以**每一次切下标**都要重新解析一遍：先读该集的
+     * 记忆，没有再走同目录同名自动匹配，命中即写回记忆（与起播路径 `SessionBootstrap`
+     * 同一套）。此前这两个落点只恢复仅听模式，于是连播/选集跳到第 2 集之后，
+     * 第 2 集记忆过的字幕与自动匹配全部失效，只剩内嵌轨。
+     *
+     * 姿势照 [restoreAudioMode]：改序号 → 异步读 → 落地前核条目。异步期间用户又切了一次
+     * （或手动挂了别的文件），旧结果不许盖到新集上。
+     */
+    private fun restoreSubtitle(item: MediaItem) {
+        val revision = ++subtitleRevision
+        player?.setSubtitle(null)
+        if (item.id.isEmpty()) return
+        scope.launch {
+            val key = mediaMemoryKey(item.sourceId, item.id)
+            val source = settings.subtitleUri(key).first()
+                ?: resolveSiblingSubtitle(context, item.uri)?.also { hit ->
+                    settings.setSubtitleUri(key, hit)
+                }
+                ?: return@launch
+            val prepared = prepareSubtitleUri(context, source.toUri())
+            // 读记忆与转码都在 IO 上，两段各核一次条目身份
+            if (revision != subtitleRevision) return@launch
+            val current = _queue.value.getOrNull(_index.value)
+            if (current?.id != item.id || current.uri != item.uri) return@launch
+            player?.setSubtitle(prepared.uri, prepared.format)
+            player?.setTextTracksEnabled(settings.subtitleEnabled.first())
         }
     }
 
@@ -327,6 +361,7 @@ class PlaybackSession(
                     if (idx != _index.value && idx in _queue.value.indices) {
                         _index.value = idx
                         restoreAudioMode(_queue.value[idx])
+                        restoreSubtitle(_queue.value[idx])
                         // 引擎推进（自动连播 / 通知栏 ⏭）也广播给全仓库：
                         // 详情页等 UI 侧订阅方靠它把"正在看的条目"跟上队列，
                         // 否则右栏已在放下一集、详情页还停在播完的那一集。
@@ -493,17 +528,14 @@ class PlaybackSession(
     /** 切换播放/暂停（迷你条 ▶/⏸ 直接控制会话） */
     fun toggle() {
         val p = _player.value ?: return
-        Log.d("NpRot", "session.toggle() state=${p.state.value}", Throwable())
         if (p.state.value == PlaybackState.Playing) p.pause() else p.play()
     }
 
     fun play() {
-        Log.d("NpRot", "session.play() state=${_player.value?.state?.value}", Throwable())
         _player.value?.play()
     }
 
     fun pause() {
-        Log.d("NpRot", "session.pause() state=${_player.value?.state?.value}", Throwable())
         _player.value?.pause()
     }
 
@@ -537,6 +569,7 @@ class PlaybackSession(
         if (_index.value != index) {
             _index.value = index
             restoreAudioMode(_queue.value[index])
+            restoreSubtitle(_queue.value[index])
         }
         _player.value?.selectQueueIndex(index)
         events.publish(KernelEvent.PlaybackStarted(_queue.value[index].id))
@@ -569,6 +602,7 @@ class PlaybackSession(
         _index.value = -1
         _playbackStarted.value = false
         audioModeRevision++
+        subtitleRevision++
         _audioOnly.value = false
         setSubtitleOffsetMs(0L)
     }

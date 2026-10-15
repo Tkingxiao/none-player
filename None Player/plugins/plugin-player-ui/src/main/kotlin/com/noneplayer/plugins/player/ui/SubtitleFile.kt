@@ -5,6 +5,8 @@ import android.net.Uri
 import androidx.core.net.toUri
 import com.noneplayer.core.media.SubtitleCharset
 import com.noneplayer.kernel.api.CacheProvider
+import com.noneplayer.kernel.api.NpSubtitleFormat
+import com.noneplayer.kernel.api.npSubtitleFormatOf
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -15,12 +17,15 @@ private const val MAX_SUBTITLE_BYTES = 8 * 1024 * 1024
 /**
  * 挂载前处理的结果。
  *
- * [uri] 可直接交给播放引擎；[sourceMissing] = 源地址**打不开**（文件被移走 / SAF 授权
- * 失效），此时 [uri] 只是原样回退，播放器大概率也拿不到内容——调用方据此给一条
- * 「字幕文件已失效」提示（L7：此前静默降级，用户以为是自己没挂上）。
+ * [uri] 可直接交给播放引擎；[format] 是该字幕文件的容器格式（A3），由**真实文件名**判出，
+ * 必须跟着 uri 一起交给引擎——引擎自己从 uri 末段判不出格式（MediaStore / SAF 的 uri 末段
+ * 是 id）。[sourceMissing] = 源地址**打不开**（文件被移走 / SAF 授权失效），此时 [uri] 只是
+ * 原样回退，播放器大概率也拿不到内容——调用方据此给一条「字幕文件已失效」提示
+ * （L7：此前静默降级，用户以为是自己没挂上）。
  */
 internal data class PreparedSubtitle(
     val uri: String,
+    val format: NpSubtitleFormat? = null,
     val sourceMissing: Boolean = false,
 )
 
@@ -28,13 +33,21 @@ internal data class PreparedSubtitle(
  * 挂载前的字幕字符集处理（E40）：
  * 读入 → 探测（[SubtitleCharset]）→ 非 UTF-8 时落 `cache_dir/subs/` 下的 UTF-8 副本。
  * 返回可直接交给播放引擎的地址；任何失败都回退原地址（不阻断挂载）。
+ *
+ * 副本**沿用源文件的格式扩展名**（A3）：写死 `.srt` 会让转码后的 ASS/VTT 被引擎按
+ * SubRip 解——`[Script Info]` 与 `Dialogue:` 对不上时间轴，一条 Cue 都不出，而菜单上
+ * 仍显示「已挂载」（读的是原始 uri）。
  */
 internal suspend fun prepareSubtitleUri(context: Context, source: Uri): PreparedSubtitle =
     withContext(Dispatchers.IO) {
         // 打开失败与"读得太多判定超限"是两码事：前者是源没了（要提示），
         // 后者文件还在、只是不像字幕（不该说"失效"）
         var missing = false
-        runCatching {
+        // 格式先判：不重写时返回的是原 uri，那条 uri 末段往往是 id，事后就判不出来了
+        val format = npSubtitleFormatOf(
+            queryDisplayName(context.contentResolver, source) ?: source.toString(),
+        )
+        val uri = runCatching {
             // E63 修复：字幕选择器 arrayOf("*/*") 不限制文件类型，用户可能误选一个
             // 几 GB 的视频文件"当字幕"。此前 readBytes() 先把整个文件读入内存、
             // 再检查 MAX_SUBTITLE_BYTES，保护形同虚设。改为有界读取：
@@ -59,12 +72,31 @@ internal suspend fun prepareSubtitleUri(context: Context, source: Uri): Prepared
                 .orEmpty()
                 .ifEmpty { "subtitle" }
             // E72 修复：32 位 hashCode() 碰撞概率不可忽视，改用 SHA-256 截断
-            // （已核查非路径穿越风险：stem 不含 '/'，File(dir, name) 不会逃出 dir）
-            val target = File(dir, "${stem}-${sourceDigest(source.toString())}.srt")
+            // （已核查非路径穿越风险：stem 不含 '/'，File(dir, name) 不会逃出 dir；
+            //  扩展名取自 NpSubtitleFormat 白名单，不是用户文件名上的任意串）
+            val target = File(dir, "${stem}-${sourceDigest(source.toString())}.${subtitleCopyExtension(format)}")
             target.writeText(decoded.text, Charsets.UTF_8)
             target.toUri().toString()
-        }.let { PreparedSubtitle(it.getOrDefault(source.toString()), missing) }
+        }.getOrDefault(source.toString())
+        PreparedSubtitle(uri, format, missing)
     }
+
+/** 转码副本的扩展名：沿用源格式，判不出来才退回 `.srt`（A3） */
+internal fun subtitleCopyExtension(format: NpSubtitleFormat?): String = format?.extension ?: "srt"
+
+/** 取真实文件名（判字幕格式用）；查不到返回 null，由调用方退回 uri 末段 */
+private fun queryDisplayName(resolver: android.content.ContentResolver, source: Uri): String? =
+    runCatching {
+        resolver.query(
+            source,
+            arrayOf(android.provider.OpenableColumns.DISPLAY_NAME),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst() && cursor.columnCount > 0) cursor.getString(0) else null
+        }
+    }.getOrNull()
 
 /** 有界读取：读满 limit+1 字节即返回 null（超限），不把超限数据整份读入内存 */
 private fun readBounded(stream: java.io.InputStream, limit: Int): ByteArray? {

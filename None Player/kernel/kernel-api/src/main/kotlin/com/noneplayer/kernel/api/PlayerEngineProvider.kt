@@ -159,6 +159,22 @@ interface VideoPlayer {
     fun playPrevious() {}
 
     /**
+     * 一颗媒体键按钮的 `PendingIntent`（A2）：小窗（PiP）上的暂停 / 下一集由**引擎**
+     * 给出通路，UI 只负责图标、文案与顺序。
+     *
+     * 为什么不让 UI 自己 `PendingIntent.getService(...)`：那种 Intent 只有 action +
+     * package、没有组件，本包内没有 service 接得住它（后台服务只声明了
+     * `MediaSessionService` 的 intent-filter），`send()` 静默无操作——按钮在、点了没反应。
+     * media3 的通路是**广播到 `MediaButtonReceiver`**，由它把媒体键交给会话服务，
+     * 顺带补上"服务被系统杀掉后，耳机/蓝牙媒体键能把它叫回来"这条链路。
+     *
+     * 返回值实际是 `android.app.PendingIntent`——内核契约是纯 JVM 模块，Android 类型
+     * 只能以 `Any` 出现（与 [attachDisplay] 同一姿势）。null = 引擎没有这条通路，
+     * UI 不要画一颗点了没反应的钮。
+     */
+    fun mediaButtonIntent(action: NpMediaButtonAction): Any? = null
+
+    /**
      * 准备播放指定地址。
      *
      * [title] / [artworkUri] 供媒体通知与锁屏展示（E4）；实现不支持时忽略。
@@ -200,8 +216,15 @@ interface VideoPlayer {
      */
     fun setAutoplayNext(enabled: Boolean) {}
 
-    /** 挂载外挂字幕文件（file 的 content uri）；传入 null 清除；不支持时为空操作 */
-    fun setSubtitle(uri: String?) {}
+    /**
+     * 挂载外挂字幕文件（file 的 content uri）；传入 null 清除；不支持时为空操作。
+     *
+     * [format] = 该字幕文件的**容器格式**，由挂载方从真实文件名判出后显式传进来（A3）。
+     * 为什么不能只给 uri：MediaStore 的 `content://media/external/file/1234` 末段是数字 id、
+     * SAF 的是编码过的文档 id，引擎从 uri 串上取扩展名会一律落到 SubRip——于是自动匹配到的
+     * `.ass` 一条 Cue 都不出。null = 挂载方判不出来，引擎退回按 uri 末段猜（旧行为）。
+     */
+    fun setSubtitle(uri: String?, format: NpSubtitleFormat? = null) {}
 
     /**
      * 选择内嵌轨道（批次 3 轨道面板）。[id] 来自 [tracks] 的 [NpTrack.id]；
@@ -250,12 +273,19 @@ interface VideoPlayer {
     fun release()
 }
 
-/** 播放状态机 */
+/**
+ * 播放状态机。
+ *
+ * **没有"就绪"这一态**（A5）：引擎侧 media3 的 `STATE_READY` 按 `playWhenReady`
+ * 落成 [PlaybackState.Playing] 或 [PlaybackState.Paused]。单独发一个 `Ready`
+ * 只会成为死端——离开它只靠 `onIsPlayingChanged`，而"暂停后拖进度条"
+ * （BUFFERING → READY，`isPlaying` 全程 false）永远不会再回调，
+ * 于是常亮、降档、弹幕、播放钮一起停在错的状态上。
+ */
 sealed interface PlaybackState {
     data object Idle : PlaybackState
     data object Buffering : PlaybackState
     data object Playing : PlaybackState
-    data object Ready : PlaybackState
     data object Paused : PlaybackState
     data object Ended : PlaybackState
 
@@ -290,6 +320,43 @@ interface PlayerEngineProvider : ExtensionPoint {
 
 /** 轨道类型（批次 3 轨道面板） */
 enum class NpTrackType { AUDIO, TEXT }
+
+/**
+ * 媒体键动作（[VideoPlayer.mediaButtonIntent] 的词汇表）。
+ *
+ * 只列引擎需要对外发的那几颗；UI 侧的图标与文案不归这里。
+ */
+enum class NpMediaButtonAction { PLAY, PAUSE, NEXT }
+
+/**
+ * 外挂字幕的容器格式（A3）。
+ *
+ * [extension] 是转码副本沿用的扩展名——副本必须与源同格式，否则引擎按 uri 末段猜 mime
+ * 时会把 `.ass` 当 SubRip 解，`[Script Info]` / `Dialogue:` 对不上时间轴，一条 Cue 都不出。
+ */
+enum class NpSubtitleFormat(val extension: String) {
+    SUBRIP("srt"),
+    WEBVTT("vtt"),
+    SSA("ass"),
+    TTML("ttml"),
+}
+
+/**
+ * 从文件名（优先）或 uri 串判字幕格式；判不出来返回 null，由引擎退回旧口径。
+ *
+ * 调用方应传**真实文件名**而不是 uri：MediaStore 的 `content://media/external/file/1234`
+ * 与 SAF 的文档 uri 末段都是 id，从那里取不到扩展名（A3 的另一半根因）。
+ */
+fun npSubtitleFormatOf(nameOrUri: String): NpSubtitleFormat? =
+    when (
+        nameOrUri.substringAfterLast('.', "").substringBefore('/').substringBefore('?').lowercase()
+    ) {
+        "srt", "sub" -> NpSubtitleFormat.SUBRIP
+        "vtt", "webvtt" -> NpSubtitleFormat.WEBVTT
+        "ass", "ssa" -> NpSubtitleFormat.SSA
+        "ttml", "xml", "dfxp" -> NpSubtitleFormat.TTML
+        else -> null
+    }
 
 /**
  * 一条可选轨道（内嵌音频/字幕轨）。[label] 是人类可读展示名

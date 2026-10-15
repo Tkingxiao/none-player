@@ -20,6 +20,20 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+
+        <!-- A2：媒体键入口。小窗（PiP）的暂停 / 下一集与耳机、蓝牙媒体键都经
+             ACTION_MEDIA_BUTTON 广播到这里，它再按上面的 MediaSessionService intent-filter
+             找到 PlaybackService，把按键交给会话侧播放器执行。
+             exported 是硬性要求：按键由系统媒体栈发出，加 permission 会让耳机键失联——
+             与 service 那条同一口径，刻意豁免。 -->
+        <receiver
+            android:name="androidx.media3.session.MediaButtonReceiver"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.MEDIA_BUTTON" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

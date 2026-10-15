@@ -287,7 +287,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                     )
                 }
                 val prepared = prepareSubtitleUri(context, uri)
-                player.setSubtitle(prepared.uri)
+                player.setSubtitle(prepared.uri, prepared.format)
                 player.setTextTracksEnabled(true)
                 settings.setSubtitleEnabled(true)
                 if (mediaKey.isNotEmpty()) settings.setSubtitleUri(mediaKey, uri.toString())

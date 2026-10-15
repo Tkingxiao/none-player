@@ -141,11 +141,6 @@ object NpMorph {
         progress = 0f
         startedAtMs = NpHandoffTime.now()
         generation++
-        android.util.Log.d(
-            "NpRot",
-            "morph.begin desktop=" + desktop + " turn=" + turn + " parts=" + previous.size +
-                " prevWindow=" + previousWindow + " window=" + windowSize,
-        )
     }
 
     internal fun advance(value: Float) {
@@ -394,7 +389,6 @@ fun NpMorphDriver() {
             if (e >= 1f) break
         }
         NpMorph.end()
-        android.util.Log.d("NpRot", "morph.end generation=" + generation + " duration=" + duration)
     }
 }
 
