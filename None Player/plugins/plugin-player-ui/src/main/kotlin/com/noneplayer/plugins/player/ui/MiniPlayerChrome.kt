@@ -24,6 +24,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -98,12 +99,19 @@ class MiniPlayerChrome : BottomChromeProvider {
         val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
         val desktopLike = LocalNpWindowInfo.current.isDesktopLike
 
-        val miniVisible = summary != null
+        // 可见性读**会话占用的同一份真相**（右栏的 `isOccupied` 也是这两条）：`stop()`
+        // 同步清队列与下标，而 summary 要经 combine→map→stateIn 若干次派发才变 null。
+        // 只读 summary 时，右栏 ✕ 停播后的第一帧仍拿到那枚旧的非空值——底栏这一格
+        // 刚好因为右栏收回而首次进组合，`AnimatedVisibility` 首帧可见=整条瞬时出现，
+        // 下一帧 null 到达才走退场，读起来是"快速跳出然后收回"（2026-10-15 真机实报）。
+        val queue by session.queue.collectAsStateWithLifecycle()
+        val index by session.index.collectAsStateWithLifecycle()
+        val miniVisible = summary != null && queue.getOrNull(index) != null
         // M3 的"出现/收起各响一次"已撤（2026-10-14 用户实报"不要切换界面就震动"）：
         // 迷你条随退页/回页自动进出，那是**界面变化**不是用户操作，用户没碰任何东西。
 
         AnimatedVisibility(
-            visible = summary != null,
+            visible = miniVisible,
             // M3：迷你条的显隐带"内容让位"（expand/shrink），两者共用 `Panel`(180) 的 spring。
             // 默认的 fadeIn()/expandVertically() 是 150ms linear-ish，和底栏其余部分的
             // 手感对不上；这里显式落到令牌上，档位与 Reduce Motion 才能一起生效。
@@ -112,8 +120,11 @@ class MiniPlayerChrome : BottomChromeProvider {
             exit = fadeOut(animationSpec = npMotion(Motion.Panel)) +
                 shrinkVertically(animationSpec = npMotion(Motion.Panel)),
         ) {
-            // 摘要/完整流在退出动画期间会变 null，逐帧读取需要兜底快照
-            val snapshot = summary ?: return@AnimatedVisibility
+            // 摘要/完整流在退出动画期间会变 null，逐帧读取需要兜底快照——
+            // 没有它，条子在收起的第一步就少了内容，退场动画只能收个空壳。
+            var lastSnapshot by remember { mutableStateOf<NowPlaying?>(null) }
+            SideEffect { if (summary != null) lastSnapshot = summary }
+            val snapshot = summary ?: lastSnapshot ?: return@AnimatedVisibility
             val ink = LocalNpInk.current
             Column(
                 modifier = Modifier

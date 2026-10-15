@@ -135,6 +135,9 @@ internal suspend fun ensureSessionPlaying(
             queueOfFolder = queue,
             startPositionMs = startMs,
             audioOnlyMode = mode,
+            // "只装载不起播"必须跟着**这次装载**走进会话与引擎：装载是异步的
+            // （探测 + 建表），下面那一记 pause() 落在探测窗口里是空操作。
+            startPlaying = !prepareOnly,
         )
         if (audioOnlyMode != null) session.setAudioOnly(mode)
         player.setSpeed(settings.playbackSpeed.first())
@@ -158,8 +161,11 @@ internal suspend fun ensureSessionPlaying(
             }
         }
         player.setTextTracksEnabled(settings.subtitleEnabled.first())
-        // `setQueue` 在引擎侧已经把 `playWhenReady` 置了真（A08：装载即起播），
-        // 所以"只装载不起播"必须在这里按停——不然是先播一瞬再停，位置也会往前走。
+        // 这一记管的是"**立刻**停掉上一条可能还在播的媒体"（装载落地要等探测）。
+        // "只装载不起播"本身不能只靠它：`setQueue` 返回时媒体还没进播放器，这句
+        // pause() 落在探测窗口里是空操作，过去会被装载落地里那句 play() 原样覆盖
+        // （真机实报：横屏剧集详情转竖屏，未播放的落点自己播起来）。意图现在随
+        // `startPlaying` 一起进会话与引擎，这里保留按停是为了探测窗口内不串播。
         if (prepareOnly) player.pause() else player.play()
         Log.d("NpRot", "boot NEW-LOAD branch -> ${if (prepareOnly) "pause()" else "play()"}")
         return SessionStart(

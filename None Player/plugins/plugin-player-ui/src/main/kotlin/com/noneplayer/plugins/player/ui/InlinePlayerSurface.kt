@@ -156,10 +156,19 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 val index = queue.indexOfFirst { it.id.isNotEmpty() && it.id == media.id }
                     .takeIf { it >= 0 }
                     ?: queue.indexOfFirst { it.uri == media.uri }
-                if (index >= 0) {
-                    if (session.index.value != index) session.selectQueueIndex(index)
-                } else {
-                    session.startPlayback(item = media)
+                val sameIndex = index >= 0 && session.index.value == index
+                when {
+                    // 同一文件夹里换集：直接跳队列，不要整表重新 prepare。
+                    // 先切换再消费，效应被取消时请求还在，下一次组合能重放。
+                    index >= 0 && !sameIndex -> session.selectQueueIndex(index)
+                    // 会话已停在这一项上、且**一次都没播过**（"只装载不起播"的未播放态）：
+                    // 这个入口只在用户点播放时挂载（autoPlay=true 只来自详情页的播放键），
+                    // 点位就是播放意图，必须落成一次续播——否则用户按下播放毫无反应
+                    // （2026-10-15 真机实测：横屏详情页点「继续观看」）。
+                    // 已经播过的会话不在这里动手：退全屏回来重挂载要保持暂停（E104）。
+                    sameIndex && !session.playbackStarted.value -> session.startPlayback(item = media)
+                    // 会话里没有这一项：整条装载链（同文件夹队列 / 断点 / 字幕记忆）
+                    index < 0 -> session.startPlayback(item = media)
                 }
             }
             mediaOpened = true

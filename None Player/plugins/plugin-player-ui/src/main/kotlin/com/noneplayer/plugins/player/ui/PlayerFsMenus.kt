@@ -12,6 +12,7 @@ import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.npClickable
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,6 +24,7 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -35,7 +37,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -50,7 +52,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
@@ -81,6 +85,8 @@ import com.noneplayer.core.ui.NpMediaPalette
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpSwitch
+import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.NpStableWidth
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npDisplacementAllowed
@@ -511,7 +517,70 @@ fun FsMenuCaption(text: String) {
     )
 }
 
-/** 滑杆行（亮度/音量）：标签 + 数值 + 滑杆，暗色配色 */
+/**
+ * 菜单滑杆的轨道：3dp 圆头线 + 未填底段，与进度条 `NpSeekBar` 同一套语言。
+ *
+ * 不用 M3 的默认轨道——material3 1.3.1 的 `SliderDefaults.Track` 是 **16dp 粗**，
+ * 比这里 12dp 的拇指还厚，同色叠上去拇指整个被轨道吞掉（真机实报「音量条重叠」：
+ * 音量 0 那一行只看得见轨道左端凸出的一点，读不出拇指）。
+ */
+@Composable
+@OptIn(ExperimentalMaterial3Api::class)
+internal fun NpMenuSliderTrack(
+    state: SliderState,
+    activeColor: Color,
+    inactiveColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    val span = state.valueRange.endInclusive - state.valueRange.start
+    val fraction = if (span <= 0f) {
+        0f
+    } else {
+        ((state.value - state.valueRange.start) / span).coerceIn(0f, 1f)
+    }
+    Canvas(modifier = modifier.fillMaxWidth().height(NpDimens.trackLine)) {
+        val h = size.height
+        val radius = CornerRadius(h / 2f, h / 2f)
+        drawRoundRect(color = inactiveColor, size = Size(size.width, h), cornerRadius = radius)
+        drawRoundRect(
+            color = activeColor,
+            size = Size(size.width * fraction, h),
+            cornerRadius = radius,
+        )
+    }
+}
+
+/**
+ * 菜单滑杆的拇指：12dp 圆点，与进度条静止拇指同尺寸（[NpDimens.seekThumbIdle]）。
+ *
+ * 外面那层不是多余的：M3 把拇指槽位钉在 16dp（`requiredSizeIn(minHeight = TrackHeight)`），
+ * 而槽位给内容的约束是 `minHeight = 0` + 高度可无限——圆点直接挂上去是**顶对齐**的，
+ * 真机上比轨道中心高 5px（2dp），看着就像没对齐。撑满槽位再居中，圆点才压在轨道线上。
+ */
+@Composable
+internal fun NpMenuSliderThumb(color: Color = MaterialTheme.colorScheme.primary) {
+    Box(
+        modifier = Modifier.heightIn(min = 16.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier
+                .size(NpDimens.seekThumbIdle)
+                .clip(CircleShape)
+                .background(color),
+        )
+    }
+}
+
+/**
+ * 滑杆行（亮度/音量、字幕字号共用）：图标 + 标签 + 数值 + 滑杆。
+ *
+ * [dark] 取面板语境：`true` = 永远压在画面上的 fs-panel/下拉菜单（黑底白字，
+ * 与应用主题无关）；`false` = 浅色 sheet，字色与未填轨道走 `ink`，否则浅底上的白标签
+ * 整片消失（此前这里就是两套实现：sheet 那套漏配色、轨道又比拇指厚）。
+ *
+ * 数值按 `100` 定宽并右对齐：0→9→10→100 的位数档变化不再回头挤压标签。
+ */
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 fun FsMenuSlider(
@@ -519,8 +588,15 @@ fun FsMenuSlider(
     icon: ImageVector,
     value: Int,
     onValueChange: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+    dark: Boolean = true,
 ) {
-    Column(modifier = Modifier.padding(horizontal = 10.dp)) {
+    val ink = LocalNpInk.current
+    val labelColor = if (dark) Color.White else ink.fg
+    val valueColor = if (dark) Color.White.copy(alpha = 0.6f) else ink.muted
+    val inactiveColor = if (dark) Color.White.copy(alpha = 0.24f) else ink.border
+    val activeColor = MaterialTheme.colorScheme.primary
+    Column(modifier = modifier.padding(top = 12.dp)) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -529,43 +605,36 @@ fun FsMenuSlider(
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = Color.White.copy(alpha = 0.6f),
+                tint = valueColor,
                 modifier = Modifier.size(18.dp),
             )
             Text(
                 text = label,
                 style = NpTypography.bodyMedium,
-                color = Color.White,
+                color = labelColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
-            Text(
-                text = "$value",
+            NpStableWidth(
+                reserve = "100",
                 style = NpMonoSmall,
-                color = Color.White.copy(alpha = 0.6f),
-            )
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                Text(
+                    text = "$value",
+                    style = NpMonoSmall,
+                    color = valueColor,
+                    maxLines = 1,
+                )
+            }
         }
         Slider(
             value = value.toFloat(),
             onValueChange = { onValueChange(it.roundToInt()) },
             valueRange = 0f..100f,
-            thumb = {
-                Box(
-                    Modifier.size(12.dp).clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
-                )
-            },
-            track = { sliderState ->
-                SliderDefaults.Track(
-                    sliderState = sliderState,
-                    drawStopIndicator = null,
-                    thumbTrackGapSize = 0.dp,
-                )
-            },
-            colors = SliderDefaults.colors(
-                thumbColor = MaterialTheme.colorScheme.primary,
-                activeTrackColor = MaterialTheme.colorScheme.primary,
-                inactiveTrackColor = Color.White.copy(alpha = 0.24f),
-            ),
+            thumb = { NpMenuSliderThumb(activeColor) },
+            track = { state -> NpMenuSliderTrack(state, activeColor, inactiveColor) },
             modifier = Modifier.fillMaxWidth(),
         )
     }
@@ -654,8 +723,20 @@ fun FsMainMenuContent(
     FsMenuTitle("循环模式")
     FsLoopChips(loopMode = loopMode, onPick = onLoopMode)
     FsMenuTitle("画面与声音")
-    FsMenuSlider(label = "亮度", icon = NpIcon.Sun, value = brightnessPercent, onValueChange = onBrightness)
-    FsMenuSlider(label = "音量", icon = NpIcon.Sound, value = volumePercent, onValueChange = onVolume)
+    FsMenuSlider(
+        label = "亮度",
+        icon = NpIcon.Sun,
+        value = brightnessPercent,
+        onValueChange = onBrightness,
+        modifier = Modifier.padding(horizontal = 10.dp),
+    )
+    FsMenuSlider(
+        label = "音量",
+        icon = NpIcon.Sound,
+        value = volumePercent,
+        onValueChange = onVolume,
+        modifier = Modifier.padding(horizontal = 10.dp),
+    )
     FsMenuTitle("更多")
     FsMenuRow(label = "音轨", icon = NpIcon.Sound, chevron = true, onClick = { onPage(FsMenuPage.AUDIO) })
     FsMenuRow(label = "画面", icon = NpIcon.AspectRatio, chevron = true, onClick = { onPage(FsMenuPage.PICTURE) })
@@ -854,17 +935,12 @@ fun FsSubtitleMenuContent(
             value = scale,
             onValueChange = onScale,
             valueRange = SUBTITLE_SCALE_MIN..SUBTITLE_SCALE_MAX,
-            thumb = {
-                Box(
-                    Modifier.size(12.dp).clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.primary),
-                )
-            },
-            track = { sliderState ->
-                SliderDefaults.Track(
-                    sliderState = sliderState,
-                    drawStopIndicator = null,
-                    thumbTrackGapSize = 0.dp,
+            thumb = { NpMenuSliderThumb() },
+            track = { state ->
+                NpMenuSliderTrack(
+                    state = state,
+                    activeColor = MaterialTheme.colorScheme.primary,
+                    inactiveColor = Color.White.copy(alpha = 0.24f),
                 )
             },
             modifier = Modifier

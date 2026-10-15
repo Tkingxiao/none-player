@@ -20,6 +20,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -71,6 +72,7 @@ import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -403,6 +405,40 @@ fun NpEyebrow(text: String, modifier: Modifier = Modifier) {
         color = LocalNpInk.current.accent,
         modifier = modifier,
     )
+}
+
+/**
+ * 数字读数的定宽槽——宽度按 [reserve]（这条读数可能出现的最宽样本）撑住，
+ * 读数本身在槽内按 [contentAlignment] 对齐。
+ *
+ * 等宽字体只保证"同一位数不抖"：位数一跨档（`9%`→`10%`→`100%`、`9:59`→`10:00`）
+ * 文本就变长，挨着它的轨道/竖条跟着被挤压或平移——进度条每次跨过整十分钟就短一截、
+ * 手势竖条在滑动中左右跳，都是这一条。占位样本用同族同字号的隐形文本量出真实宽度，
+ * 不猜"一个字符几 dp"，字号缩放与字体替换都跟着走。
+ *
+ * [content] 里放实际读数（自己带 `Text`），胶囊/高亮这类状态装饰挂在贴上去的
+ * `Modifier` 上，宽度才不会随装饰变化。
+ */
+@Composable
+fun NpStableWidth(
+    reserve: String,
+    style: TextStyle,
+    modifier: Modifier = Modifier,
+    contentAlignment: Alignment = Alignment.Center,
+    content: @Composable () -> Unit,
+) {
+    Box(modifier = modifier, contentAlignment = contentAlignment) {
+        Text(
+            text = reserve,
+            style = style,
+            color = Color.Transparent,
+            maxLines = 1,
+            softWrap = false,
+            // 占位样本是装饰性的：读屏不该把 "100%" 这类最宽样本念第二遍
+            modifier = Modifier.clearAndSetSemantics { },
+        )
+        content()
+    }
 }
 
 /**

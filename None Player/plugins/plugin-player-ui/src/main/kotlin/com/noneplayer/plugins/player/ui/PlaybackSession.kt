@@ -274,12 +274,44 @@ class PlaybackSession(
     private val _index = MutableStateFlow(-1)
     val index: StateFlow<Int> = _index.asStateFlow()
 
+    /**
+     * 会话是否**真的开始播过**——"有当前项"与"这是一个播放会话"的区别。
+     *
+     * 竖屏播放页的**未播放态**（路由 `play=0`）也会把媒体装载进会话：`queue`/`index`
+     * 都在，但引擎停在就绪态、用户一次都没按过播放。此时占用语义必须与"在播/暂停"
+     * 区分开：类 PC 右栏是"陪着你浏览的画面"，未播放态占住它，横屏就只剩一个停在
+     * 封面的播放面板，而用户其实只是在看剧集详情（2026-10-15 真机实报"竖屏未播放
+     * 转横屏直接打开右侧栏"）。
+     *
+     * 只装载不起播由 `open(startPlaying = false)` 落下；之后任何人让引擎真的播起来
+     * （用户按播放、通知栏 ▶、播完自动连播）都算"播过"——所以这里**只认引擎状态**，
+     * 不只认会话自己的那几个入口：播放页与通知栏都会直接驱动引擎。
+     */
+    private val _playbackStarted = MutableStateFlow(false)
+    val playbackStarted: StateFlow<Boolean> = _playbackStarted.asStateFlow()
+
     /** 上一次 [acquire] 失败的原因（null = 无）；UI 据此渲染体面失败面板（E88 留尾） */
     private val _engineError = MutableStateFlow<String?>(null)
     val engineError: StateFlow<String?> = _engineError.asStateFlow()
 
     init {
         observeEngineIndex()
+        observePlaybackStarted()
+    }
+
+    /**
+     * "播过"只认**引擎状态**：播放页底栏、通知栏、播完自动连播都会直接驱动引擎，
+     * 会话侧的 `play()`/`open()` 不是唯一入口——只挂在那几处，"用户按了播放、
+     * 转屏却依然不算播放会话"会漏。状态一旦到 [PlaybackState.Playing]，未播放态结束。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observePlaybackStarted() {
+        scope.launch {
+            _player.flatMapLatest { it?.state ?: flowOf(PlaybackState.Idle) }
+                .collect { state ->
+                    if (state == PlaybackState.Playing) _playbackStarted.value = true
+                }
+        }
     }
 
     /**
@@ -415,6 +447,7 @@ class PlaybackSession(
             engineId = null
             _queue.value = emptyList()
             _index.value = -1
+            _playbackStarted.value = false
             return null
         }
         engineId = targetEngineId
@@ -429,6 +462,10 @@ class PlaybackSession(
      * 打开媒体并建立队列（同文件夹连播的来源，§8.2）。
      *
      * 队列写入 media3 会话后，**通知栏 ⏮⏭ 与播完自动下一集由框架免费提供**。
+     *
+     * [startPlaying] = false：**只装载不起播**（竖屏播放页的"未播放态"落点）。
+     * 这条意图同时落到两处：引擎的 `setQueue(playOnLoad = false)`（装载落地不起播）
+     * 与 [playbackStarted]（未播放态不占右栏，见那里的说明）。
      */
     fun open(
         item: MediaItem,
@@ -438,14 +475,16 @@ class PlaybackSession(
          *  （单独的 seekTo 在控制器未就绪时会被静默丢弃，模拟器实测续播丢失）。 */
         startPositionMs: Long = 0L,
         audioOnlyMode: Boolean? = null,
+        startPlaying: Boolean = true,
     ) {
         // 无引擎：会话保持干净（不动队列/下标），原因已写入 engineError 由 UI 呈现
         val player = acquire(item.mimeType) ?: return
         val (list, index) = resolveQueueStart(queueOfFolder, item)
         _queue.value = list
         _index.value = index
+        _playbackStarted.value = startPlaying
         restoreAudioMode(list[index], audioOnlyMode)
-        player.setQueue(list, index, startPositionMs.coerceAtLeast(0L))
+        player.setQueue(list, index, startPositionMs.coerceAtLeast(0L), playOnLoad = startPlaying)
         events.publish(KernelEvent.PlaybackStarted(list[index].id))
         // play_count 在"进入某项播放"时 +1（周期/暂停落点不算，避免被落点次数灌水）
         scope.launch { withContext(Dispatchers.IO) { history.markPlayed(list[index]) } }
@@ -528,6 +567,7 @@ class PlaybackSession(
         p?.clearQueue()
         _queue.value = emptyList()
         _index.value = -1
+        _playbackStarted.value = false
         audioModeRevision++
         _audioOnly.value = false
         setSubtitleOffsetMs(0L)

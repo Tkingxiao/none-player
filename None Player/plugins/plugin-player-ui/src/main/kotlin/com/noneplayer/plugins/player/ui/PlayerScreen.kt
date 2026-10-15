@@ -108,9 +108,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.graphics.ImageBitmap
@@ -176,6 +180,7 @@ import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSheet
 import com.noneplayer.core.ui.NpSwitch
 import com.noneplayer.core.ui.NpSpace
+import com.noneplayer.core.ui.NpStableWidth
 import com.noneplayer.core.ui.NpToastHost
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
@@ -1994,7 +1999,7 @@ fun PlayerScreen(
                     )
                     // 横滑 seek 气泡（§4.3）：拖动中视频照常播放，这里只呈现"松手会去哪"
                     if (seekGestureActive) {
-                        SeekGestureBubbleHost(positionState, seekGestureTargetMsState)
+                        SeekGestureBubbleHost(positionState, seekGestureTargetMsState, durationMs)
                     }
                     // 竖滑亮度/音量指示条（§4.3）：在起手的那一侧显示
                     verticalGesture?.let { mode ->
@@ -2406,7 +2411,7 @@ fun PlayerScreen(
                             }
                             // 横滑 seek 气泡 / 竖滑指示条 / 锁定徽标（与全屏形态同一套，§4.3）
                             if (seekGestureActive) {
-                                SeekGestureBubbleHost(positionState, seekGestureTargetMsState)
+                                SeekGestureBubbleHost(positionState, seekGestureTargetMsState, durationMs)
                             }
                             verticalGesture?.let { mode ->
                                 VerticalAdjustHud(mode, brightnessState, volumeState, 20.dp)
@@ -3039,21 +3044,22 @@ fun PlayerScreen(
                     color = ink0.fg,
                     modifier = Modifier.padding(top = 16.dp),
                 )
-                // 面板变体（onDark=false）：sheet 是浅色 surface，滑杆行必须取主题字色，
-                // 否则沿用 fs-panel 的白色会在浅底上整片消失（实测：标签/数值全不见）。
-                FpSlider(
+                // 面板变体（dark=false）：sheet 是浅色 surface，滑杆行取主题字色与 `ink.border`
+                // 未填轨道；全屏 ⋯ 菜单那一套永远压在画面上，取白。两处共用同一实现，
+                // 轨道粗细与拇指尺寸不再一份 3dp、一份 16dp。
+                FsMenuSlider(
                     icon = NpIcon.Sun,
                     label = "亮度",
                     value = brightnessPercent,
                     onValueChange = ::setBrightnessPercent,
-                    onDark = false,
+                    dark = false,
                 )
-                FpSlider(
+                FsMenuSlider(
                     icon = NpIcon.Sound,
                     label = "音量",
                     value = volumePercent,
                     onValueChange = ::setVolumePercent,
-                    onDark = false,
+                    dark = false,
                 )
                 // 设计稿 .check-row：「允许屏幕截图」开关（关 = FLAG_SECURE 禁止截屏/录屏）
                 Row(
@@ -3235,19 +3241,12 @@ private fun SubtitleSettingsPanel(
                 value = scale,
                 onValueChange = onScale,
                 valueRange = SUBTITLE_SCALE_MIN..SUBTITLE_SCALE_MAX,
-                thumb = {
-                    Box(
-                        Modifier
-                            .size(16.dp)
-                            .clip(CircleShape)
-                            .background(ink.fg),
-                    )
-                },
-                track = { sliderState ->
-                    androidx.compose.material3.SliderDefaults.Track(
-                        sliderState = sliderState,
-                        drawStopIndicator = null,
-                        thumbTrackGapSize = 0.dp,
+                thumb = { NpMenuSliderThumb() },
+                track = { state ->
+                    NpMenuSliderTrack(
+                        state = state,
+                        activeColor = MaterialTheme.colorScheme.primary,
+                        inactiveColor = ink.border,
                     )
                 },
                 modifier = Modifier.weight(1f),
@@ -3985,11 +3984,13 @@ private fun BoxScope.VerticalAdjustHud(
 private fun BoxScope.SeekGestureBubbleHost(
     positionMs: State<Long>,
     targetMs: State<Float>,
+    durationMs: Long,
 ) {
     val target = targetMs.value
     SeekGestureBubble(
         deltaMs = (target - positionMs.value).roundToLong(),
         targetMs = target.roundToLong(),
+        durationMs = durationMs,
         modifier = Modifier.align(Alignment.Center),
     )
 }
@@ -4073,8 +4074,12 @@ internal enum class PlayerBarLayout {
 /**
  * 控制条怎么排：先试完整单行，再试省掉总时长的单行，都不行才拆两行。
  *
- * 宽度预算按固定档位估：触控键 44/颗、传输排 132、时间码 42×字号缩放、
- * 左右内边距与间距 40、进度条最短可拖长度 64。
+ * 宽度预算按固定档位估：触控键 44/颗、传输排 132、左右内边距与间距 40、
+ * 进度条最短可拖长度 64；时间码按**这条片长的真实字符数**估（见 [npTimeCodeBudgetDp]）。
+ *
+ * [timeCodeChars] 传 `formatTimestamp(durationMs).length`：旧的固定 42dp 只够 `12:34`
+ * 这种 5 字读数，片长过一小时就是 7~8 字——预算偏小会把放不下的行判成单行，
+ * 真机上两枚时间码被省略号截断、进度条挤到拖不动（A29）。
  *
  * `preferSingleRow` 只跳过「宽度小于 560dp 就拆」这一条，挡不住大字号和真实放不下的情况。
  */
@@ -4085,6 +4090,7 @@ internal fun playerBarLayout(
     showTransport: Boolean,
     hasLeading: Boolean,
     iconButtonCount: Int,
+    timeCodeChars: Int = 5,
 ): PlayerBarLayout {
     if (!maxWidthDp.isFinite() || maxWidthDp <= 0f) return PlayerBarLayout.SingleRow
     val scale = if (fontScale.isFinite() && fontScale > 0f) fontScale else 1f
@@ -4098,13 +4104,41 @@ internal fun playerBarLayout(
     val icons = 44f * iconButtonCount.coerceAtLeast(0)
     val chrome = 32f + 8f
     val minSeek = 64f
-    val oneTime = 42f * scale
+    val oneTime = npTimeCodeBudgetDp(timeCodeChars, scale)
     val body = leading + icons + chrome + minSeek
     return when {
         body + oneTime * 2f <= maxWidthDp -> PlayerBarLayout.SingleRow
         body + oneTime <= maxWidthDp -> PlayerBarLayout.SingleRowWithoutDuration
         else -> PlayerBarLayout.Split
     }
+}
+
+/**
+ * 一枚时间码的宽度预算：等宽数字 12sp 的单字宽 = 0.6em = 7.2dp，再加 4dp 余量
+ * 给字体替换（OEM 常把 monospace 换成自家等宽族，字宽略大）。
+ */
+internal fun npTimeCodeBudgetDp(chars: Int, fontScale: Float): Float =
+    (7.2f * chars.coerceAtLeast(4) + 4f) * fontScale
+
+/** 底栏时间码（设计稿 `.time-row{font-size:12px}`） */
+private val NpBarTimeCode = NpMono.copy(fontSize = 12.sp)
+
+/**
+ * 拖动读数的胶囊：画在文本外扩 8×3dp，**不占布局**。
+ *
+ * 原先这圈白底是用 `padding` 撑出来的，于是拖动起手的那一瞬间读数要多占 16dp 宽——
+ * 进度条是这一行里唯一 `weight(1f)` 的孩子，那 16dp 全从它身上扣，松手又弹回来。
+ */
+private fun Modifier.npReadoutChip(color: Color): Modifier = drawBehind {
+    val padH = 8.dp.toPx()
+    val padV = 3.dp.toPx()
+    val chipHeight = size.height + padV * 2f
+    drawRoundRect(
+        color = color,
+        topLeft = Offset(-padH, -padV),
+        size = Size(size.width + padH * 2f, chipHeight),
+        cornerRadius = CornerRadius(chipHeight / 2f, chipHeight / 2f),
+    )
 }
 
 @Composable
@@ -4246,6 +4280,7 @@ internal fun PlayerBottomControls(
                     iconButtonCount = 3 +
                         (if (onToggleAudioOnly != null) 1 else 0) +
                         (if (trailingActions != null) 1 else 0),
+                    timeCodeChars = formatTimestamp(durationMs).length,
                 )
                 val split = barLayout == PlayerBarLayout.Split
                 val showDuration = barLayout == PlayerBarLayout.SingleRow
@@ -4289,26 +4324,33 @@ internal fun PlayerBottomControls(
                         onNext = onNext,
                     )
                 }
-                Text(
-                    text = formatTimestamp(
-                        if (userDragging) dragPositionMs.value.toLong() else positionMs.value,
-                    ),
-                    // 设计稿 `.time-row{font-size:12px}`——比 NpMono 默认 13sp 小一号，
-                    // 与下方 pinfo 的 mono 行视觉同级（时间码不该比元数据更抢眼）。
-                    style = NpMono.copy(fontSize = 12.sp),
-                    color = if (userDragging) MaterialTheme.colorScheme.onPrimary else idleColor,
-                    maxLines = 1,
-                    softWrap = false,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = if (userDragging) {
-                        Modifier
-                            .clip(RoundedCornerShape(NpRadius.chip))
-                            .background(MaterialTheme.colorScheme.primary)
-                            .padding(horizontal = 8.dp, vertical = 3.dp)
-                    } else {
-                        Modifier
-                    },
+                val elapsedText = formatTimestamp(
+                    if (userDragging) dragPositionMs.value.toLong() else positionMs.value,
                 )
+                val durationText = formatTimestamp(durationMs)
+                // 已播读数按"本片最长的时间码"定宽：跨过 9:59→10:00、59:59→1:00:00
+                // 这些位数档时，行里唯一 weight(1f) 的孩子（进度条）不再被一点点吃掉。
+                NpStableWidth(
+                    reserve = if (durationText.length >= elapsedText.length) durationText else elapsedText,
+                    style = NpBarTimeCode,
+                    contentAlignment = Alignment.CenterStart,
+                ) {
+                    Text(
+                        text = elapsedText,
+                        // 设计稿 `.time-row{font-size:12px}`——两枚读数同一字号，
+                        // 此前已播 12sp、总时长 13sp，同一行里两种大小。
+                        style = NpBarTimeCode,
+                        color = if (userDragging) MaterialTheme.colorScheme.onPrimary else idleColor,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = if (userDragging) {
+                            Modifier.npReadoutChip(MaterialTheme.colorScheme.primary)
+                        } else {
+                            Modifier
+                        },
+                    )
+                }
                 if (!split) NpSeekBar(
                     durationMs = durationMs,
                     displayPositionMs = displayPosition.value,
@@ -4327,8 +4369,8 @@ internal fun PlayerBottomControls(
                 )
                 if (showDuration) {
                     Text(
-                        text = formatTimestamp(durationMs),
-                        style = NpMono,
+                        text = durationText,
+                        style = NpBarTimeCode,
                         color = idleColor,
                         maxLines = 1,
                         softWrap = false,
@@ -5203,63 +5245,6 @@ private data class QuickTileSpec(
     val danger: Boolean = false,
     val onClick: () -> Unit,
 )
-
-/**
- * fs-panel / more sheet 共用的滑杆行（设计稿 .slider-row）。
- *
- * [onDark] = true 时按 fs-panel（黑底抽屉）取白；= false 时按 sheet（浅色 surface）
- * 取主题字色——两处底色相反，颜色必须跟着变，否则浅底上的白标签会整片消失。
- */
-@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
-@Composable
-private fun FpSlider(
-    label: String,
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    value: Int,
-    onValueChange: (Int) -> Unit,
-    onDark: Boolean = true,
-) {
-    val labelColor = if (onDark) Color.White else MaterialTheme.colorScheme.onSurface
-    val subColor = if (onDark) Color.White.copy(alpha = 0.6f) else MaterialTheme.colorScheme.onSurfaceVariant
-    Column(modifier = Modifier.padding(top = 12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            androidx.compose.material3.Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = subColor,
-                modifier = Modifier.size(18.dp),
-            )
-            Text(text = label, style = NpTypography.bodyMedium, color = labelColor)
-            Box(modifier = Modifier.weight(1f))
-            Text(text = "$value", style = NpMonoSmall, color = subColor)
-        }
-        androidx.compose.material3.Slider(
-            value = value.toFloat(),
-            onValueChange = { onValueChange(it.roundToInt()) },
-            valueRange = 0f..100f,
-            thumb = { CompactSliderThumb() },
-            track = { sliderState ->
-                androidx.compose.material3.SliderDefaults.Track(
-                    sliderState = sliderState,
-                    drawStopIndicator = null,
-                    thumbTrackGapSize = 0.dp,
-                )
-            },
-            modifier = Modifier.fillMaxWidth(),
-        )
-    }
-}
-
-/** 多功能菜单滑杆的拇指：默认 M3 拇指是 4×44dp 的竖线，太大。 */
-@Composable
-private fun CompactSliderThumb() {
-    Box(
-        Modifier
-            .size(12.dp)
-            .clip(CircleShape)
-            .background(MaterialTheme.colorScheme.primary),
-    )
-}
 
 /** 倍速文本（1.0x / 1.25x …） */
 internal fun speedLabel(speed: Float): String =

@@ -50,6 +50,29 @@ class PlayerBarLayoutTest {
         )
     }
 
+    @Test fun longFilmTimeCodesAreBudgetedByTheirRealCharCount() {
+        // 7 字读数（1:00:00）比 5 字（12:34）宽 14.4dp。同一 360dp 竖屏：两枚 7 字
+        // 塞不下，必须先省总时长——旧的固定 42dp 预算在这里判成"放得下"，
+        // 真机上两枚时间码被省略号截断、进度条挤到拖不动（A29）。
+        assertEquals(
+            PlayerBarLayout.SingleRowWithoutDuration,
+            playerBarLayout(
+                360f, 1f,
+                preferSingleRow = true, showTransport = false, hasLeading = true,
+                iconButtonCount = 3, timeCodeChars = 7,
+            ),
+        )
+        // 400dp 才还放得下完整单行
+        assertEquals(
+            PlayerBarLayout.SingleRow,
+            playerBarLayout(
+                400f, 1f,
+                preferSingleRow = true, showTransport = false, hasLeading = true,
+                iconButtonCount = 3, timeCodeChars = 7,
+            ),
+        )
+    }
+
     @Test fun splitsOnlyWhenEvenTheLeanRowDoesNotFit() {
         // 连"一枚时间码 + 最短进度条 + 三枚图标"都塞不下，才回落到两行
         assertEquals(

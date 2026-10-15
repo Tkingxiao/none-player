@@ -120,13 +120,24 @@ interface VideoPlayer {
     /**
      * 装载整个队列并从 [startIndex] 开始播放（队列连播、通知 ⏮⏭ 由此免费获得）。
      * 不支持队列的引擎可退化为只 [prepare] [startIndex] 那一项。
+     *
+     * [playOnLoad] = false 表示**只装载不起播**：装载落地后停在就绪态，等用户按播放
+     * （竖屏播放页的"未播放态"落点）。
+     *
+     * 为什么要进契约，而不是"装载完让调用方再 pause()"：装载是**异步**的
+     * （起播前探测 + 建表），`setQueue` 返回时媒体还没进播放器，调用方那一记
+     * `pause()` 落在空处，随后装载落地里的 `play()` 会把它原样覆盖——"只装载"
+     * 于是变成"播起来"（真机实报：横屏剧集详情转竖屏，未播放的落点自己开始播）。
+     * 意图必须跟着这一次装载一起下发给引擎。
      */
     fun setQueue(
         items: List<com.noneplayer.core.media.MediaItem>,
         startIndex: Int,
         startPositionMs: Long = 0L,
+        playOnLoad: Boolean = true,
     ) {
         items.getOrNull(startIndex)?.let { prepare(it.uri, it.mimeType, it.title, it.coverUri) }
+        if (!playOnLoad) pause()
     }
 
     /** 跳到队列中的指定项（选集面板）；越界忽略 */

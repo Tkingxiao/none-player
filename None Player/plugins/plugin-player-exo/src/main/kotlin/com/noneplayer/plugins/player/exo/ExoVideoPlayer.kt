@@ -148,6 +148,16 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var currentMediaId: String = ""
     private var appliedItems: List<MediaItem> = emptyList()
 
+    /**
+     * 装载落地时的起播意图（A08：装载即起播的"起播"到底要不要）。
+     *
+     * 装载是异步的（探测 + 建表），意图必须在装载**开始**时就定下来，落地时才知道
+     * 该不该 `play()`；而且此后**用户说了算**——探测窗口里按下的 ▶/⏸ 会改写它，
+     * 不被落地那一刻的旧意图覆盖（"只装载"落点里用户点播放，等一秒才播已是上限，
+     * 再被吞掉就不是时序问题了）。
+     */
+    private var loadIntentPlay = true
+
     /** 最近一次探测的 uri；与 currentMediaUri 不一致时（如队列快路径切集后），失败文案不得复用这些名字 */
     private var probedUri: String? = null
     private var probedContainer: String? = null
@@ -437,9 +447,12 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         expectedMime: String? = null,
         sizeBytes: Long = 0L,
         lastModifiedSec: Long = 0L,
+        /** 这一次装载落地后起不起播（见 [loadIntentPlay]）；探测窗口内用户按下的意图会覆盖它 */
+        playIntent: Boolean = true,
         apply: suspend () -> Unit,
     ) {
         prepareJob?.cancel()
+        loadIntentPlay = playIntent
         loadPending = true
         appliedUri = null
         clearCues()
@@ -593,6 +606,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         items: List<com.noneplayer.core.media.MediaItem>,
         startIndex: Int,
         startPositionMs: Long,
+        playOnLoad: Boolean,
     ) {
         if (controller == null) return
         if (items.isEmpty()) return
@@ -612,7 +626,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // 这里对**即将播放的那一项**做探测：不可解则不装载队列，直接落结构化失败态。
         val target = items[safeIndex]
         setCurrentTarget(target)
-        probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
+        probeThenLoad(
+            uri = target.uri,
+            expectedMime = target.mimeType,
+            sizeBytes = target.sizeBytes,
+            lastModifiedSec = target.lastModifiedSec,
+            playIntent = playOnLoad,
+        ) {
             applyQueue(items, safeIndex, startPositionMs)
         }
     }
@@ -660,7 +680,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         loadPending = false
         c.setMediaItems(items, safeIndex, startPositionMs.coerceAtLeast(0L))
         c.prepare()
-        c.play()
+        // A08 的"装载即起播"要按**这一次装载的意图**决定：`playOnLoad = false`
+        // （竖屏未播放态）时停在就绪态。不能靠调用方事后 `pause()`——那一记落在
+        // 探测窗口里是空操作，被这里的一句 `play()` 原样覆盖（真机实报自动起播）。
+        // 读的是 [loadIntentPlay] 而不是入参：探测窗口里用户按下的 ▶/⏸ 已经改写它。
+        if (loadIntentPlay) c.play() else c.pause()
         NpPerf.mark("setMediaItems idx=$safeIndex applied")
     }
 
@@ -712,6 +736,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         pendingSeekMs = null
         setCurrentTarget(target)
         probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
+            // 切集是一次播放意图（用户点的那一集就是要看的），照旧装载即起播
             applyQueue(items, index, 0L)
         }
     }
@@ -1096,10 +1121,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     }
 
     override fun play() {
+        // 用户意图即最新意图：探测没落地时先记下，落地按它起播（见 [loadIntentPlay]）
+        loadIntentPlay = true
         controller?.play()
     }
 
     override fun pause() {
+        loadIntentPlay = false
         controller?.pause()
     }
 

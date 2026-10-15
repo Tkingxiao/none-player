@@ -23,13 +23,13 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpRadius
+import com.noneplayer.core.ui.NpStableWidth
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npDuration
 import kotlin.math.abs
@@ -50,27 +50,42 @@ internal const val GESTURE_INDICATOR_HOLD_MS = 900L
  * 横滑 seek 气泡（§4.3：中心胶囊 `+01:23` / `-00:45` + 目标时间）。
  *
  * 拖动中视频照常播放，气泡只呈现"松手会去哪"：增量带符号、目标时刻绝对值。
+ * 两段读数各自定宽（按本局最长的那串时间码撑），增量变长时目标时刻不再被推着走。
  */
 @Composable
 fun SeekGestureBubble(
     deltaMs: Long,
     targetMs: Long,
+    durationMs: Long,
     modifier: Modifier = Modifier,
 ) {
+    val widest = formatTimestamp(maxOf(durationMs, maxOf(targetMs, abs(deltaMs))))
     BubbleShell(modifier = modifier) {
-        Text(
-            text = (if (deltaMs >= 0) "+" else "-") + formatTimestamp(abs(deltaMs)),
+        NpStableWidth(
+            reserve = "+$widest",
             style = NpMono,
-            color = MaterialTheme.colorScheme.primary,
-        )
-        Text(
-            text = formatTimestamp(targetMs),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                text = (if (deltaMs >= 0) "+" else "-") + formatTimestamp(abs(deltaMs)),
+                style = NpMono,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 1,
+            )
+        }
+        NpStableWidth(
+            reserve = widest,
             style = NpMono,
-            color = Color.White,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+            contentAlignment = Alignment.CenterEnd,
             modifier = Modifier.padding(start = 10.dp),
-        )
+        ) {
+            Text(
+                text = formatTimestamp(targetMs),
+                style = NpMono,
+                color = Color.White,
+                maxLines = 1,
+            )
+        }
     }
 }
 
@@ -78,6 +93,10 @@ fun SeekGestureBubble(
  * 竖滑亮度/音量竖条（§4.3：高 160dp 竖条 + 图标 + 百分比）。
  * 音量 0 时图标换成静音（NpIcon.Sound + 一道斜杠由文字"静音"补充说明——
  * 图标集刻意保持最小，不为一处状态加字形）。
+ *
+ * 百分比按最宽的 `100%` 定宽：整列是 wrap content 且竖条居中，读数一从 `9%` 跳到
+ * `10%`/`100%`，列宽就变、4dp 的竖条跟着横向平移——一次竖滑条子在屏幕上走三段，
+ * 读起来像条子在抖（真机实报）。
  */
 @Composable
 fun VerticalAdjustIndicator(
@@ -120,12 +139,18 @@ fun VerticalAdjustIndicator(
                 )
             }
         }
-        Text(
-            text = if (mode == StageVerticalMode.Volume && percent <= 0) "静音" else "$percent%",
+        NpStableWidth(
+            reserve = "100%",
             style = NpMono,
-            color = Color.White,
             modifier = Modifier.padding(top = 8.dp),
-        )
+        ) {
+            Text(
+                text = if (mode == StageVerticalMode.Volume && percent <= 0) "静音" else "$percent%",
+                style = NpMono,
+                color = Color.White,
+                maxLines = 1,
+            )
+        }
     }
 }
 

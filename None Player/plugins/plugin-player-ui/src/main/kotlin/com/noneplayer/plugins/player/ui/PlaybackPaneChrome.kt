@@ -99,7 +99,8 @@ class PlaybackPaneChrome : DetailPaneProvider {
         // 于是整个类 PC 外壳（含媒体库那一栏）跟着进度 4/s 失效。改订位置无关的摘要。
         val queue by session.queue.collectAsStateWithLifecycle()
         val index by session.index.collectAsStateWithLifecycle()
-        return queue.getOrNull(index) != null
+        val started by session.playbackStarted.collectAsStateWithLifecycle()
+        return isPaneOccupied(queue, index, started)
     }
 
     @Composable
@@ -330,6 +331,21 @@ class PlaybackPaneChrome : DetailPaneProvider {
         }.joinToString(" · ")
     }
 }
+
+/**
+ * 右栏占用的判据（纯函数，便于单测）：**有当前项** 且 **真的播过**。
+ *
+ * 只看"有当前项"会把竖屏播放页的**未播放态**（路由 `play=0` 只装载不起播）也算成占用：
+ * 用户从竖屏的剧集详情转横屏，右栏直接展开一个停在封面的播放面板，而他要看的是
+ * 左栏那份剧集详情（2026-10-15 真机实报"竖屏未播放转横屏直接打开右侧栏"）。
+ * 反面同样要保住：播放过再暂停/播完的会话**仍是**占用——右栏的常驻语义就是
+ * "陪着你浏览"，暂停不该把它收走（E101）。
+ */
+internal fun isPaneOccupied(
+    queue: List<MediaItem>,
+    index: Int,
+    playbackStarted: Boolean,
+): Boolean = playbackStarted && queue.getOrNull(index) != null
 
 @Composable
 internal fun AudioPane(
