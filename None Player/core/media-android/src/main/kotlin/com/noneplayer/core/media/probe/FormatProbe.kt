@@ -264,6 +264,7 @@ object FormatProbe {
 
             val holder = PositionHolder()
             var reads = 0
+            var readThrew = false
             while (reads < MAX_READS) {
                 reads++
                 currentCoroutineContext().ensureActive()
@@ -272,12 +273,19 @@ object FormatProbe {
                 } catch (_: Throwable) {
                     // 解复用中途失败（含部分编码未映射的容器）：轨道信息可能只拿到一半，
                     // 有视频轨照常判定，没有则按"编码无法识别"给原因
+                    readThrew = true
                     break
                 }
                 if (result == Extractor.RESULT_SEEK) {
                     val position = holder.position
                     if (position < 0 || (totalLength != null && position >= totalLength)) break
-                    // 重开取随机访问，避免 skip 扫全文件（moov 在尾部的 MP4）
+                    // 重开取随机访问，避免 skip 扫全文件（moov 在尾部的 MP4）。
+                    // A1 记一笔做不到的事：`DataSource` 接口面上**没有** `seek`/`canSeekAt`
+                    // （那两个只在 `BaseDataSource` 上，而 `DefaultDataSource.Factory()
+                    // .createDataSource()` 的静态类型是 `DataSource`），`ExtractorInput` 同样
+                    // 没有 skip/seek——所以"每块一次 SEEK"在 content:// 上仍是一次
+                    // openAssetFileDescriptor，就地推进只能把 payload 真读出来（几 GB 白读）。
+                    // 要断掉这条风暴得给探测换一个可随机访问的输入，见《任务文档》A1 订正。
                     dataSource.close()
                     dataSource.open(DataSpec(uri, position, C.LENGTH_UNSET.toLong()))
                     input = DefaultExtractorInput(
@@ -306,6 +314,15 @@ object FormatProbe {
                 "matched=${matched.javaClass.simpleName} expectedMime=$expectedMime expectVideo=$expectVideo " +
                     "formats=${output.formats.size} mimes=${output.formats.map { it.sampleMimeType }}",
             )
+            // A1：预算耗尽或读取抛异常，而**一条格式都没拿到** = 拿不准，不是"编码不支持"。
+            // 判 Unplayable 会被写进缓存（缓存条件只排除 Unknown），于是能播的文件被永久
+            // 记成"没有受支持的视频编码"——无 idx1 的 AVI 扫描每块一次 SEEK，400 轮根本
+            // 走不到建索引，正是这条。类注释承诺的"拿不准放行"在这里兑现。
+            if (output.formats.isEmpty() &&
+                (readThrew || (!output.tracksEnded && reads >= MAX_READS))
+            ) {
+                return Result.Unknown
+            }
             return output.decide(effectiveContainer, expectVideo)
         } finally {
             runCatching { dataSource.close() }
