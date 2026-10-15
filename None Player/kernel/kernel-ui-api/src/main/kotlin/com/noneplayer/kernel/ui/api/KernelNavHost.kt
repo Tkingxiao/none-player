@@ -87,9 +87,12 @@ fun KernelNavHost(
     val navController = rememberNavController()
     val navigator = remember(navController) { NavControllerNavigator(navController) }
     // 转屏回调发生在组合之前，播放页必须在那一刻就能被推进栈（见 NpFormHandoff）。
+    // 带令牌解绑：本层若被重建，旧节点的 onDispose 晚于新节点的 bind，
+    // 一把置空会把刚绑上的出口清掉——真机上表现为横转竖不打开播放页、直接停在首页。
+    val navigatorToken = remember(navigator) { Any() }
     DisposableEffect(navigator) {
-        NpFormHandoff.bindNavigator { route -> navigator.navigate(route) }
-        onDispose { NpFormHandoff.bindNavigator(null) }
+        NpFormHandoff.bindNavigator(navigatorToken) { route -> navigator.navigate(route) }
+        onDispose { NpFormHandoff.releaseNavigator(navigatorToken) }
     }
 
     /**
@@ -136,7 +139,7 @@ fun KernelNavHost(
     // ——形态换了画面归属者而自动导航一次，页面位移叠在系统转屏动画上就是用户实报的
     // "切换动画会闪屏、很难看"（见 [NpFormHandoff]）。交接的目标形态本身就是新落点，
     // 没有"从哪一页来"的叙事要表达。
-    fun noPageMotion(): Boolean = NpFormHandoff.isSilent || NpPlayerPaneMotion.flight != null
+    fun noPageMotion(): Boolean = NpFormHandoff.isSilent
 
     // 共享元素「飞行帧」挂**在导航宿主之上**，不能挂在 Shell 里（E120）。转屏交接的
     // 两条路径都会整页换目的地——右栏 → 播放页是 push、播放页 → 右栏是 pop——Shell
@@ -144,10 +147,15 @@ fun KernelNavHost(
     // 这一轮飞行）。此前只有"pop 回 Shell"那一向还留着层可画，另外两向是**零动画**，
     // 用户实报的"几乎看不到切换动画"正是这一条。挪到本层后任何一个目的地都在组合中。
     // 坐标仍是窗口原点：本层 `fillMaxSize`，与各侧上报的 `boundsInWindow()` 同一套。
+    // 整屏 morph 的宿主（E133）：本层就是**窗口原点**上的那个 Box——各部件登记的
+    // `boundsInWindow()` 与它同一套坐标，映射与插值才成立。窗口尺寸每次布局登记，
+    // 上一形态的矩形要靠它搬进新窗口。
+    // 形态标签：过渡那几帧里新旧两棵树可能同时在组合中，登记要认得出"这块是哪个形态的"。
+    val desktopForm = LocalNpWindowInfo.current.isDesktopLike
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .onGloballyPositioned { NpPlayerPaneMotion.recordWindow(it.size) },
+            .onGloballyPositioned { NpMorph.recordWindow(it.size, desktopForm) },
     ) {
         NavHost(
             navController = navController,
@@ -184,7 +192,9 @@ fun KernelNavHost(
             },
             builder = graphBuilder,
         )
-        PlayerPaneMotionOverlay()
+        // 整屏 morph 的节拍器（E133）。取代旧的"抓一帧当幽灵层飞"：不再有盖住整窗的黑幕，
+        // 各部件由自己的 graphicsLayer 从上一形态的位置飞到位（见 NpMorph）。
+        NpMorphDriver()
     }
 }
 

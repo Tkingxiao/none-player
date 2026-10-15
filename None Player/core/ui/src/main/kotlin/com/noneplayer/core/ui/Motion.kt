@@ -78,6 +78,16 @@ object NpEasing {
 
     /** 小手势：chip、开关。 */
     val Snappy: Easing = CubicBezierEasing(0.2f, 0.82f, 0.18f, 1f)
+
+    /**
+     * 整屏 morph（横竖屏形态切换）的**进出对称**曲线：`cubic-bezier(.6,0,.4,1)`。
+     *
+     * 为什么这里不用 [Silk]（参考实现用的就是它）：Silk 的 87% 行程都在前 30% 时间里，
+     * 480ms 的飞行里真正"看得见在动"的只有开头约 150ms——用户两次实报"太快了 / 像闪现"
+     * 都是它。转屏是**整屏重排**，不是一次进场反馈：进出对称才读得出"每一块都在移动"，
+     * 也才受得住把时长往上调。
+     */
+    val Morph: Easing = CubicBezierEasing(0.6f, 0f, 0.4f, 1f)
 }
 
 /**
@@ -134,6 +144,13 @@ object Motion {
     // M2 共享封面（批次 5 唯一允许顺延项，2026-10-08 落地）
     const val Shared = 300      // 卡片 → 播放页共享封面（曲线只用 Emphasized）
     const val AccentShift = 400 // 封面主色切集过渡
+
+    /**
+     * 横竖屏整屏 morph（E133）：平板旋转时，画面、标题、按钮、选集行与封面在同一段里
+     * 各自飞到落点。480ms 取自参考实现 `player-orientation-sim.html` 的 `FLIGHT`，
+     * 曲线用 `NpEasing.Silk`（那份实现里的 `silk` 与设计稿 `--ease-out` 是同一条）。
+     */
+    const val FormMorph = 560
 }
 
 /**

@@ -87,8 +87,14 @@ compose-material3-window-size = { group = "androidx.compose.material3", name = "
 compose-material3-adaptive-navigation-suite = { group = "androidx.compose.material3", name = "material3-adaptive-navigation-suite" }
 androidx-window = { group = "androidx.window", name = "window", version.ref = "window" }
 compose-material-icons = { group = "androidx.compose.material", name = "material-icons-core" }
+# Compose 行为级单测（Robolectric 下跑 createComposeRule）：版本由 compose BOM 管
+compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 
 junit = { group = "junit", name = "junit", version.ref = "junit" }
+# E132 行为级回归：转屏交接的档位翻转与静音窗要能在**真实 recomposition + SideEffect 顺序**
+# 下取证（纯函数层只能钉判据本体）。Robolectric 4.14 支持到 SDK 34，故用例一律 @Config(sdk=[34])。
+robolectric = { group = "org.robolectric", name = "robolectric", version = "4.14.1" }
 kxml2 = { group = "net.sf.kxml", name = "kxml2", version.ref = "kxml2" }
 android-org-json = { group = "org.json", name = "json", version.ref = "android-org-json" }
 androidx-test-runner = { group = "androidx.test", name = "runner", version.ref = "androidxTest" }

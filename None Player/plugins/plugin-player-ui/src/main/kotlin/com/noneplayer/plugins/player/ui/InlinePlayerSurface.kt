@@ -61,8 +61,9 @@ import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.InlinePlaybackProvider
 import com.noneplayer.kernel.ui.api.NpFormHandoff
-import com.noneplayer.kernel.ui.api.NpPicture
-import com.noneplayer.kernel.ui.api.NpPlayerPaneMotion
+import com.noneplayer.kernel.ui.api.NpMorph
+import com.noneplayer.kernel.ui.api.NpMorphKey
+import com.noneplayer.kernel.ui.api.npMorphPart
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
@@ -214,28 +215,9 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         val sleepEndsAt by session.sleepTimerEndsAtMs.collectAsStateWithLifecycle()
         val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
         val surfaceRef = remember { mutableStateOf<android.view.TextureView?>(null) }
-        if (!autoPlay) {
-            val handoffToken = remember { Any() }
-            // 转屏回调用：拆栏**之前**抓这一帧，并连它此刻的矩形一起交给飞行帧
-            // （[NpPicture]）。FLAG_SECURE 下 getBitmap 只会拿到空白，那就交不出东西——
-            // 交接退回纯黑封面，别把一张黑图当成"画面"飞过去。
-            DisposableEffect(handoffToken) {
-                NpFormHandoff.bindPaneHandoff(handoffToken) {
-                    val view = surfaceRef.value
-                    val bounds = NpPlayerPaneMotion.paneBounds()
-                    if (view == null || bounds == null || screenshotBlocked ||
-                        view.width <= 1 || view.height <= 1
-                    ) {
-                        null
-                    } else {
-                        val w = view.width.coerceAtMost(960)
-                        val h = (w.toFloat() * view.height / view.width).toInt().coerceAtLeast(1)
-                        NpPicture(media.uri, runCatching { view.getBitmap(w, h) }.getOrNull(), bounds)
-                    }
-                }
-                onDispose { NpFormHandoff.releasePaneHandoff(handoffToken) }
-            }
-        }
+        // 转屏交接不再从这里抓帧：画面是同一个 TextureView，整屏 morph 直接把它
+        // 从右栏的位置搬到竖屏舞台的位置（E133，见 NpMorph），所以 FLAG_SECURE、
+        // "Surface 还没出画抓不到"这一类兜底分支一并消失。
         val audioManager = remember {
             context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
         }
@@ -362,11 +344,12 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 mirrored = mirrored,
                 rotation = rotation,
                 onSurfaceView = { surfaceRef.value = it },
-                // 右栏的画面本体每次布局上报矩形：转屏交接得从这里起飞、也落到这里。
-                // 详情页的内联画面（autoPlay）不参与交接，别去覆盖右栏的登记。
-                onVideoBounds = if (autoPlay) null else {
-                    { bounds -> NpPlayerPaneMotion.recordPane(media.uri, bounds) }
-                },
+                // 右栏的画面本体参与整屏 morph。详情页的内联画面（autoPlay）不参与：
+                // 一台播放器只有一个输出 Surface，两个候选起点会互相抢。
+                morphKey = if (autoPlay) null else NpMorphKey.Video,
+                // 右栏 = 类 PC 形态；详情页内联（autoPlay）不参与，传 null。
+                morphDesktop = if (autoPlay) null else true,
+                morphRotate = !autoPlay,
                 modifier = Modifier.fillMaxSize(),
             )
             // 暂停时中央播放钮（与播放页同款玻璃大钮）

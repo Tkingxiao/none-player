@@ -9,6 +9,7 @@ import android.app.PictureInPictureParams
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
+import android.view.OrientationEventListener
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -29,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -56,7 +58,9 @@ import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
 import com.noneplayer.kernel.ui.api.KernelNavHost
+import com.noneplayer.kernel.ui.api.NpDevicePose
 import com.noneplayer.kernel.ui.api.NpFormHandoff
+import com.noneplayer.kernel.ui.api.NpHingeSample
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.rememberNpWindowInfo
@@ -86,6 +90,9 @@ class MainActivity : ComponentActivity() {
      */
     private val deepLinkIntents = Channel<Intent>(Channel.UNLIMITED)
     private val deepLinkFlow = deepLinkIntents.receiveAsFlow()
+
+    /** 转屏残差：幽灵帧的 rotationZ 要跟手腕，而不是只吃 0/90/180/270 四档。 */
+    private var tiltWatcher: OrientationEventListener? = null
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
@@ -198,12 +205,40 @@ class MainActivity : ComponentActivity() {
         ViewCompat.getRootWindowInsets(window.decorView)
             ?.isVisible(WindowInsetsCompat.Type.ime()) == true
 
+    override fun onStart() {
+        super.onStart()
+        NpDevicePose.noteDisplayRotation(displayRotation())
+        if (tiltWatcher == null) {
+            tiltWatcher = object : OrientationEventListener(this) {
+                override fun onOrientationChanged(orientation: Int) {
+                    NpDevicePose.noteTilt(orientation)
+                }
+            }
+        }
+        if (tiltWatcher?.canDetectOrientation() == true) tiltWatcher?.enable()
+    }
+
+    override fun onStop() {
+        tiltWatcher?.disable()
+        super.onStop()
+    }
+
     override fun onConfigurationChanged(newConfig: Configuration) {
         // 必须先于 super：super 会让 Compose 用新尺寸组出第一帧。那一帧若还是首页，
         // 系统转屏截图和用户看见的就是剧集封面，而不是竖屏播放页。
+        // 旋转角也要先记下，交接起飞才能算出这一下转了 ±90 还是 180。
+        NpDevicePose.noteDisplayRotation(displayRotation())
         NpFormHandoff.handoffForWindowSize(newConfig.screenWidthDp, newConfig.screenHeightDp)
         super.onConfigurationChanged(newConfig)
     }
+
+    @Suppress("DEPRECATION")
+    private fun displayRotation(): Int =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.rotation ?: android.view.Surface.ROTATION_0
+        } else {
+            windowManager.defaultDisplay.rotation
+        }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (super.onKeyDown(keyCode, event)) return true
@@ -228,10 +263,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // 系统默认的 3D 转屏会把转场中间帧（首页、封面、两层画面）一起旋进录屏。
-        // 交接动画只留在播放页里，窗口本身硬切。
+        // 窗口硬切；画面与按钮的位移/缩放由整屏 morph 承担（NpMorph）——系统那套
+        // 截图旋转只会把中间帧一起旋进来，我们要的是自己这一段连续的移动。
         window.attributes = window.attributes.apply {
             rotationAnimation = WindowManager.LayoutParams.ROTATION_ANIMATION_JUMPCUT
         }
+        NpDevicePose.noteDisplayRotation(displayRotation())
         val kernel = (application as NonePlayerApplication).kernel
 
         setContent {
@@ -427,8 +464,20 @@ private fun rememberFoldingFeature(activity: Activity): Boolean {
         .getOrCreate(context)
         .windowLayoutInfo(activity)
         .collectAsStateWithLifecycle(initialValue = null)
-    return layoutInfo?.displayFeatures?.any { feature ->
-        feature is androidx.window.layout.FoldingFeature &&
-            feature.state != androidx.window.layout.FoldingFeature.State.FLAT
-    } == true
+    val folding = layoutInfo?.displayFeatures
+        ?.firstOrNull { it is androidx.window.layout.FoldingFeature }
+        as? androidx.window.layout.FoldingFeature
+    // 铰链是开合不是转腕：分离态下别把倾角加进幽灵帧的 rotationZ。
+    SideEffect {
+        NpDevicePose.noteHinge(
+            folding?.let {
+                NpHingeSample(
+                    horizontal = it.orientation == androidx.window.layout.FoldingFeature.Orientation.HORIZONTAL,
+                    separating = it.isSeparating,
+                )
+            },
+        )
+    }
+    return folding != null &&
+        folding.state != androidx.window.layout.FoldingFeature.State.FLAT
 }

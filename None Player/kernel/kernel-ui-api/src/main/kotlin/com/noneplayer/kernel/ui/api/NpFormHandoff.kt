@@ -1,7 +1,5 @@
 package com.noneplayer.kernel.ui.api
 
-import android.graphics.Bitmap
-import android.os.SystemClock
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -20,7 +18,8 @@ import androidx.compose.runtime.setValue
  * 全屏放大"——用户实报"生硬且奇怪"。
  *
  * **时限而不是消费即清**：一次交接会被转场的多个 lambda 读到（enter + exit，或 popEnter +
- * popExit），第一个读的人清掉会让后半截照旧动画。600ms 后自动失效。
+ * popExit），第一个读的人清掉会让后半截照旧动画。终点以飞行层还在不在为准（见 [isSilent]），
+ * [WINDOW_MS] 秒表只在没有飞行可观测时兜底。
  *
  * **标记要盖住"没有导航的形态变化"**（第二轮真机取证）：右栏没在播、横屏停在剧集详情页时
  * 压根没有路线可交接，但那一帧详情页照样要在竖屏收成首页——`LibraryScreen` 的 stage
@@ -29,9 +28,9 @@ import androidx.compose.runtime.setValue
  *
  * **画面本身也要连着**（第三轮：用户实报"没有应有的动效，只有黑色背景及播放内容的全屏
  * 生硬转换"）：交接只做到"不淡不滑"还不够——画面的归属者换了地方，那一帧得**从它原来的
- * 位置移到它要去的位置**（[NpPlayerPaneMotion] 的飞行帧）。两侧各自登记抓帧口：
- * [bindPaneHandoff] 给右栏（拆栏之前抓帧）、[bindStageHandoff] 给竖屏播放页（退页之前
- * 抓帧并退页）。转屏回调在**第一帧之前**调用它们，抓到的帧与矩形随交接一起飞。
+ * 位置移到它要去的位置——整屏 morph（[NpMorph]）：新版式的画面、标题、按钮、选集行
+ * 各自从上一形态里同名的位置飞到位。转屏回调在**第一帧之前**冻结那批矩形
+ * （[noteForm] 里的 [NpMorph.begin]），随后才导航/退页。
  */
 object NpFormHandoff {
 
@@ -39,106 +38,200 @@ object NpFormHandoff {
     private const val PLAYER_HOLD_MS = 500L
     private const val PANE_TAKEOVER_MS = 600L
 
+    /** 飞行状态能给转场的静音上限：异常留住的 flight 不许把整站转场永久静音（见 [isSilent]）。 */
+    private const val CEILING_MS = 2_500L
+
+    /** [keepsDesktopChrome] 等几何的天花板：驱动者没跑起来时左栏也不能无限期留在类 PC 版。 */
+    private const val CHROME_HOLD_MS = 800L
+
     private var silentUntil = 0L
+    private var silentStartedAt = 0L
+
+    /**
+     * 这一次 `mark()` 是不是替某轮 morph 打的。绑定的 morph 一走就放开静音——
+     * 否则秒表会把手工翻页的转场一起吞掉，最长 [WINDOW_MS]（E132 的误触发路径）。
+     */
+    private var silentMorphSeen = false
     private var playerHoldUntil = 0L
     private var paneTakeoverUntil = 0L
-    private var wasDesktop = false
+
+    /**
+     * 档位翻转状态。判据与归约都在 [NpFormDecision]：两条上报路径（Activity 的
+     * `onConfigurationChanged` 与外壳的 `SideEffect`）对同一份窗口配置只会翻转一次，
+     * 第二次由归约拒掉——旧写法两边各算一套阈值，同一次物理旋转被判成两次档位变化。
+     */
+    private var flipState = NpFormFlipState(desktop = false)
 
     /**
      * 档位变化的轮次号。**同一轮只允许起飞一次**（第四轮真机取证）：
-     * 转屏会被两条路径各报一次——Activity 的 [handoffForWindowSize] 与外壳的 [noteDesktop]
-     * ——第二次进来时 `wasDesktop` 已经更新过，若还照旧判定就会落到 [handOverToPane] 上，
-     * 而那一侧只认 `playerPageAlive`，转屏后播放页刚挂上就为真，于是**又起飞一次**。
-     * 第二次起飞手里没有帧也没有源矩形（那一侧的画面已经交出去了），它把带帧的真实飞行
-     * 顶掉之后，飞行层只剩"整屏黑"这一种画法：真机录屏逐帧核对到的正是
-     * "黑屏 1.35s + 播放内容生硬切换"，用户读到的是"没有动效"。
+     * 转屏会被两条路径各报一次，第二次进来时手里既没有帧也没有源矩形（那一侧的画面已经
+     * 交出去了），它把带帧的真实飞行顶掉之后，飞行层只剩"整屏黑"这一种画法：真机录屏
+     * 逐帧核对到的正是"黑屏 1.35s + 播放内容生硬切换"，用户读到的是"没有动效"。
+     *
+     * 归约层已经拒掉"同一份配置的第二次翻转"（E132），这里的判重继续管
+     * "同一轮里两个方向都来一次"的历史路径，两道闸各自成立。
      */
-    private var formGeneration = 0
+    private val formGeneration: Int get() = flipState.generation
     private var paneHandoffGen = -1
     private var playerPageHandoffGen = -1
     private var paneRoute: String? = null
     private var detailRoute: String? = null
-    private var navigate: ((String) -> Unit)? = null
+    private var navigatorToken: Any? = null
+    private var navigateSlot: ((String) -> Unit)? = null
 
     /** 独占播放页在不在栈上。在的话形态变化不归本对象管——那一页自己会适配。 */
     private var playerPageAlive = false
 
-    /** 右栏侧登记的抓帧口（见 [bindPaneHandoff]）。单槽：一台播放器只有一个输出 Surface。 */
-    private var paneToken: Any? = null
-    private var paneCapture: (() -> NpPicture?)? = null
+    /**
+     * 独占播放页正按用户的**「全屏」意图**占着整屏（`orientationLock == Landscape`）。
+     *
+     * 平板竖屏点全屏 = 请求横向，而横向在类 PC 档正是"右栏 + 左栏剧集"那一版式。
+     * 不做区分的话这一下会被判成"进类 PC 档"，播放页当场退页、画面缩进右栏，
+     * 用户读到的就是"点全屏没反应/全屏不起来"（2026-10-15 真机实报）。
+     * 用户明确点了全屏，这一档就归播放页自己占，交接不接管。
+     */
+    private var stageFullscreen = false
 
-    /** 竖屏播放页侧登记的抓帧口 + 退页动作（见 [bindStageHandoff]）。 */
+    /** 竖屏播放页登记的退页动作（见 [bindStageRetire]）。单槽：同一时刻只有一个独占页。 */
     private var stageToken: Any? = null
-    private var stageCapture: (() -> NpPicture?)? = null
     private var stageRetire: (() -> Unit)? = null
 
-    /** 交接带过来的那一帧（按媒体 uri + 落点取，见 [posterFor]）。只在主线程读写。 */
-    private var posterUri: String? = null
-    private var posterFrame: Bitmap? = null
-    private var posterTarget: NpHandoffTarget? = null
-
-    /** 转屏驱动的交接（播放页 ↔ 右栏）在发起导航之前打点 */
-    fun mark() {
-        silentUntil = SystemClock.elapsedRealtime() + WINDOW_MS
+    /**
+     * 用例之间复位。
+     *
+     * 本对象是进程级单例，档位翻转历史（[flipState]）与三道秒表都会跨用例残留；
+     * Robolectric 在同一个 SDK 沙箱里复用静态状态，行为级回归必须从这里回到干净的起点。
+     */
+    internal fun resetForTests() {
+        silentUntil = 0L
+        silentStartedAt = 0L
+        silentMorphSeen = false
+        playerHoldUntil = 0L
+        paneTakeoverUntil = 0L
+        flipState = NpFormFlipState(desktop = false)
+        paneHandoffGen = -1
+        playerPageHandoffGen = -1
+        paneRoute = null
+        detailRoute = null
+        navigateSlot = null
+        navigatorToken = null
+        playerPageAlive = false
+        stageFullscreen = false
+        stageToken = null
+        stageRetire = null
     }
 
-    /** 转场读它：true 时整页不淡不滑，直接落位 */
-    val isSilent: Boolean get() = SystemClock.elapsedRealtime() < silentUntil
+    /** 转屏驱动的交接（播放页 ↔ 右栏）在发起导航之前打点。
+     *
+     * [boundToMorph] 为真表示这次静音是**替这一轮 morph** 打的：morph 一结束静音就放开，
+     * 秒表不许再吞掉用户下一次真实翻页的转场（E132）。
+     */
+    fun mark(boundToMorph: Boolean = false) {
+        val now = NpHandoffTime.now()
+        silentStartedAt = now
+        silentUntil = now + WINDOW_MS
+        silentMorphSeen = boundToMorph || NpMorph.isFlying
+    }
+
+    /**
+     * 转场读它：true 时整页不淡不滑，直接落位。
+     *
+     * **以 morph 状态为准，秒表只兜"没有版式要飞"的形态变化**：整屏 morph 是 480ms 补间
+     * 加落位后的重排，秒表先到期的话，右栏宽度动画与整页淡移会被放回"部件正在飞"的那几百
+     * 毫秒里，读感又回到"跳一下"。反向的误触发也一并堵掉：morph 已经结束而秒表还没到期时
+     * 不再静音。判据本体是纯函数 [npHandoffSilent]，输入见 [gate]。
+     */
+    val isSilent: Boolean get() = NpMorph.isFlying || npHandoffSilent(gate())
+
+    /**
+     * 形态交接正在演（含"已起飞、新形态还没量出来"的那几帧）。
+     *
+     * 外壳靠它把**左栏留在类 PC 那一版**直到交接落位：横转竖时 `isDesktopLike` 一翻，
+     * `LibraryScreen` 的 `detailOpen` 立刻为假、左栏当场收成媒体库首页，而竖屏播放页还在
+     * 下一帧才组合出来——用户实报的"背景里闪过首页和剧集页"就是这一帧。留住它，播放页
+     * 盖上来之后外壳再收，那一帧就看不见了。
+     */
+    val keepsDesktopChrome: Boolean get() =
+        NpMorph.generation > 0 && (
+            NpMorph.isFlying ||
+                (!NpMorph.geometryReady && NpHandoffTime.now() - NpMorph.startedAtMs < CHROME_HOLD_MS)
+            )
+
+    /**
+     * 静音窗的输入快照。morph 状态在这里**可观测**（读的是 `NpMorph.isFlying`/`progress`
+     * 快照状态，组合期读它会随起飞/落位重组），行为级单测也从这里取证。
+     */
+    internal fun gate(): NpHandoffGate {
+        val flying = NpMorph.isFlying
+        val now = NpHandoffTime.now()
+        // mark 之后才起飞的调用点（PlayerScreen 的「交还浏览态」先 mark 再 begin）在这里补认。
+        if (NpMorph.startedAtMs >= silentStartedAt) silentMorphSeen = true
+        return NpHandoffGate(
+            flightActive = flying,
+            flightAgeMs = if (flying) now - NpMorph.startedAtMs else Long.MAX_VALUE,
+            silentRemainingMs = silentUntil - now,
+            silentBoundToFlight = silentMorphSeen,
+            ceilingMs = CEILING_MS,
+        )
+    }
 
     /**
      * 刚从右栏交接到播放页的短窗口。这段里播放页不要因为尺寸回跳再 `pop` 回首页。
      */
-    fun holdsPlayer(): Boolean = SystemClock.elapsedRealtime() < playerHoldUntil
+    fun holdsPlayer(): Boolean = NpHandoffTime.now() < playerHoldUntil
 
     /**
      * 进入类 PC 档的那一轮交接有没有被外壳接手（连退页一起发起了）。独占播放页的兜底
      * 退页要据此让路：接手过之后再退一次就是把媒体库首页也弹掉。
      */
-    fun tookOverToPane(): Boolean = SystemClock.elapsedRealtime() < paneTakeoverUntil
+    fun tookOverToPane(): Boolean = NpHandoffTime.now() < paneTakeoverUntil
 
-    fun bindNavigator(navigate: ((String) -> Unit)?) {
-        this.navigate = navigate
+    /**
+     * 绑定导航器。**令牌而不是置空**（与 [bindPaneHandoff] 同一教训）：
+     * 转屏交接要在 `onConfigurationChanged` 里用这个槽导航，而槽一旦被"后离开的挂载者"
+     * 置空，交接就只剩路线没有出口——真机上表现为横转竖不打开播放页、直接停在首页。
+     */
+    fun bindNavigator(token: Any, navigate: (String) -> Unit) {
+        navigatorToken = token
+        navigateSlot = navigate
     }
+
+    fun releaseNavigator(token: Any) {
+        if (navigatorToken === token) {
+            navigatorToken = null
+            navigateSlot = null
+        }
+    }
+
+    /** 交接用的导航出口。读它而不是直接调，便于把"没有出口"这条失败路径打进日志。 */
+    private fun navigator(): ((String) -> Unit)? = navigateSlot
 
     /** 独占播放页挂载/卸载时上报（见 [playerPageAlive]）。 */
     fun notePlayerPage(alive: Boolean) {
         playerPageAlive = alive
     }
 
+    /** 独占播放页上报"现在是用户点出来的全屏"（见 [stageFullscreen]）。 */
+    fun noteStageFullscreen(fullscreen: Boolean) {
+        stageFullscreen = fullscreen
+    }
+
     /**
-     * 右栏侧登记"抓帧"口：转屏回调在拆栏**之前**调它，取走当前画面本体与它此刻的矩形。
-     * 抓不到（没在播、被 FLAG_SECURE 拒了、Surface 还没出画）返回 null，交接就退回纯黑。
+     * 竖屏播放页登记"退页"动作。窗口转横（进类 PC 档）时画面归右栏，外壳要在**第一帧
+     * 横屏画出来之前**调它退页——不这样做，那一帧就是播放内容被全屏放大成横屏版式
+     * （用户实报"生硬且奇怪"）。
      *
-     * 用令牌而不是"置空"：右栏与详情页的内联画面会在同一次组合里先后挂载，
-     * 谁是后离开的谁就把别人的登记清掉了（旧实现在真机上丢过帧）。
+     * 用令牌而不是置空：播放页与外壳的挂载顺序在不同路径上不一样，
+     * 谁是后离开的谁就把别人的登记清掉了（旧实现在真机上丢过出口）。
      */
-    fun bindPaneHandoff(token: Any, capture: () -> NpPicture?) {
-        paneToken = token
-        paneCapture = capture
-    }
-
-    fun releasePaneHandoff(token: Any) {
-        if (paneToken === token) {
-            paneToken = null
-            paneCapture = null
-        }
-    }
-
-    /**
-     * 竖屏播放页侧登记抓帧口与退页动作。窗口转横（进类 PC 档）时画面归右栏，由外壳在
-     * 退页**之前**调 [capture] 取走最后一帧，再调 [retire] 退页——不这样做，那一帧就是
-     * 播放内容被全屏放大成横屏版式（用户实报"生硬且奇怪"）。
-     */
-    fun bindStageHandoff(token: Any, capture: () -> NpPicture?, retire: () -> Unit) {
+    fun bindStageRetire(token: Any, retire: () -> Unit) {
         stageToken = token
-        stageCapture = capture
         stageRetire = retire
     }
 
-    fun releaseStageHandoff(token: Any) {
+    fun releaseStageRetire(token: Any) {
         if (stageToken === token) {
             stageToken = null
-            stageCapture = null
             stageRetire = null
         }
     }
@@ -167,120 +260,89 @@ object NpFormHandoff {
      * 而媒体库在那之后没有新的失效点，再也没人把详情页的路线登记回来。
      */
     fun clearPaneRouteWhileDesktop() {
-        if (wasDesktop) paneRoute = null
+        if (flipState.desktop) paneRoute = null
     }
 
     fun clearDetailRouteWhileDesktop() {
-        if (wasDesktop) detailRoute = null
-    }
-
-    fun stashPoster(picture: NpPicture, target: NpHandoffTarget) {
-        val frame = picture.frame ?: return
-        if (frame.isRecycled) return
-        posterUri = picture.uri
-        posterFrame = frame
-        posterTarget = target
-    }
-
-    /**
-     * 交接落地那一帧的静止封面（按 uri 与**落点**认领，取走即清）。落点的新 Surface
-     * 出画前用它顶着，否则飞行帧落位淡出之后会露出一段黑舞台。
-     *
-     * 按落点认领是必需的：交接的两个方向里，**离开**的那一侧还在画最后几帧，
-     * 它若顺手把封面取走，正在进场的落点这边就什么也捞不着。
-     */
-    fun posterFor(uri: String, target: NpHandoffTarget): Bitmap? {
-        val hit = posterFrame?.takeIf {
-            !it.isRecycled && posterUri == uri && posterTarget == target
-        }
-        if (hit != null) {
-            posterFrame = null
-            posterUri = null
-        }
-        return hit
+        if (flipState.desktop) detailRoute = null
     }
 
     /** 转屏回调用：在第一帧组合之前按新窗口尺寸决定要不要打开播放页。 */
     fun handoffForWindowSize(screenWidthDp: Int, screenHeightDp: Int) {
-        noteForm(isDesktopLikeWindow(screenWidthDp, screenHeightDp))
+        noteForm(NpFormConfig(screenWidthDp, screenHeightDp, NpDevicePose.displayRotation))
     }
 
-    /** 外壳记档类 PC 档；档位变了就走同一条交接判定。 */
-    fun noteDesktop(nowDesktop: Boolean) = noteForm(nowDesktop)
+    /**
+     * 外壳记档类 PC 档；带上**这一份窗口配置**而不是只带布尔。
+     *
+     * 外壳的 `SideEffect` 与 Activity 的转屏回调会对同一次旋转各报一次，归约只认第一次，
+     * 第二次直接拒——旧写法两边各自判档（一套 WindowSizeClass、一套硬编码 dp），
+     * 判据不等价时同一次旋转被判成两次档位变化（E132）。
+     */
+    fun noteDesktop(config: NpFormConfig) = noteForm(config)
 
     /**
      * 窗口类 PC 档变化时调用，且必须发生在这次配置下的第一帧组合之前。
      * 离开类 PC 时按「右栏在播 → 详情页开着」的顺序挑一条路线打开竖屏播放页；
      * 进入类 PC 时把独占播放页的画面与退页一并交出去。
      */
-    fun noteForm(nowDesktop: Boolean) {
-        // 档位没变 = 不是交接。这一条**必须**先判：同一个档位会被反复上报
-        // （Activity 的转屏回调 + 外壳每次记档），不判就会在下面误触发一轮新的交接。
-        if (wasDesktop == nowDesktop) return
-        val leaving = wasDesktop && !nowDesktop
-        wasDesktop = nowDesktop
-        formGeneration++
+    fun noteForm(config: NpFormConfig) {
+        val (next, changed) = npReduceFormFlip(flipState, config)
+        flipState = next
+        // 档位没变 = 不是交接，同一份配置的第二次上报也在这里被拒。
+        if (!changed) return
+        val leaving = !next.desktop
         android.util.Log.d(
             "NpRot",
-            "handoff.noteForm nowDesktop=$nowDesktop gen=$formGeneration leaving=$leaving playerPageAlive=$playerPageAlive",
+            "handoff.noteForm config=$config desktop=$leaving gen=$formGeneration playerPageAlive=$playerPageAlive",
         )
+        // **换版式之前**冻结这一批部件矩形：morph 的起点就是"上一形态里它们所在的位置"，
+        // 晚一步登记上来的已经是新形态的矩形，起点就没了（E133）。
+        // 带上这一下显示转过的角度：起点要按刚体旋转折进新窗口，而不是按「窗口归一化位置」
+        // 搬——后者会把竖屏顶部满宽的画面搬到横屏窗口正中央（用户实报的"先全屏再跳右栏"）。
+        NpMorph.begin(desktop = next.desktop, turn = NpDevicePose.turnDegrees)
         if (leaving) handOverToPlayerPage() else handOverToPane()
     }
 
     /**
-     * 起飞。**抓不到画面就不起飞、也不 [mark]**——飞行层没有帧可画，那它就只剩一层铺满
-     * 整窗的黑底（真机实报的"只有黑色背景及播放内容的全屏生硬转换"正是它）。这种情况
-     * 让页面路由的正常转场去演，至少是一段看得见的位移，好过一屏黑。
-     */
-    private fun beginFlight(picture: NpPicture?, towardsPane: Boolean): Boolean {
-        val frame = picture?.frame ?: return false
-        val from = picture.rect ?: return false
-        mark()
-        NpPlayerPaneMotion.begin(frame, from, towardsPane)
-        return true
-    }
-
-    /**
-     * 离开类 PC 档：画面归属者从右栏换到竖屏播放页。两种起始形态的源不一样：
+     * 离开类 PC 档：画面归属者从右栏换到竖屏播放页。两种起始形态的处置不一样：
      *
-     * ① 独占播放页占着整屏（`playerPageAlive`）：源在本页自己的舞台上，页面留在栈上
-     *    适配新形态（见 `PlayerScreen` 的形态分派），所以只起飞、不导航；
-     * ② 浏览态右栏在播：源在右栏的画面里，本页还没挂载——起飞**并且**导航过去。
+     * ① 独占播放页占着整屏（`playerPageAlive`）：页面留在栈上自己适配新形态
+     *    （见 `PlayerScreen` 的形态分派）。整屏 morph 已经在 [noteForm] 里起飞，这里无事可做；
+     * ② 浏览态右栏在播：本页还没挂载——导航过去，让播放页里的画面与按钮节点
+     *    从右栏那批矩形的位置飞进竖屏版式。
      */
     private fun handOverToPlayerPage() {
         if (playerPageHandoffGen == formGeneration) return
         if (playerPageAlive) {
-            // ①：抓帧必须在版式重排之前（旧形态的矩形才是"从哪来"）
-            val picture = stageCapture?.invoke() ?: return
-            android.util.Log.d("NpRot", "handoff.case1 stage picture=$picture rect=${picture.rect}")
             playerPageHandoffGen = formGeneration
-            beginFlight(picture, towardsPane = false)
             return
         }
-        // ②：抓帧必须在拆栏之前——先清上一轮没被取走的封面，免得旧帧冒充这一轮画面
+        val go = navigator()
         val route = formHandoffRoute(
             leavingDesktop = true,
             playerPageAlive = false,
             paneRoute = paneRoute,
             detailRoute = detailRoute,
-        ) ?: return
-        val go = navigate ?: return
+        )
+        android.util.Log.d(
+            "NpRot",
+            "handoff.case2 route=$route paneRoute=$paneRoute detailRoute=$detailRoute navigator=${go != null}",
+        )
+        if (route == null || go == null) return
         paneRoute = null
         detailRoute = null
-        posterFrame = null
-        posterUri = null
-        val picture = paneCapture?.invoke()
-        android.util.Log.d("NpRot", "handoff.case2 pane picture=$picture rect=${picture?.rect} route=$route")
-        picture?.let { stashPoster(it, NpHandoffTarget.PLAYER_PAGE) }
         playerPageHandoffGen = formGeneration
-        beginFlight(picture, towardsPane = false)
-        playerHoldUntil = SystemClock.elapsedRealtime() + PLAYER_HOLD_MS
+        mark(boundToMorph = true)
+        playerHoldUntil = NpHandoffTime.now() + PLAYER_HOLD_MS
         go(route)
     }
 
-    /** 进入类 PC 档：画面归右栏，独占播放页交出最后一帧后退页。 */
+    /** 进入类 PC 档：画面归右栏，独占播放页退页。morph 的起点已在 [noteForm] 里冻结。 */
     private fun handOverToPane() {
         if (!playerPageAlive) return
+        // 这一下横向是用户点「全屏」要来的：整屏归播放页，不交还右栏（见 [stageFullscreen]）。
+        if (stageFullscreen) return
         // 右栏刚把画面交过来的那几百毫秒里，窗口尺寸可能回跳一帧。那一帧不能退页，
         // 否则竖屏播放页会立刻被拆掉，用户看见的是首页。
         if (holdsPlayer()) return
@@ -288,20 +350,12 @@ object NpFormHandoff {
         // 这里只挡"同一轮里的重复"，不挡"用户真的又转了一次"。
         if (paneHandoffGen == formGeneration) return
         val retire = stageRetire ?: return
-        // 抓不到画面（FLAG_SECURE、Surface 还没出画）也要照走：这一段是纯黑收尾，
-        // 停在横屏的独占播放页才是真的难看。
-        val picture = stageCapture?.invoke()
-        android.util.Log.d("NpRot", "handoff.case3 ->pane picture=$picture rect=${picture?.rect}")
-        picture?.let { stashPoster(it, NpHandoffTarget.PANE) }
         paneHandoffGen = formGeneration
-        beginFlight(picture, towardsPane = true)
-        paneTakeoverUntil = SystemClock.elapsedRealtime() + PANE_TAKEOVER_MS
+        mark(boundToMorph = true)
+        paneTakeoverUntil = NpHandoffTime.now() + PANE_TAKEOVER_MS
         retire()
     }
 }
-
-/** 交接的落点：静止封面要交给谁顶着（见 [NpFormHandoff.posterFor]）。 */
-enum class NpHandoffTarget { PANE, PLAYER_PAGE }
 
 /**
  * 离开类 PC 那一次的落点：右栏在播优先，其次是开着的详情页。

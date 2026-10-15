@@ -14,6 +14,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    // E132 行为级回归：Robolectric 跑 Compose 需要 AAR 资源（含 ui-test-manifest 声明的
+    // Activity）进到单测资源里，否则 createComposeRule 起不来。
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 kotlin {
@@ -41,6 +48,13 @@ dependencies {
 
     // hasPointerSource 纯判据的单测（§14 #18 的判据钉死，设备枚举本身不进单测）
     testImplementation(libs.junit)
+    // E132：档位翻转/静音窗的行为级回归——真实 recomposition 与 SideEffect 顺序
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test.junit4)
+    testImplementation(libs.compose.ui.test.manifest)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     // hinge 避让（折叠屏）用的 WindowInfoTracker 只在实现内使用，不必外泄
     implementation(libs.androidx.window)
 }

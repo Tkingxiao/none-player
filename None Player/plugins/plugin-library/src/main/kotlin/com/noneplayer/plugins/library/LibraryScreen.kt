@@ -301,7 +301,12 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // 左边默认在首页/文件夹页，应该是横屏的剧集页"（2026-10-14 真机）。
     // 留住状态、只按形态决定画不画，两个方向就都对了：竖屏不画它（不再"详情外显"），
     // 转回横屏它自己回来。
-    val detailOpen = windowInfo.isDesktopLike && detailItem != null
+    //
+    // **交接期间照旧画它**（`keepsDesktopChrome`）：横转竖那一帧 `isDesktopLike` 已经翻假，
+    // 而竖屏播放页要到下一帧才组合出来——中间这一帧左栏若收成首页，用户就在"背景里"
+    // 看见首页和剧集页各闪一下。留在类 PC 版上，等播放页盖上来外壳再收。
+    val detailOpen = (windowInfo.isDesktopLike || NpFormHandoff.keepsDesktopChrome) &&
+        detailItem != null
     // 剧集详情页在竖屏的对应物是播放页（这一档压根没有详情页）。右栏没在播时转屏，
     // 若这里不登记落点，`NpFormHandoff` 就没有路线可走，人会被留在收成首页的媒体库上
     // ——真机实报"横屏播放界面不播放时切竖屏直接返回首页"（2026-10-14 第二轮）。

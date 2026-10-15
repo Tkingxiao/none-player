@@ -65,6 +65,11 @@ data class NpWindowInfo(
     val isLandscape: Boolean,
     /** EXPANDED 且宽高比 > 1.4 → "类 PC"（§13.4 平板横屏三栏布局的判据） */
     val isDesktopLike: Boolean,
+    /**
+     * 判定的**输入本身**。外壳上报档位翻转时要带它，而不是只带 [isDesktopLike] 那个布尔：
+     * 归约 [npReduceFormFlip] 靠"是不是同一份配置"拒绝第二条上报路径的重复翻转（E132）。
+     */
+    val formConfig: NpFormConfig,
     /** 是否有指针设备（鼠标/触控板）——桌面化输入（E50）的前提 */
     val isHoverable: Boolean,
     /** 阅读型内容的最大宽度约束，防超宽拉伸；`Dp.Unspecified` 表示不约束 */
@@ -113,13 +118,17 @@ fun rememberNpWindowInfo(
     val sizeClass: WindowSizeClass = calculateWindowSizeClass(activity)
     val configuration = LocalConfiguration.current
     val hoverable = rememberHoverable(context)
-    return remember(sizeClass, configuration, hasFoldingFeature, hoverable) {
+    // 显示旋转角是"同一份窗口配置"的组成部分（E132）：外壳上报档位翻转时必须带上它，
+    // 才能和 Activity `onConfigurationChanged` 那条路径对同一份配置给出同一个键。
+    val displayRotation = NpDevicePose.displayRotation
+    return remember(sizeClass, configuration, displayRotation, hasFoldingFeature, hoverable) {
         buildNpWindowInfo(
             sizeClass = sizeClass,
             isLandscape = configuration.screenWidthDp > configuration.screenHeightDp,
             screenWidthDp = configuration.screenWidthDp,
             screenHeightDp = configuration.screenHeightDp,
             smallestScreenWidthDp = configuration.smallestScreenWidthDp,
+            displayRotation = displayRotation,
             hasFoldingFeature = hasFoldingFeature,
             isHoverable = hoverable,
             isDesktopPlatform = isDesktopPlatform(context),
@@ -140,6 +149,7 @@ internal fun buildNpWindowInfo(
     screenWidthDp: Int,
     screenHeightDp: Int,
     smallestScreenWidthDp: Int,
+    displayRotation: Int,
     hasFoldingFeature: Boolean,
     isHoverable: Boolean,
     isDesktopPlatform: Boolean,
@@ -150,24 +160,22 @@ internal fun buildNpWindowInfo(
         smallestScreenWidthDp >= TABLET_SMALLEST_WIDTH_DP -> NpFormFactor.TABLET
         else -> NpFormFactor.PHONE
     }
-    val aspect = if (screenHeightDp > 0) screenWidthDp.toFloat() / screenHeightDp else 1f
-    // "类 PC"：窗口足够宽、**高度也够**、且横向——平板横屏与桌面窗口属于这一类（§13.4）。
+    val config = NpFormConfig(screenWidthDp, screenHeightDp, displayRotation)
+    // "类 PC"：判据**必须**与转屏回调用的 [npIsDesktopLike] 是同一条（§13.2「一处判定」，E132）。
     //
-    // 为什么必须带 heightClass 这一条（真机/模拟器实测得出）：
-    // 现代手机横屏的宽度普遍 ≥840dp（Pixel 10 Pro 横屏是 952×427dp），只看"宽度
-    // Expanded + 宽高比 > 1.4"会把**手机横屏**也判成类 PC，于是播放页不再走
-    // §4.2 的横屏全屏，而是被塞进"嵌入 + 底部集中控制"的桌面版式——这正是把
-    // §13.1 的"手机横屏（高 < 480dp）"一行读漏的后果。高度档 Compact 即
-    // "手机横屏"的判据，故类 PC 要求高度至少 Medium。
-    val isDesktopLike = sizeClass.widthSizeClass == WindowWidthSizeClass.Expanded &&
-        sizeClass.heightSizeClass != WindowHeightSizeClass.Compact &&
-        isLandscape && aspect > DESKTOP_LIKE_ASPECT
+    // 为什么钉在这里：档位有两条上报路径——Activity 的 `onConfigurationChanged` 与外壳的
+    // `SideEffect`。两边各写一套阈值（旧写法一侧是 WindowSizeClass 的 Expanded/heightClass，
+    // 另一侧是硬编码 840/480/1.4）就**不等价**：一次物理旋转被判成两次档位变化，第二次是
+    // 反向交接而两侧矩形登记已在起飞时清空，于是抓不到帧、`mark()` 也不打，整页转场照旧播：
+    // 用户读到的是"转横屏那一下画面直接全屏放大，退出时瞬间跳回右栏"（2026-10-15 实报）。
+    // 手机横屏（952×427dp）不算类 PC 这条真机结论由 `screenHeightDp >= 480` 守住，没有丢。
     return NpWindowInfo(
         widthClass = sizeClass.widthSizeClass,
         heightClass = sizeClass.heightSizeClass,
         formFactor = formFactor,
         isLandscape = isLandscape,
-        isDesktopLike = isDesktopLike,
+        isDesktopLike = npIsDesktopLike(config),
+        formConfig = config,
         isHoverable = isHoverable,
         maxContentWidth = maxContentWidthFor(sizeClass.widthSizeClass),
     )
@@ -182,22 +190,6 @@ private fun maxContentWidthFor(widthClass: WindowWidthSizeClass): Dp = when (wid
 
 /** 平板判据：最小宽度 ≥ 600dp（Android 官方 sw600dp 分界） */
 private const val TABLET_SMALLEST_WIDTH_DP = 600
-
-/** "类 PC" 判据：宽高比 > 1.4（§13.2 定义） */
-private const val DESKTOP_LIKE_ASPECT = 1.4f
-
-/**
- * 与 [buildNpWindowInfo] 的 `isDesktopLike` 同一条判据，供转屏回调在组合之前使用。
- * 宽度 Expanded ≥840dp，高度非 Compact ≥480dp，且横向、宽高比 > 1.4。
- */
-internal fun isDesktopLikeWindow(screenWidthDp: Int, screenHeightDp: Int): Boolean {
-    if (screenWidthDp <= 0 || screenHeightDp <= 0) return false
-    val aspect = screenWidthDp.toFloat() / screenHeightDp
-    return screenWidthDp >= 840 &&
-        screenHeightDp >= 480 &&
-        screenWidthDp > screenHeightDp &&
-        aspect > DESKTOP_LIKE_ASPECT
-}
 
 /** 桌面平台（ChromeOS / Android PC 模式） */
 // FEATURE_PC 常量自 API 27 才进入 SDK，但 String 常量编译期内联，

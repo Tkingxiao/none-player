@@ -105,6 +105,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
@@ -216,9 +217,9 @@ import com.noneplayer.kernel.ui.api.PlaybackContext
 import com.noneplayer.kernel.ui.api.PlaybackMenuContributor
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
 import com.noneplayer.kernel.ui.api.NpFormHandoff
-import com.noneplayer.kernel.ui.api.NpHandoffTarget
-import com.noneplayer.kernel.ui.api.NpPicture
-import com.noneplayer.kernel.ui.api.NpPlayerPaneMotion
+import com.noneplayer.kernel.ui.api.NpMorph
+import com.noneplayer.kernel.ui.api.NpMorphKey
+import com.noneplayer.kernel.ui.api.npMorphPart
 import com.noneplayer.plugins.player.ui.controls.NpSeekBar
 import com.noneplayer.plugins.player.ui.controls.StatusClockBattery
 import com.noneplayer.plugins.player.ui.gesture.GESTURE_INDICATOR_HOLD_MS
@@ -530,11 +531,6 @@ fun PlayerScreen(
     val coverFadeMs = npDuration(Motion.ReduceFade)
     var stageRectInWindow by remember { mutableStateOf<Rect?>(null) }
     val surfaceViewRef = remember { mutableStateOf<TextureView?>(null) }
-    // 右栏交接过来的最后一帧：本页 Surface 出画前用它顶着。只认"落点是本页"的那一枚
-    // （转横屏那一轮是反方向，封面归右栏）。
-    val handoffPoster = remember(uri) {
-        NpFormHandoff.posterFor(uri, NpHandoffTarget.PLAYER_PAGE)?.asImageBitmap()
-    }
     // 本页在栈上时，形态变化由本页自己适配（见 `LaunchedEffect(isDesktopLike)` 那段），
     // 外壳的转屏交接不得再推第二个播放页上来。
     DisposableEffect(Unit) {
@@ -716,31 +712,22 @@ fun PlayerScreen(
         ?.let { mediaMemoryKey(it.sourceId, it.id) }
         ?: mediaId.takeIf { it.isNotEmpty() }?.let { mediaMemoryKey("", it) }
             .orEmpty()
-    // 转横屏（进入类 PC 档）时画面归右栏，外壳在**第一帧横屏画出来之前**调这里取走
-    // 最后一帧与它此刻的矩形（[NpPicture]），再调 `retire` 退本页。不这么做，那一帧
-    // 就是"播放内容被全屏放大成横屏版式"（用户实报"生硬且奇怪"）。
+    // 转横屏（进入类 PC 档）时画面归右栏，外壳在**第一帧横屏画出来之前**调 `retire`
+    // 退本页。不这么做，那一帧就是"播放内容被全屏放大成横屏版式"（用户实报"生硬且奇怪"）。
+    // 以前这里还要先抓一帧交给幽灵层飞，现在不用：画面是同一个 TextureView，
+    // 由整屏 morph 把它从竖屏的位置搬到横屏右栏的位置（E133，见 NpMorph）。
     // 登记在 `currentItem` 之后：退页时左栏要落到正在播的那条，否则横屏里左栏还停在别处——
     // 交接侧在退页之前顺手带走这一步，本页下面那条兜底的 `LaunchedEffect` 就不必再跑一遍。
+    // 退页动作注册一次（`handoffToken` 不变），但**当前项要读最新的**：
+    // 注册发生在首帧，那一刻队列还没解析出来；直接捕获 `currentItem` 会永远拿到 null，
+    // 于是横屏左栏收不到 `NpDetailRequest`，停在媒体库首页而不是剧集页。
+    val latestItemForHandoff = rememberUpdatedState(currentItem)
     DisposableEffect(handoffToken) {
-        NpFormHandoff.bindStageHandoff(
-            handoffToken,
-            capture = {
-                val bounds = NpPlayerPaneMotion.stageBounds()
-                val view = surfaceViewRef.value
-                if (bounds == null || view == null || screenshotBlocked ||
-                    view.width <= 1 || view.height <= 1
-                ) {
-                    null
-                } else {
-                    NpPicture(uri, runCatching { view.bitmap }.getOrNull(), bounds)
-                }
-            },
-            retire = {
-                currentItem?.let { NpDetailRequest.request(it) }
-                navigator.popBackStack()
-            },
-        )
-        onDispose { NpFormHandoff.releaseStageHandoff(handoffToken) }
+        NpFormHandoff.bindStageRetire(handoffToken) {
+            latestItemForHandoff.value?.let { NpDetailRequest.request(it) }
+            navigator.popBackStack()
+        }
+        onDispose { NpFormHandoff.releaseStageRetire(handoffToken) }
     }
     val headerTitle = currentItem?.cardTitle?.takeIf { it.isNotBlank() } ?: displayTitle
     val headerMimeType = currentItem?.mimeType?.takeIf { it.isNotBlank() } ?: mimeType
@@ -812,6 +799,14 @@ fun PlayerScreen(
     DisposableEffect(Unit) {
         onDispose { activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED }
     }
+    // 用户点出来的「全屏」要告诉外壳：平板横过来在类 PC 档本应换成"左栏 + 右栏"，
+    // 但这一下是用户要的全屏，整屏归本页——否则转横的瞬间播放页就被退掉、
+    // 画面缩进右栏，读起来就是"点全屏没反应"（2026-10-15 真机实报）。
+    DisposableEffect(orientationLock) {
+        val fullscreenIntent = orientationLock == OrientationLock.Landscape
+        NpFormHandoff.noteStageFullscreen(fullscreenIntent)
+        onDispose { NpFormHandoff.noteStageFullscreen(false) }
+    }
     // 全屏时返回键先退出全屏（业界一致语义）；第二次返回才离开播放页。
     //
     // **"退出全屏"必须能真的退掉**，否则返回键会被无限吞掉：`isFullscreen`（= 窗口横向）
@@ -845,21 +840,14 @@ fun PlayerScreen(
     }
 
     /**
-     * 类 PC 档的「交还浏览态」：先把当前画面快照交给右栏做共享元素补间，再退掉本页。
+     * 类 PC 档的「交还浏览态」：先让整屏 morph 起飞（冻结当前这批部件矩形），再退掉本页。
      * 右栏靠"会话有没有当前项"自行出现（`DetailPaneProvider.isOccupied`），无需传参。
+     *
+     * 这里不换窗口形态，但**版式**换了：画面从整屏收到右栏、标题与按钮各归各位。
+     * 以前靠抓帧补间，现在由这些节点自己飞（E133）——所以也不再需要防截屏的例外。
      */
     fun returnToBrowsePane() {
-        if (isDesktopLike && !session.audioOnly.value && !screenshotBlocked) {
-            // 起点用**画面本体**的矩形（`recordStage` 登记的），不是整块舞台黑底：
-            // 舞台在横屏形态下就是整屏，拿它当起点会让这一帧先从"整屏"缩到画面、
-            // 再缩到右栏，多出一段没有来由的形变。两端同为画面本体，补间才是纯
-            // 缩小 + 滑移，与右栏落地处严丝合缝。
-            val bounds = NpPlayerPaneMotion.stageBounds()
-            val frame = runCatching { surfaceViewRef.value?.bitmap }.getOrNull()
-            if (bounds != null && frame != null) {
-                NpPlayerPaneMotion.returnToPane(player.currentUri.value ?: uri, frame, bounds)
-            }
-        }
+        if (isDesktopLike && !session.audioOnly.value) NpMorph.begin()
         navigator.popBackStack()
     }
 
@@ -1734,6 +1722,9 @@ fun PlayerScreen(
         // 右栏刚把画面交过来的那几百毫秒里，窗口尺寸可能回跳一帧。那一帧不能 pop，
         // 否则竖屏播放页会立刻被拆掉，用户看见的是首页。
         if (NpFormHandoff.holdsPlayer()) return@LaunchedEffect
+        // 这一下横向是用户点「全屏」要来的（平板竖屏点全屏）：留在本页铺满，
+        // 不退页、也不把画面交还右栏。
+        if (orientationLock == OrientationLock.Landscape) return@LaunchedEffect
         // 类 PC 档的视频界面是"左栏剧集页 + 右栏画面"。竖屏点卡片进来时媒体库并没有
         // 详情页状态（那一档压根不进详情页），交还前请它把左栏落到正在播的这条上。
         currentItem?.let { NpDetailRequest.request(it) }
@@ -1931,11 +1922,12 @@ fun PlayerScreen(
                         mirrored = mirrored,
                         rotation = rotation,
                         onSurfaceView = { surfaceViewRef.value = it },
-                        // 画面**本体**每次布局上报矩形：转屏交接的起飞与落点都要它。
-                        // `stageRectInWindow` 是整块舞台黑底（横屏形态下就是整屏），
-                        // 拿它当飞行端点会让补间两端各差一圈黑边。
-                        onVideoBounds = { NpPlayerPaneMotion.recordStage(it) },
-                        handoffPoster = handoffPoster,
+                        // 画面**本体**参与整屏 morph：转屏交接的起飞与落点都是它。
+                        // 它属于哪个形态由 `isDesktopLike` 说了算——过渡那几帧里
+                        // 旧树量出来的矩形不是落点，登记时就要认得出。
+                        morphKey = NpMorphKey.Video,
+                        morphDesktop = isDesktopLike,
+                        morphRotate = true,
                         modifier = Modifier.fillMaxSize(),
                     )
                     // M2 共享封面：从卡片机位补间到舞台（挂在舞台内，坐标相对舞台）
@@ -2309,9 +2301,18 @@ fun PlayerScreen(
                                 currentItem?.folder ?: "本地文件",
                             ).filterNotNull().filter { it.isNotBlank() }.joinToString(" · "),
                             onBack = navigator::popBackStack,
+                            // 常驻栏的返回与标题和右栏栏头同名：转屏时它们各自飞到位
+                            morphDesktop = isDesktopLike,
                         )
                     }
-                    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+                    // 转屏 morph 期间这一格要被"拿出来"：抬到信息区之上（zIndex），
+                    // 否则画面从上一形态飞过来时会被下方的信息区盖住——用户实报的
+                    // "看起来是在窗口里旋转，而不是窗口浮在层上移动"。
+                    BoxWithConstraints(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .then(if (NpMorph.isFlying) Modifier.zIndex(2f) else Modifier),
+                    ) {
                         val ratio = if (videoAspectRatio > 0f) videoAspectRatio else 16f / 9f
                         // 横屏视频按 16:9 定高；竖屏视频限高（55% 窗口高），
                         // 免得一条 9:16 视频把信息区整个挤出屏幕
@@ -2328,7 +2329,9 @@ fun PlayerScreen(
                             modifier = stageHeight
                                 .background(Color.Black)
                                 // 控制条从下缘滑入滑出。不裁切的话，半透明黑条会盖到视频下面的白底。
-                                .clipToBounds()
+                                // **morph 期间必须放开**：这一层就是"框"，裁着它，飞行中的画面
+                                // 只能在框里转，读不出"窗口浮在页面上移动"。
+                                .then(if (NpMorph.isFlying) Modifier else Modifier.clipToBounds())
                                 .onGloballyPositioned { stageRectInWindow = it.boundsInWindow() }
                                 .then(stageGestures()),
                         ) {
@@ -2347,9 +2350,10 @@ fun PlayerScreen(
                                 mirrored = mirrored,
                                 rotation = rotation,
                                 onSurfaceView = { surfaceViewRef.value = it },
-                                // 同横屏形态：竖屏舞台也要报画面本体的矩形（转横屏时的起飞点）
-                                onVideoBounds = { NpPlayerPaneMotion.recordStage(it) },
-                                handoffPoster = handoffPoster,
+                                // 同横屏形态：竖屏舞台也是同一个部件（横转竖时的落点）
+                                morphKey = NpMorphKey.Video,
+                                morphDesktop = isDesktopLike,
+                                morphRotate = true,
                                 modifier = Modifier.fillMaxSize(),
                             )
                             // M2 共享封面：从卡片机位补间到舞台（挂在舞台内，坐标相对舞台）
@@ -2572,24 +2576,26 @@ fun PlayerScreen(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             val actionWidth = if (largeActions) Modifier else Modifier.weight(1f)
+                            // 三个动作与横屏左栏那一横排同名（NpMorphKey.Fav/Info/Audio）：
+                            // 转屏时它们不重画样式，只是各自飞到位（E133，用户明确要求）。
                             PlayerActionButton(
                                 glyph = ActionGlyph.Fav,
                                 label = if (favorited) "已收藏" else "收藏",
                                 active = favorited,
                                 onClick = { toggleFavorite() },
-                                modifier = actionWidth,
+                                modifier = actionWidth.npMorphPart(NpMorphKey.Fav, desktop = isDesktopLike),
                             )
                             PlayerActionButton(
                                 glyph = ActionGlyph.Info,
                                 label = "详情",
                                 onClick = { fileInfoVisible = true },
-                                modifier = actionWidth,
+                                modifier = actionWidth.npMorphPart(NpMorphKey.Info, desktop = isDesktopLike),
                             )
                             PlayerActionButton(
                                 glyph = ActionGlyph.Audio,
                                 label = "仅听音频",
                                 onClick = { toggleAudioOnlyWithMemory() },
-                                modifier = actionWidth,
+                                modifier = actionWidth.npMorphPart(NpMorphKey.Audio, desktop = isDesktopLike),
                             )
                         }
                         // C21 软解前置提示（设计稿 .notice.warn）：探测发现只有软件解码器可用时
@@ -2671,6 +2677,9 @@ fun PlayerScreen(
                                             durationMs = queueDuration(item),
                                             selected = index == queueIndex,
                                             onClick = { session.selectQueueIndex(index) },
+                                            // 与横屏左栏的同名行是同一个部件：转屏时它自己飞到位
+                                            morphKey = NpMorphKey.episode(index),
+                                            morphDesktop = isDesktopLike,
                                         )
                                     }
                                 }
@@ -4749,12 +4758,19 @@ private fun EpisodeRow(
     durationMs: Long,
     selected: Boolean,
     onClick: () -> Unit,
+    /** morph 部件名（横屏左栏同名的那一行）：转屏时它跟着行一起飞到位。 */
+    morphKey: String? = null,
+    morphDesktop: Boolean? = null,
 ) {
     val ink = LocalNpInk.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
+            .then(
+                if (morphKey == null) Modifier
+                else Modifier.npMorphPart(morphKey, desktop = morphDesktop),
+            )
             .background(if (selected) ink.accentSoft else Color.Transparent)
             .clickable(onClick = onClick)
             .padding(horizontal = NpSpace.lg, vertical = 12.dp),
@@ -4868,27 +4884,18 @@ internal fun VideoStage(
     rotation: Int = 0,
     onSurfaceView: (TextureView?) -> Unit = {},
     /**
-     * 画面**本体**每次布局上报自己在本窗口里的矩形。转屏交接的起飞与落点都要它
-     * （[com.noneplayer.kernel.ui.api.NpPlayerPaneMotion]）：登记整页/整栏会把黑边
-     * 一起算进去，补间两端各差一圈。
+     * 参与整屏 morph 的部件名（[com.noneplayer.kernel.ui.api.NpMorphKey.Video]）。
+     *
+     * 两侧（竖屏播放页 / 横屏右栏）给**同一个名字**，画面才会从上一形态的位置飞到位；
+     * 详情页里的内联画面传 null——它不是交接的当事画面，登记进去会抢走起点。
      */
-    onVideoBounds: ((Rect) -> Unit)? = null,
-    /** 右栏交接过来的最后一帧。新 Surface 出画前盖住黑/白空档，只此一层，不是第二个播放器。 */
-    handoffPoster: ImageBitmap? = null,
+    morphKey: String? = null,
+    /** [morphKey] 属于哪个形态（过渡期间旧树量出来的矩形不是落点，见 [NpMorph.record]）。 */
+    morphDesktop: Boolean? = null,
+    /** 画面在飞行中是否自转回正（见 [npMorphPart] 的 `rotate`）。 */
+    morphRotate: Boolean = false,
     modifier: Modifier = Modifier,
 ) {
-    var releasePoster by remember(handoffPoster) { mutableStateOf(false) }
-    LaunchedEffect(handoffPoster) {
-        if (handoffPoster == null) return@LaunchedEffect
-        repeat(3) { withFrameMillis { } }
-        releasePoster = true
-    }
-    val posterFadeMs = if (npDisplacementAllowed()) npDuration(Motion.ReduceFade) else 0
-    val posterAlpha by animateFloatAsState(
-        targetValue = if (handoffPoster != null && !releasePoster) 1f else 0f,
-        animationSpec = tween(posterFadeMs, easing = NpEasing.SilkExit),
-        label = "handoffPoster",
-    )
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         // 视频画面：按比例模式决定布局约束；黑边/裁剪行为随模式。
         // 竖向片（比例 < 1）在 FIT 下改「先匹配高度」：横向窗口里默认的先宽后高会被
@@ -4909,13 +4916,13 @@ internal fun VideoStage(
                 }
             }
         }
-        val reportVideoBounds = onVideoBounds
         Box(
-            modifier = if (reportVideoBounds == null) {
-                stageModifier
-            } else {
-                stageModifier.onGloballyPositioned { reportVideoBounds(it.boundsInWindow()) }
-            },
+            // morphKey 让这块画面自己参与整屏 morph：转屏时它不消失、不被替换，
+            // 而是从上一形态里画面所在的位置飞到新版式的落点（E133）。
+            // scale = true：画面是整块缩放的图像，尺寸差要跟着插值；文字与按钮只平移。
+            modifier = morphKey?.let {
+                stageModifier.npMorphPart(it, scale = true, desktop = morphDesktop, rotate = morphRotate)
+            } ?: stageModifier,
         ) {
             AndroidView(
                 factory = { ctx -> TextureView(ctx).also { onSurfaceView(it) } },
@@ -4934,14 +4941,6 @@ internal fun VideoStage(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
-            if (handoffPoster != null && posterAlpha > 0.01f) {
-                Image(
-                    bitmap = handoffPoster,
-                    contentDescription = null,
-                    contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize().graphicsLayer { alpha = posterAlpha },
-                )
-            }
             // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
             // E131：样式由「字幕设置」面板驱动（颜色/大小/斜体/总开关）
             SubtitleLayer(
@@ -5148,6 +5147,8 @@ private fun PlayerBar(
     title: String,
     subtitle: String,
     onBack: () -> Unit,
+    /** 本形态标签：与右栏栏头的 ✕ / 标题同名，转屏时它们是一个部件（见 [NpMorph]）。 */
+    morphDesktop: Boolean? = null,
     modifier: Modifier = Modifier,
 ) {
     val ink = LocalNpInk.current
@@ -5165,8 +5166,15 @@ private fun PlayerBar(
             onClick = onBack,
             size = 38.dp,
             tint = ink.fg,
+            modifier = Modifier.npMorphPart(NpMorphKey.Dismiss, desktop = morphDesktop),
         )
-        Column(modifier = Modifier.weight(1f)) {
+        Column(
+            modifier = if (morphDesktop == null) {
+                Modifier.weight(1f)
+            } else {
+                Modifier.weight(1f).npMorphPart(NpMorphKey.Title, desktop = morphDesktop)
+            },
+        ) {
             Text(
                 text = title,
                 style = NpTypography.titleLarge.copy(fontSize = 16.sp),

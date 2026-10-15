@@ -34,11 +34,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import coil.request.videoFrameMillis
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.cardTitle
@@ -70,6 +74,8 @@ import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
 import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.kernel.ui.api.NpInlinePlayRequest
+import com.noneplayer.kernel.ui.api.NpMorphKey
+import com.noneplayer.kernel.ui.api.npMorphPart
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -211,13 +217,43 @@ internal fun VideoDetailScreen(
                 )
             }
         } else if (paneOccupied && siblings.size <= 1) {
-            // 右栏已经在播：左边只留详情，不要再挂一个会在关闭时闪到左侧的封面。
+            // 右栏已经在播、且这一条**没有同文件夹兄弟**（单视频 / 深链进来）。
+            //
+            // 用户口径（2026-10-15）：这里**不要封面、也不要「详情」键**——封面占掉一整块，
+            // 而详情本来是另一个键才能看到的内容，单文件这一档没有别的可看，直接把详细信息
+            // 摆在动作行下面最省事。动作行的样式仍与多集那一排同源（只少了「详情」）。
             Column(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(pad)
                     .verticalScroll(rememberScrollState()),
             ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    NpPrimaryButton(
+                        text = if (canResume) "继续观看" else "播放",
+                        icon = NpIcon.Play,
+                        onClick = ::startPlayback,
+                        modifier = Modifier.npMorphPart(NpMorphKey.ListPlay, desktop = true),
+                    )
+                    Spacer(Modifier.weight(1f))
+                    NpIconButton(
+                        icon = NpIcon.Heart,
+                        contentDescription = if (favorited) "取消收藏" else "收藏",
+                        tint = if (favorited) LocalNpInk.current.accent else LocalNpInk.current.fg,
+                        onClick = onToggleFavorite,
+                        modifier = Modifier.npMorphPart(NpMorphKey.Fav, desktop = true),
+                    )
+                    NpIconButton(
+                        icon = NpIcon.Headphones,
+                        contentDescription = "仅听音频",
+                        onClick = { onAudioOnly(item) },
+                        modifier = Modifier.npMorphPart(NpMorphKey.Audio, desktop = true),
+                    )
+                }
+                Spacer(Modifier.height(22.dp))
                 DetailMeta(item = item, hdr = hdr)
             }
         } else if (paneOccupied) {
@@ -233,6 +269,7 @@ internal fun VideoDetailScreen(
                                 text = if (canResume) "继续观看" else "播放",
                                 icon = NpIcon.Play,
                                 onClick = ::startPlayback,
+                                modifier = Modifier.npMorphPart(NpMorphKey.ListPlay, desktop = true),
                             )
                             Spacer(Modifier.weight(1f))
                             // 收藏（与手机播放页同一动作）：此前平板的操作行没有这个出口
@@ -241,16 +278,20 @@ internal fun VideoDetailScreen(
                                 contentDescription = if (favorited) "取消收藏" else "收藏",
                                 tint = if (favorited) LocalNpInk.current.accent else LocalNpInk.current.fg,
                                 onClick = onToggleFavorite,
+                                // 与竖屏播放页那一横排同名：转屏时样式不变，只各自飞到位（E133）
+                                modifier = Modifier.npMorphPart(NpMorphKey.Fav, desktop = true),
                             )
                             NpIconButton(
                                 icon = NpIcon.Headphones,
                                 contentDescription = "仅听音频",
                                 onClick = { onAudioOnly(item) },
+                                modifier = Modifier.npMorphPart(NpMorphKey.Audio, desktop = true),
                             )
                             NpIconButton(
                                 icon = NpIcon.Info,
                                 contentDescription = "视频详情",
                                 onClick = { showDetail = true },
+                                modifier = Modifier.npMorphPart(NpMorphKey.Info, desktop = true),
                             )
                         }
                         Spacer(Modifier.height(12.dp))
@@ -519,21 +560,36 @@ private fun DetailMeta(
             )
         }
         Spacer(Modifier.height(14.dp))
-        if (item.width > 0 && item.height > 0) {
-            DetailInfoRow("分辨率", "${item.width} × ${item.height}")
+        // 行先攒齐再渲染：分隔线只挂在**最后一行之外**，缺字段时也不会留下一条悬空的分隔线。
+        // 单文件那一档（横屏左栏）就是靠这份把"只有一个名字和格式"补成真正的文件信息。
+        val rows = buildList {
+            if (item.width > 0 && item.height > 0) add("分辨率" to "${item.width} × ${item.height}")
+            // HDR 标识（HDR10/HLG）：探测自容器声明的 colorTransfer；SDR/未知不显示
+            hdr?.takeIf { it.isNotBlank() }?.let { add("HDR" to it) }
+            if (item.durationMs > 0) add("时长" to formatTimestamp(item.durationMs))
+            if (item.sizeBytes > 0) add("大小" to formatFileSize(item.sizeBytes))
+            add("格式" to (container ?: "—"))
+            item.folder?.takeIf { it.isNotBlank() }?.let { add("文件夹" to it) }
+            readablePath(item.uri)?.let { add("位置" to it) }
+            if (item.addedAtMs > 0) add("加入时间" to formatRelativeDate(item.addedAtMs))
         }
-        // HDR 标识（HDR10/HLG）：探测自容器声明的 colorTransfer；SDR/未知不显示
-        hdr?.takeIf { it.isNotBlank() }?.let { DetailInfoRow("HDR", it) }
-        if (item.durationMs > 0) {
-            DetailInfoRow("时长", formatTimestamp(item.durationMs))
+        rows.forEachIndexed { index, row ->
+            DetailInfoRow(row.first, row.second, divider = index != rows.lastIndex)
         }
-        if (item.sizeBytes > 0) {
-            DetailInfoRow("大小", formatFileSize(item.sizeBytes))
-        }
-        DetailInfoRow("格式", container ?: "—")
-        if (item.addedAtMs > 0) {
-            DetailInfoRow("加入时间", formatRelativeDate(item.addedAtMs), divider = false)
-        }
+    }
+}
+
+/**
+ * 文件地址的人味写法：`file://` 与裸绝对路径给出去掉前缀的路径；
+ * `content://` 这类拿不到可读路径的**返回 null**（宁可不显示，也不摆一串无意义的 id）。
+ */
+private fun readablePath(uri: String): String? {
+    if (uri.isBlank()) return null
+    val decoded = runCatching { java.net.URLDecoder.decode(uri, "UTF-8") }.getOrNull() ?: uri
+    return when {
+        decoded.startsWith("file://") -> decoded.removePrefix("file://")
+        decoded.startsWith("/") -> decoded
+        else -> null
     }
 }
 
@@ -591,7 +647,13 @@ private fun LazyListScope.siblingRows(
     }
 }
 
-/** 同文件夹里的一行（设计稿 `.optrow`）；编号 / 当前项标记 / 时长三处口径与列表一致 */
+/**
+ * 同文件夹里的一行（设计稿 `.optrow`）；编号 / 封面 / 当前项标记 / 时长四处口径与列表一致。
+ *
+ * 封面（E133）：用户指定左侧剧集也要带缩略图——参考实现里横屏列表每行都有一枚 16:9 的
+ * `thumb`，转竖屏时它跟着行一起移动。取帧口径与媒体库列表同一套：有 `coverUri` 用它，
+ * 否则让 Coil 的视频解码器取首帧。
+ */
 @Composable
 private fun SiblingRow(
     index: Int,
@@ -600,11 +662,13 @@ private fun SiblingRow(
     onSelect: (MediaItem) -> Unit,
 ) {
     val ink = LocalNpInk.current
+    val context = LocalContext.current
     NpOptRow(
         // 左边剧集用文件原名。富化短标题和「第 N 集」是解析结果，不是文件名。
         text = sibling.title.ifBlank { sibling.uri.substringAfterLast('/') },
         selected = current,
         onClick = { if (!current) onSelect(sibling) },
+        modifier = Modifier.npMorphPart(NpMorphKey.episode(index), desktop = true),
         leading = {
             Text(
                 text = (index + 1).toString().padStart(2, '0'),
@@ -612,6 +676,27 @@ private fun SiblingRow(
                 color = ink.muted,
                 modifier = Modifier.width(28.dp),
             )
+            Box(
+                modifier = Modifier
+                    .padding(end = 10.dp)
+                    .width(72.dp)
+                    .height(40.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(ink.accentSoft)
+                    .npMorphPart(NpMorphKey.cover(index), desktop = true),
+            ) {
+                AsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(sibling.coverUri ?: sibling.uri)
+                        .videoFrameMillis(0)
+                        .crossfade(180)
+                        .build(),
+                    // 封面是装饰：行尾已经有标题文本，读屏不需要再念一遍（E128 同一口径）
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
         },
         trailing = {
             if (current) {

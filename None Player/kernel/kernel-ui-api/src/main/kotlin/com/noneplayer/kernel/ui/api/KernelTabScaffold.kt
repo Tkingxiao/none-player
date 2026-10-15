@@ -377,8 +377,10 @@ fun KernelTabScaffold(
         ) {
     // 外壳在的时候把类 PC 档记下来。转屏那一帧 Activity 会更早读它；这里补自由窗口
     // 这类不走配置回调的尺寸变化，避免右栏拆掉之后没人把播放页打开、竖屏落在首页。
+    // 上报的是**这一份窗口配置**（[NpWindowInfo.formConfig]）而不是布尔：归约要靠它认出
+    // "这就是 Activity 转屏回调已经处理过的那一次"，拒绝同配置的第二翻（E132）。
     SideEffect {
-        NpFormHandoff.noteDesktop(windowInfo.isDesktopLike)
+        NpFormHandoff.noteDesktop(windowInfo.formConfig)
     }
     if (windowInfo.isCompact) {
         // 紧凑：底部 Tab 栏 + Chrome（迷你条）贴上沿。内容层**不再被 innerPadding
@@ -498,7 +500,12 @@ fun KernelTabScaffold(
                                 // 右栏右缘同样让出留白、不贴屏幕边缘。
                                 val paneInk = LocalNpInk.current
                                 Row(
-                                    modifier = Modifier.weight(1f).fillMaxHeight().clipToBounds(),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        // 转屏 morph 期间右栏不再裁切：画面要从上一形态的位置
+                                        // 浮到落点，裁在这一栏里它就只能在栏内旋转。
+                                        .then(if (NpMorph.isFlying) Modifier else Modifier.clipToBounds()),
                                 ) {
                                     Box(
                                         modifier = Modifier

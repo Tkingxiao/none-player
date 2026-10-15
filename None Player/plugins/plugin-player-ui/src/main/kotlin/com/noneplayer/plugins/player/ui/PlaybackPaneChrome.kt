@@ -54,11 +54,11 @@ import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.ui.api.DetailPaneProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.NpFormHandoff
-import com.noneplayer.kernel.ui.api.NpHandoffTarget
+import com.noneplayer.kernel.ui.api.NpMorphKey
+import com.noneplayer.kernel.ui.api.npMorphPart
 import com.noneplayer.kernel.ui.api.NpInlinePlayRequest
 import com.noneplayer.kernel.ui.api.LocalNpBottomInset
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
-import com.noneplayer.kernel.ui.api.NpPlayerPaneMotion
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
@@ -99,7 +99,6 @@ class PlaybackPaneChrome : DetailPaneProvider {
         // 于是整个类 PC 外壳（含媒体库那一栏）跟着进度 4/s 失效。改订位置无关的摘要。
         val queue by session.queue.collectAsStateWithLifecycle()
         val index by session.index.collectAsStateWithLifecycle()
-        SideEffect { if (queue.getOrNull(index) == null) NpPlayerPaneMotion.clearPane() }
         return queue.getOrNull(index) != null
     }
 
@@ -136,11 +135,6 @@ class PlaybackPaneChrome : DetailPaneProvider {
         SideEffect { if (currentSnapshot != null) lastSnapshot = currentSnapshot }
         val snapshot = currentSnapshot ?: lastSnapshot ?: return
         val ink = LocalNpInk.current
-        val services = LocalKernel.current.services
-        val history = remember(services) { services.get<HistoryRepository>() }
-        val scope = rememberCoroutineScope()
-        val favoriteKeys by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
-        val favorited = HistoryEntry.keyOf(snapshot.item) in favoriteKeys
         // HDR 概况来自会话播放器的起播探测；换播放器/条目时重新订（默认 null）
         val hdrFlow = remember(session, snapshot.item.uri) {
             session.player?.hdrLabel ?: MutableStateFlow<String?>(null)
@@ -208,7 +202,10 @@ class PlaybackPaneChrome : DetailPaneProvider {
                         // 迷你条同步消失——与迷你条 ✕ 是同一个出口。
                         session.stop()
                     },
-                    modifier = Modifier.padding(start = NpSpace.sm),
+                    modifier = Modifier
+                        .padding(start = NpSpace.sm)
+                        // 横屏的 ✕ 与竖屏顶栏的返回箭头是同一个出口 → 同一个 key（E133）
+                        .npMorphPart(NpMorphKey.Dismiss, desktop = true),
                 )
                 Text(
                     text = if (audioOnly || snapshot.item.kind == MediaKind.AUDIO) "正在播放" else snapshot.title,
@@ -216,16 +213,11 @@ class PlaybackPaneChrome : DetailPaneProvider {
                     color = ink.fg,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    // 标题在两侧同名：转屏时它从右栏栏头飞到竖屏顶栏，不重排样式
+                    modifier = Modifier.weight(1f).npMorphPart(NpMorphKey.Title, desktop = true),
                 )
-                // 收藏（与手机播放页同一动作）：此前右栏横竖屏都没有这个出口，
-                // 平板上唯一的收藏入口藏在播放选项菜单里（用户实报）。
-                NpIconButton(
-                    icon = NpIcon.Heart,
-                    contentDescription = if (favorited) "取消收藏" else "收藏",
-                    tint = if (favorited) ink.accent else ink.fg,
-                    onClick = { scope.launch { history.toggleFavorite(snapshot.item) } },
-                )
+                // 收藏不在这里：横屏的收藏归左侧那一横排动作（与参考实现同一口径），
+                // 栏上再放一颗心会让同一个动作在屏上有两个入口、且挡住画面右上角。
                 if (audioOnly || snapshot.item.kind == MediaKind.AUDIO) {
                     NpIconButton(
                         icon = NpIcon.Expand,
@@ -237,27 +229,9 @@ class PlaybackPaneChrome : DetailPaneProvider {
                 }
             }
             Box(modifier = Modifier.weight(1f)) {
-                // 播放页交接过来的最后一帧：右栏重新挂载的画面出画前用它顶着，否则
-                // 飞行帧落位淡出之后会露出一段纯黑（用户实报过的"画面只剩底部迷你条"）。
-                // 只认"落点是右栏"的那一枚——转竖屏那一轮封面归播放页。
-                val panePoster = remember(snapshot.item.uri) {
-                    NpFormHandoff.posterFor(snapshot.item.uri, NpHandoffTarget.PANE)?.asImageBitmap()
-                }
-                var posterHeld by remember(panePoster) { mutableStateOf(panePoster != null) }
-                LaunchedEffect(panePoster) {
-                    if (panePoster == null) return@LaunchedEffect
-                    // 给新 Surface 三帧时间出画，之后这层静止帧就该退场了。
-                    repeat(3) { withFrameMillis { } }
-                    posterHeld = false
-                }
-                if (panePoster != null && posterHeld) {
-                    Image(
-                        bitmap = panePoster,
-                        contentDescription = null,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
+                // 这里不再盖"交接过来的最后一帧"：画面是同一个 TextureView，
+                // 整屏 morph 把它从竖屏舞台的位置直接飞到右栏的落点（E133），
+                // 没有"新 Surface 还没出画"的空档需要顶。
                 if (handOffToPlayerPage) return@Box
                 if (currentSnapshot == null) {
                     // Exit keeps only a static cover. Never remount a stopped playback surface.
