@@ -60,6 +60,16 @@ object AviChunk {
     /** 偶数长度不补齐，奇数长度后面有一个填充字节。 */
     fun pad(size: Long): Long = if (size % 2L == 0L) 0L else 1L
 
+    /**
+     * 未知 LIST 的下一个 chunk 位置：读过 4 字节 list type 之后，跳过**剩余** payload。
+     *
+     * E140 的回归点：真机上一版把这里算成 `position + (size + (size - 4))`——多算了一个
+     * `size`，seek 直接越过 `movi`，WMV2 整片零格式（探测判"没有受支持的视频编码"）。
+     * 提成纯函数就是为了让这段算术有单测钉着：`size` 是**含**那 4 字节 type 的。
+     */
+    fun nextAfterUnknownList(positionAfterType: Long, size: Long): Long =
+        positionAfterType + (size - 4) + pad(size)
+
     private fun pair(first: Char, second: Char): Int = first.code or (second.code shl 8)
 
     private fun hexDigit(code: Int): Int? = when (code) {

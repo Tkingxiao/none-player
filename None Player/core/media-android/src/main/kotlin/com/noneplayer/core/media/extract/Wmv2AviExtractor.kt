@@ -191,7 +191,10 @@ class Wmv2AviExtractor : Extractor {
                     return Extractor.RESULT_SEEK
                 }
                 else -> {
-                    val at = nextChunkPos(input.position, size + (size - 4))
+                    // 已读过 4 字节的 list type：跳过**剩余** payload
+                    // （E140 真机采出：先前写成 `size + (size - 4)`，seek 直接越过 movi，
+                    //  整片零格式——WMV2 全灭。算术提进 AviChunk 并有单测钉着。）
+                    val at = AviChunk.nextAfterUnknownList(input.position, size)
                     if (at <= input.position) return Extractor.RESULT_END_OF_INPUT
                     holder.position = at
                     return Extractor.RESULT_SEEK

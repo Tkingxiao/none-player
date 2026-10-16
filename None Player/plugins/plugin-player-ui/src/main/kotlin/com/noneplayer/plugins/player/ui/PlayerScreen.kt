@@ -5534,64 +5534,141 @@ private fun pipActions(
 private val SIBLING_SUBTITLE_EXTENSIONS = listOf("ass", "ssa", "srt", "vtt")
 
 /**
- * 同名字幕自动挂载（批次 3）：查 MediaStore Files 表找**同目录、同基名**的字幕文件，
- * 按优先级取第一条。视频在 MediaStore 的 RELATIVE_PATH（Q+）与字幕所在目录比对；
- * 查不到（非 MediaStore 来源 / 无字幕）返回 null，调用方保持现状。
+ * 同名字幕自动挂载（批次 3 / E140 重写）：找**同目录、同基名**的字幕文件，按
+ * ASS > SSA > SRT > VTT 取第一条。
+ *
+ * **两条路并行**（谁先命中用谁），因为 MediaStore 那条在真机上恒为空集（E140 实测）：
+ * 应用没有 `MANAGE_EXTERNAL_STORAGE`、只持有 `READ_MEDIA_VIDEO/AUDIO` 时，MediaProvider
+ * 会把非媒体文件（`.ass` 落成 `application/octet-stream`）对 app 整体过滤掉——
+ * `adb shell content query` 看得到，app 查回来 `count=0`。
+ *
+ * ① MediaStore `Files` 表：仍保留（别的设备/权限组合下可能有效）；
+ * ② 已授权的 SAF 树（[authorizedTrees]）：把授权树的文档 id 折成相对路径、与视频的
+ *    `relative_path` 比对，再列该目录的孩子按同名+扩展名取优先级最高的一条。
+ *    授权过的目录正是本应用扫库的来源，这是主力路径。
+ *
+ * 查不到返回 null（无字幕 / 不在授权目录里），调用方保持现状。
  */
-internal suspend fun resolveSiblingSubtitle(context: Context, uri: String): String? =
-    withContext(Dispatchers.IO) {
-        runCatching {
-            val resolver = context.contentResolver
-            val videoMeta = resolver
-                .query(
-                    uri.toUri(),
-                    arrayOf(
-                        android.provider.MediaStore.Video.Media.DISPLAY_NAME,
-                        android.provider.MediaStore.Video.Media.RELATIVE_PATH,
-                    ),
-                    null, null, null,
-                )
-                ?.use { c -> if (c.moveToFirst()) c.getString(0) to c.getString(1) else null }
-                ?: return@runCatching null
-            val displayName = videoMeta.first ?: return@runCatching null
-            val base = displayName.substringBeforeLast('.', displayName)
-            if (base.isBlank()) return@runCatching null
-            // LIKE 通配符转义：文件名里的 % _ 会扩大匹配面
-            val escapedBase = base
-                .replace("\\", "\\\\")
-                .replace("%", "\\%")
-                .replace("_", "\\_")
-            val selection = SIBLING_SUBTITLE_EXTENSIONS
-                .joinToString(" OR ") { "_display_name LIKE ? ESCAPE '\\'" } + " AND relative_path = ?"
-            val args = SIBLING_SUBTITLE_EXTENSIONS.map { "$escapedBase.$it" } + (videoMeta.second ?: "")
-            resolver.query(
-                android.provider.MediaStore.Files.getContentUri("external"),
+internal suspend fun resolveSiblingSubtitle(
+    context: Context,
+    uri: String,
+    authorizedTrees: List<String> = emptyList(),
+): String? = withContext(Dispatchers.IO) {
+    runCatching {
+        val resolver = context.contentResolver
+        val meta = resolver
+            .query(
+                uri.toUri(),
                 arrayOf(
-                    android.provider.MediaStore.Files.FileColumns._ID,
-                    android.provider.MediaStore.Files.FileColumns.DISPLAY_NAME,
+                    android.provider.MediaStore.Video.Media.DISPLAY_NAME,
+                    android.provider.MediaStore.Video.Media.RELATIVE_PATH,
                 ),
-                selection,
-                args.toTypedArray(),
-                null,
-            )?.use { c ->
-                var best: String? = null
-                var bestPrio = Int.MAX_VALUE
-                while (c.moveToNext()) {
-                    val name = c.getString(1) ?: continue
-                    val ext = name.substringAfterLast('.', "").lowercase()
-                    val prio = SIBLING_SUBTITLE_EXTENSIONS.indexOf(ext).let { if (it < 0) Int.MAX_VALUE else it }
-                    if (prio < bestPrio) {
-                        bestPrio = prio
-                        best = android.content.ContentUris.withAppendedId(
-                            android.provider.MediaStore.Files.getContentUri("external"),
-                            c.getLong(0),
-                        ).toString()
-                    }
-                }
-                best
+                null, null, null,
+            )
+            ?.use { c -> if (c.moveToFirst()) c.getString(0) to c.getString(1) else null }
+            ?: return@runCatching null
+        val displayName = meta.first?.takeIf { it.isNotBlank() } ?: return@runCatching null
+        val base = displayName.substringBeforeLast('.', displayName)
+        if (base.isBlank()) return@runCatching null
+
+        mediaStoreSibling(resolver, base, meta.second)?.let { return@runCatching it }
+        val relativePath = meta.second?.trim('/') ?: return@runCatching null
+        if (relativePath.isEmpty()) return@runCatching null
+        safSibling(resolver, authorizedTrees, relativePath, base)
+    }.getOrNull()
+}
+
+/**
+ * ① MediaStore 侧。这里**顺带修一处真缺陷**：旧的
+ * `A OR B OR C OR D AND relative_path = ?` 里 OR 比 AND 松，前三条分支不带目录约束，
+ * 别的目录里的同名字幕也会命中——显式加括号，目录约束对四条分支一律生效。
+ */
+private fun mediaStoreSibling(
+    resolver: android.content.ContentResolver,
+    base: String,
+    relativePath: String?,
+): String? {
+    val files = android.provider.MediaStore.Files.getContentUri("external")
+    val selection = "(" +
+        SIBLING_SUBTITLE_EXTENSIONS.joinToString(" OR ") { "_display_name = ?" } +
+        ") AND relative_path = ?"
+    val args = SIBLING_SUBTITLE_EXTENSIONS.map { "$base.$it" } + (relativePath ?: "")
+    return resolver.query(
+        files,
+        arrayOf(
+            android.provider.MediaStore.Files.FileColumns._ID,
+            android.provider.MediaStore.Files.FileColumns.DISPLAY_NAME,
+        ),
+        selection,
+        args.toTypedArray(),
+        null,
+    )?.use { c ->
+        var best: String? = null
+        var bestPrio = Int.MAX_VALUE
+        while (c.moveToNext()) {
+            val name = c.getString(1) ?: continue
+            val ext = name.substringAfterLast('.', "").lowercase()
+            val prio = SIBLING_SUBTITLE_EXTENSIONS.indexOf(ext).let { if (it < 0) Int.MAX_VALUE else it }
+            if (prio < bestPrio) {
+                bestPrio = prio
+                best = android.content.ContentUris.withAppendedId(files, c.getLong(0)).toString()
             }
-        }.getOrNull()
+        }
+        best
     }
+}
+
+/**
+ * ② SAF 侧（E140 新增，主力路径）：授权树的文档 id 形如 `primary:Movies`，冒号后就是
+ * 相对 external storage 的路径；与视频的 `relative_path` 相等才去列同级。用
+ * `DocumentsContract` 列孩子拿文档 uri，结果对 app 可读（MediaStore 那条不行）。
+ */
+private fun safSibling(
+    resolver: android.content.ContentResolver,
+    authorizedTrees: List<String>,
+    videoRelativePath: String,
+    base: String,
+): String? {
+    for (tree in authorizedTrees) {
+        val treeUri = runCatching { tree.toUri() }.getOrNull() ?: continue
+        val treeDocId = runCatching {
+            android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+        }.getOrNull() ?: continue
+        val treeRel = treeDocId.substringAfter(':', "").trim('/')
+        if (treeRel != videoRelativePath) continue
+        val children = runCatching {
+            android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeDocId)
+        }.getOrNull() ?: continue
+        val found = resolver.query(
+            children,
+            arrayOf(
+                android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+                android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+            ),
+            null, null, null,
+        )?.use { c ->
+            var best: String? = null
+            var bestPrio = Int.MAX_VALUE
+            while (c.moveToNext()) {
+                val name = c.getString(1) ?: continue
+                if (!name.startsWith("$base.")) continue
+                val ext = name.substringAfterLast('.', "").lowercase()
+                val prio = SIBLING_SUBTITLE_EXTENSIONS.indexOf(ext).let { if (it < 0) Int.MAX_VALUE else it }
+                if (prio < bestPrio) {
+                    bestPrio = prio
+                    best = runCatching {
+                        android.provider.DocumentsContract
+                            .buildDocumentUriUsingTree(treeUri, c.getString(0))
+                            .toString()
+                    }.getOrNull()
+                }
+            }
+            best
+        }
+        if (found != null) return found
+    }
+    return null
+}
 
 /**
  * M2 共享封面飞行帧：从卡片机位补间到舞台（挂在舞台 Box 内，坐标相对舞台）。

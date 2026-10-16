@@ -273,9 +273,8 @@ class PlaybackSession(
         scope.launch {
             val key = mediaMemoryKey(item.sourceId, item.id)
             val source = settings.subtitleUri(key).first()
-                ?: resolveSiblingSubtitle(context, item.uri)?.also { hit ->
-                    settings.setSubtitleUri(key, hit)
-                }
+                ?: resolveSiblingSubtitle(context, item.uri, settings.scanFolderUris.first())
+                    ?.also { hit -> settings.setSubtitleUri(key, hit) }
                 ?: return@launch
             val prepared = prepareSubtitleUri(context, source.toUri())
             // 读记忆与转码都在 IO 上，两段各核一次条目身份

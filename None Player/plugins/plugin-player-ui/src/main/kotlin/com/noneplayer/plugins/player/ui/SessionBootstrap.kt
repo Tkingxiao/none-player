@@ -142,7 +142,12 @@ internal suspend fun ensureSessionPlaying(
             val savedSubtitle = settings.subtitleUri(keyedSubtitle).first()
             // 同名字幕自动挂载（批次 3 §12.6）：无记忆时按 ASS > SSA > SRT > VTT
             // 找同目录同名文件；命中即记忆，之后与手动挂载走同一恢复链路
-            val subtitle = savedSubtitle ?: resolveSiblingSubtitle(context, item.uri)?.also {
+            val subtitle = savedSubtitle ?: resolveSiblingSubtitle(
+                context,
+                item.uri,
+                // E140：MediaStore 对非媒体文件不可见，主力路径是已授权的 SAF 树
+                settings.scanFolderUris.first(),
+            )?.also {
                 onSubtitleMatched?.invoke(keyedSubtitle, it)
             }
             subtitle?.let {
@@ -153,7 +158,8 @@ internal suspend fun ensureSessionPlaying(
                 player.setSubtitle(prepared.uri, prepared.format)
             }
         }
-        player.setTextTracksEnabled(settings.subtitleEnabled.first())
+        val subtitleEnabled = settings.subtitleEnabled.first()
+        player.setTextTracksEnabled(subtitleEnabled)
         // 这一记管的是"**立刻**停掉上一条可能还在播的媒体"（装载落地要等探测）。
         // "只装载不起播"本身不能只靠它：`setQueue` 返回时媒体还没进播放器，这句
         // pause() 落在探测窗口里是空操作，过去会被装载落地里那句 play() 原样覆盖

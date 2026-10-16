@@ -58,4 +58,12 @@ class AviChunkTest {
         assertEquals(0L, AviChunk.pad(64L))
         assertEquals(1L, AviChunk.pad(63L))
     }
+
+    @Test
+    fun `unknown list skips only the remainder after the 4 byte type`() {
+        // E140 的回归点：多算一个 size 就会越过后面的 movi，整片零格式。
+        // size 含那 4 字节 type，所以这里只该再跳 size - 4（奇偶补齐与 size 一致）。
+        assertEquals(100L + 96L, AviChunk.nextAfterUnknownList(positionAfterType = 100L, size = 100L))
+        assertEquals(100L + 97L + 1L, AviChunk.nextAfterUnknownList(positionAfterType = 100L, size = 101L))
+    }
 }
