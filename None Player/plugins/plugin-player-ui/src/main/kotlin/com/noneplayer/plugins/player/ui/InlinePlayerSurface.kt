@@ -178,7 +178,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
         val summary by session.nowPlayingSummary.collectAsStateWithLifecycle()
         val videoAspectRatio by player.videoAspectRatio.collectAsStateWithLifecycle()
-        val cues by player.cues.collectAsStateWithLifecycle()
+        // A6：Cue 不在这一层解包——订阅点下沉到 VideoStage 里的 PlayerSubtitleLayer
         val overlays by remember { kernel.registry.observe<PlaybackOverlay>() }
             .collectAsStateWithLifecycle(initialValue = kernel.registry.query<PlaybackOverlay>())
         // 字幕样式与独占播放页读同一份设置——此前内嵌画面不传 subtitleStyle，
@@ -342,7 +342,6 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
             VideoStage(
                 player = player,
                 videoAspectRatio = videoAspectRatio,
-                cues = cues,
                 overlays = overlays,
                 overlayMedia = media,
                 navigator = navigator,
@@ -424,7 +423,8 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 // enter/exit spec 每 tick 重新分配。§9.2 的纪律就是为这个立的。
                 val positionState = player.positionMs.collectAsStateWithLifecycle()
                 val durationMs by player.durationMs.collectAsStateWithLifecycle()
-                val bufferedPositionMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
+                // A6：与页根同一条纪律——缓冲前沿只留 State，交给 NpSeekBar 在绘制相位读
+                val bufferedState = player.bufferedPositionMs.collectAsStateWithLifecycle()
                 val dragState = rememberUpdatedState(dragPositionMs)
                 val displayState = rememberUpdatedState(
                     if (userDragging) dragPositionMs else positionState.value.toFloat(),
@@ -435,7 +435,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                         showTransport = true,
                         positionMs = positionState,
                         durationMs = durationMs,
-                        bufferedPositionMs = bufferedPositionMs,
+                        bufferedPositionMs = bufferedState,
                         dragPositionMs = dragState,
                         userDragging = userDragging,
                         displayPosition = displayState,

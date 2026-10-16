@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -84,7 +85,11 @@ import kotlin.math.roundToInt
 internal fun NpSeekBar(
     durationMs: Long,
     displayPositionMs: Float,
-    bufferedPositionMs: Long,
+    /**
+     * 缓冲前沿（A6）：收 [State] 而不是裸值——前沿变化只在**绘制相位**读，
+     * 轨道重画一次，不触发本组件与调用方重组（此前页根解包它，前沿一跳整页跟着走）。
+     */
+    bufferedPositionMs: State<Long>,
     dragging: Boolean,
     onScrubStart: () -> Unit,
     onScrubChange: (positionMs: Float) -> Unit,
@@ -111,7 +116,8 @@ internal fun NpSeekBar(
     val ink = LocalNpInk.current
     val maxPosition = durationMs.coerceAtLeast(1L).toFloat()
     val fraction = (displayPositionMs / maxPosition).coerceIn(0f, 1f)
-    val bufferedFraction = (bufferedPositionMs / maxPosition).coerceIn(0f, 1f)
+    // A6：缓冲前沿的 fraction **不在这里算**——它读在绘制相位（见下面的 Canvas），
+    // 这样前沿变化只重画轨道，不重组本组件。
     // M7（§7.5）：拖=按住 `Long` / 松手 `Tick`，点击定位=一次 `Tick`。
     // 触觉挂在组件上而不是调用方：这里才分得清"点"与"拖"两条路径。
     val haptics = rememberNpHaptics()
@@ -217,7 +223,9 @@ internal fun NpSeekBar(
                 size = Size(size.width, trackH),
                 cornerRadius = radius,
             )
-            // 已缓冲段（中）：只有真的领先于播放位置才画，否则是一段假缓冲
+            // 已缓冲段（中）：只有真的领先于播放位置才画，否则是一段假缓冲。
+            // A6：`.value` 读在绘制相位——前沿变化只让轨道重画，不重组本组件。
+            val bufferedFraction = (bufferedPositionMs.value / maxPosition).coerceIn(0f, 1f)
             if (bufferedFraction > fraction) {
                 drawRoundRect(
                     color = ink.muted,

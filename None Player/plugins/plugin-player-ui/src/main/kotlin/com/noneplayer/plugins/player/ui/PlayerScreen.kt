@@ -664,10 +664,13 @@ fun PlayerScreen(
     val positionState = player.positionMs.collectAsStateWithLifecycle()
     val durationState = player.durationMs.collectAsStateWithLifecycle()
     val durationMs by durationState
-    // S5 缓冲段可视化：进度条三段式的"已缓冲"段数据源
-    val bufferedPositionMs by player.bufferedPositionMs.collectAsStateWithLifecycle()
+    // S5 缓冲段可视化：进度条三段式的"已缓冲"段数据源。
+    // A6：与位置同一条纪律——页根**不解包**，只把 [State] 交给底栏，
+    // 由 NpSeekBar 在绘制相位读 `.value`（缓冲前沿变化只重画，不重组）。
+    val bufferedState = player.bufferedPositionMs.collectAsStateWithLifecycle()
     val videoAspectRatio by player.videoAspectRatio.collectAsStateWithLifecycle()
-    val cues by player.cues.collectAsStateWithLifecycle()
+    // A6：Cue 也不在页根解包——订阅点下沉到 PlayerSubtitleLayer（见 SubtitleLayer.kt）。
+    // 旧写法每来一组字幕重组整页，PGS 一秒好几次；无字幕的片子测不出来，一直没暴露。
     // 队列与下标提到组合顶层：底部控制层（上/下一集按钮）与选集面板两处都要用，
     // 放在底栏 AnimatedVisibility 内部会让面板拿不到（且底栏隐藏时值也读不到）。
     val queue by session.queue.collectAsStateWithLifecycle()
@@ -1926,7 +1929,6 @@ fun PlayerScreen(
                     VideoStage(
                         player = player,
                         videoAspectRatio = videoAspectRatio,
-                        cues = cues,
                         overlays = overlays,
                         overlayMedia = overlayMedia,
                         navigator = navigator,
@@ -2096,7 +2098,7 @@ fun PlayerScreen(
                         leadingActions = null,
                         positionMs = positionState,
                         durationMs = durationMs,
-                        bufferedPositionMs = bufferedPositionMs,
+                        bufferedPositionMs = bufferedState,
                         dragPositionMs = dragPositionMsState,
                         userDragging = userDragging,
                         displayPosition = displayPosition,
@@ -2354,7 +2356,6 @@ fun PlayerScreen(
                             VideoStage(
                                 player = player,
                                 videoAspectRatio = videoAspectRatio,
-                                cues = cues,
                                 overlays = overlays,
                                 overlayMedia = overlayMedia,
                                 navigator = navigator,
@@ -2499,7 +2500,7 @@ fun PlayerScreen(
                                 },
                                 positionMs = positionState,
                                 durationMs = durationMs,
-                                bufferedPositionMs = bufferedPositionMs,
+                                bufferedPositionMs = bufferedState,
                                 dragPositionMs = dragPositionMsState,
                                 userDragging = userDragging,
                                 displayPosition = displayPosition,
@@ -4159,7 +4160,7 @@ internal fun PlayerBottomControls(
     showTransport: Boolean,
     positionMs: State<Long>,
     durationMs: Long,
-    bufferedPositionMs: Long,
+    bufferedPositionMs: State<Long>,
     dragPositionMs: State<Float>,
     userDragging: Boolean,
     displayPosition: State<Float>,
@@ -4922,7 +4923,6 @@ private fun PlayingBars(modifier: Modifier = Modifier) {
 internal fun VideoStage(
     player: VideoPlayer,
     videoAspectRatio: Float,
-    cues: List<SubtitleCue>,
     overlays: List<PlaybackOverlay>,
     overlayMedia: MediaItem,
     navigator: Navigator,
@@ -4996,8 +4996,9 @@ internal fun VideoStage(
             )
             // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
             // E131：样式由「字幕设置」面板驱动（颜色/大小/斜体/总开关）
-            SubtitleLayer(
-                cues = cues,
+            // A6：Cue 的订阅点在它自己这一层（PlayerSubtitleLayer），舞台不参与重组
+            PlayerSubtitleLayer(
+                player = player,
                 modifier = Modifier.fillMaxSize(),
                 style = subtitleStyle,
             )

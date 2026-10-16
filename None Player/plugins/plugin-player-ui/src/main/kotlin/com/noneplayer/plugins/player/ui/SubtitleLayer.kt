@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -18,6 +20,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import com.noneplayer.kernel.api.VideoPlayer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +58,23 @@ data class SubtitleStyle(
  *
  * E131：样式不再写死——由 [style] 传入（对齐参考示例的「字幕设置」面板）。
  */
+/**
+ * 播放器的字幕订阅点（A6）：Cue **只在这一层**解包。
+ *
+ * 页根与舞台都不再 `by` 解包 `player.cues`——那会让每来一组字幕都重组整棵播放页
+ * （PGS 可以一秒切好几次；无字幕的片子测不出来，所以此前一直没暴露）。
+ * 这里是一个独立的 `@Composable`：Cue 变化只重组它自己，舞台、覆盖层、控制层都不参与。
+ */
+@Composable
+fun PlayerSubtitleLayer(
+    player: VideoPlayer,
+    modifier: Modifier = Modifier,
+    style: SubtitleStyle = SubtitleStyle(),
+) {
+    val cues by player.cues.collectAsStateWithLifecycle()
+    SubtitleLayer(cues = cues, modifier = modifier, style = style)
+}
+
 @Composable
 fun SubtitleLayer(
     cues: List<SubtitleCue>,
