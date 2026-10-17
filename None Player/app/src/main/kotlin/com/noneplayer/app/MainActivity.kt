@@ -262,6 +262,12 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // enableEdgeToEdge() 的默认导航栏样式是 auto(...)：它把栏色置 0，同时把对比度
+        // 交回系统（EdgeToEdgeApi29 里 isNavigationBarContrastEnforced = true），
+        // 于是系统在小白条背后自己垫一层灰。状态栏那侧它传的是 false，只有这里有遮罩。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            window.isNavigationBarContrastEnforced = false
+        }
         // 系统默认的 3D 转屏会把转场中间帧（首页、封面、两层画面）一起旋进录屏。
         // 窗口硬切；画面与按钮的位移/缩放由整屏 morph 承担（NpMorph）——系统那套
         // 截图旋转只会把中间帧一起旋进来，我们要的是自己这一段连续的移动。
