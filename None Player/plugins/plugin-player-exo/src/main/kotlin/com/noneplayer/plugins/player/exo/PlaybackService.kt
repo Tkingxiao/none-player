@@ -135,7 +135,12 @@ class PlaybackService : MediaSessionService() {
                 },
             )
             .setEnableDecoderFallback(true)
-            .setEnableAudioOutputPlaybackParameters(true)
+            // E147：不要用 AudioTrack 原生倍速（setEnableAudioOutputPlaybackParameters）。
+            // 真机上 6 声道 48kHz 音轨调 AudioTrack.setPlaybackParams 直接抛
+            // IllegalArgumentException("arguments out of range")，media3 随即把倍速回滚到
+            // 1.0——用户点 2.00x/长按 3x 都看着"没反应"。交给 SonicAudioProcessor 变速
+            // （默认路径）后，倍速与音调保持与音轨声道数无关。
+            .setEnableAudioOutputPlaybackParameters(false)
         // AVI 交给 NpExtractorsFactory：非 WMV2 仍是 Media3Avi，WMV2 补轨，确需软解的
         // MPEG-4 ASP 改专用 mime。必须与 FormatProbe 的探测链同源
         // （见 FormatProbe.AVI_EXTRACTORS 注释）：不同源会让"探测结论"与"实际能否出画"分叉。

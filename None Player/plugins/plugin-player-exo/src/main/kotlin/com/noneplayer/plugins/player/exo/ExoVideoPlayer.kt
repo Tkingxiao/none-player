@@ -5,7 +5,6 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.view.KeyEvent
 import android.view.SurfaceView
 import android.view.TextureView
 import androidx.annotation.OptIn
@@ -28,7 +27,6 @@ import androidx.media3.common.Tracks
 import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.extractor.metadata.Chapter
-import androidx.media3.session.MediaButtonReceiver
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
@@ -397,6 +395,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     setTextTracksEnabled(textTracksEnabled)
                     setVideoTracksEnabled(videoTracksEnabled)
                     connected.complete(c)
+                    // E144-1：PiP 动作按钮走同进程广播 → 桥 → 本控制器
+                    NpMediaActionBridge.register(this) { action -> dispatchMediaAction(c, action) }
                     scope.launch { pollPosition(c) }
                 } catch (t: Throwable) {
                     _state.value = PlaybackState.Error(t.message ?: "无法建立播放会话")
@@ -843,34 +843,45 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     }
 
     /**
-     * 媒体键按钮 → 广播给 media3 的 `MediaButtonReceiver`（A2）。
+     * 媒体键按钮 → 同进程广播（A2 / E144-1）。
      *
-     * 该接收器收到 `ACTION_MEDIA_BUTTON` 后按 `EXTRA_KEY_EVENT` 找到本包的
-     * `MediaSessionService` 并 `startForegroundService` 把 Intent 交给它，会话侧播放器
-     * 就地执行暂停 / 跳到下一项。请求码用 keycode 本身：一颗钮一份 PendingIntent，
-     * 互不覆盖。
+     * 旧实现把 `ACTION_MEDIA_BUTTON` 广播给 media3 的 `MediaButtonReceiver`：那套通路
+     * 自带"服务被系统杀掉也能被叫回来"的语义，但 media3 在 API 26+ **只允许 PLAY 类
+     * 按键冷启动前台服务**（避免 `ForegroundServiceDidNotStartInTimeException`），
+     * 非 PLAY 键一律丢弃——真机 logcat 实证：
      *
-     * 注意这条链路自带"服务已被系统杀掉也能被叫回来"的语义，但 media3 在 API 26+
-     * **只允许 PLAY 类按键冷启动前台服务**（避免 `ForegroundServiceDidNotStartInTime`），
-     * 所以服务不在时 PAUSE / NEXT 会被丢弃——小窗按钮只在播放期间出现，服务必然活着。
+     * ```
+     * W MediaButtonReceiver: Ignore key event that is not a 'play' command on API 26 or
+     *   above to avoid an 'ForegroundServiceDidNotStartInTimeException'
+     * ```
+     *
+     * 小窗上的 ⏸ / ⏭ 因此静默无操作（▶ 能用）。这里改走自建接收器
+     * [NpMediaActionReceiver] + [NpMediaActionBridge]：显式组件、同进程直达当前
+     * 引擎实例的 `MediaController`，不依赖系统媒体栈，也不触发前台服务冷启动。
+     * 请求码用 action 序号：一颗钮一份 PendingIntent，互不覆盖。
      */
-    @OptIn(UnstableApi::class)
     override fun mediaButtonIntent(action: NpMediaButtonAction): Any? {
-        val keyCode = when (action) {
-            NpMediaButtonAction.PLAY -> KeyEvent.KEYCODE_MEDIA_PLAY
-            NpMediaButtonAction.PAUSE -> KeyEvent.KEYCODE_MEDIA_PAUSE
-            NpMediaButtonAction.NEXT -> KeyEvent.KEYCODE_MEDIA_NEXT
-        }
-        val intent = Intent(Intent.ACTION_MEDIA_BUTTON).apply {
-            component = ComponentName(appContext, MediaButtonReceiver::class.java)
-            putExtra(Intent.EXTRA_KEY_EVENT, KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+        val intent = Intent(appContext, NpMediaActionReceiver::class.java).apply {
+            this.action = NpMediaActionReceiver.ACTION_NP_MEDIA_BUTTON
+            putExtra(NpMediaActionReceiver.EXTRA_ACTION, action.name)
         }
         return PendingIntent.getBroadcast(
             appContext,
-            keyCode,
+            action.ordinal,
             intent,
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
+    }
+
+    /** E144-1：把 PiP/通知动作落到会话控制器上（接收器经 [NpMediaActionBridge] 调用）。 */
+    private fun dispatchMediaAction(c: MediaController, action: NpMediaButtonAction) {
+        runCatching {
+            when (action) {
+                NpMediaButtonAction.PLAY -> c.play()
+                NpMediaButtonAction.PAUSE -> c.pause()
+                NpMediaButtonAction.NEXT -> c.seekToNext()
+            }
+        }
     }
 
     /**
@@ -1332,6 +1343,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun release() {
         released = true
         scope.cancel()
+        // E144-1：摘掉 PiP 动作桥（按 owner 校验，不误清后来者的登记）
+        NpMediaActionBridge.unregister(this)
         // 注意：会话侧播放器由 PlaybackService 持有，后台播放继续；
         // 这里只解除 UI 与会话的连接
         controller?.release()

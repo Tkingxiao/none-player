@@ -238,6 +238,7 @@ import com.noneplayer.plugins.player.ui.gesture.StageGestureZones
 import com.noneplayer.plugins.player.ui.gesture.StageTapZone
 import com.noneplayer.plugins.player.ui.gesture.StageVerticalMode
 import com.noneplayer.plugins.player.ui.gesture.VerticalAdjustIndicator
+import com.noneplayer.plugins.player.ui.gesture.VerticalSwipeAccumulator
 import com.noneplayer.plugins.player.ui.gesture.clampSeekTargetMs
 import com.noneplayer.plugins.player.ui.gesture.npStageGestures
 import com.noneplayer.plugins.player.ui.gesture.stageDpAtLeast
@@ -1430,6 +1431,9 @@ fun PlayerScreen(
     // 竖滑亮度/音量指示器（§4.3：160dp 竖条 + 图标 + 百分比，900ms 无更新淡出）
     // `verticalGesture` 声明在自动隐藏守护之前（A7#8），这里不再重复声明。
     var verticalEdgeRejected by remember { mutableStateOf(false) }
+    // E144-2：竖滑增量的浮点累加器。旧实现每帧 (current - delta).roundToInt()，
+    // 慢滑时单帧增量 <0.5% 被取整抹平、current 又每帧读同一状态，数值完全不动。
+    val verticalSwipeAccumulator = remember { VerticalSwipeAccumulator() }
     // 停留计时**不挂组合**：旧写法是 `LaunchedEffect(verticalGesture, verticalGestureTickMs)`，
     // 而那个 tick 每帧都写、又当 key 读——等于把整块舞台拖进每帧重组（§9.2 反例②）。
     //
@@ -1466,26 +1470,36 @@ fun PlayerScreen(
                 if (actual != volumePercent) volumePercent = actual
             }
         }
+        // E144-2：累加器用**刷新后的平台值**播种——慢滑的单帧小增量要靠它累积，
+        // 用旧快照播种会让"起手第一帧"仍按过期值算。
+        verticalSwipeAccumulator.start(
+            when (mode) {
+                StageVerticalMode.Brightness -> brightnessPercent
+                StageVerticalMode.Volume -> volumePercent
+            },
+        )
         verticalGesture = mode
         restartVerticalGestureHold()
     }
     fun onVerticalGestureDelta(mode: StageVerticalMode, deltaPercent: Float) {
-        // 上滑 = 增大（市面播放器一致的手感）：pointer 的 y 轴向下为正，这里取负
-        val (current, floor, ceil) = when (mode) {
-            StageVerticalMode.Brightness -> Triple(brightnessPercent, 1, 100)
-            StageVerticalMode.Volume -> Triple(volumePercent, 0, 100)
+        // 上滑 = 增大（市面播放器一致的手感）：pointer 的 y 轴向下为正，这里取负。
+        // E144-2：增量交给浮点累加器，慢滑（单帧 0.1%–0.3%）也能累计出可见变化；
+        // 取整只发生在回写目标值时。
+        val (floor, ceil) = when (mode) {
+            StageVerticalMode.Brightness -> 1 to 100
+            StageVerticalMode.Volume -> 0 to 100
         }
-        val raw = (current - deltaPercent).roundToInt()
+        val step = verticalSwipeAccumulator.onDelta(deltaPercent, floor, ceil)
         // M10 边界（§7.5 `Reject`）：顶到端点各响一次，滑回区间内重新武装
-        if (raw != raw.coerceIn(floor, ceil)) {
+        if (step.edgeHit) {
             if (!verticalEdgeRejected) {
                 verticalEdgeRejected = true
                 rejectHaptic()
             }
         } else verticalEdgeRejected = false
         when (mode) {
-            StageVerticalMode.Brightness -> setBrightnessPercent(raw)
-            StageVerticalMode.Volume -> setVolumePercent(raw)
+            StageVerticalMode.Brightness -> setBrightnessPercent(step.percent)
+            StageVerticalMode.Volume -> setVolumePercent(step.percent)
         }
         restartVerticalGestureHold()
     }
