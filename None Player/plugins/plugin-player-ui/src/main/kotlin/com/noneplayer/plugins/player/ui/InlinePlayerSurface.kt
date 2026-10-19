@@ -68,6 +68,7 @@ import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
 import com.noneplayer.kernel.ui.api.PlaybackMenuContributor
+import com.noneplayer.plugins.player.ui.brightness.rememberWindowBrightness
 import kotlinx.coroutines.flow.first
 import androidx.core.net.toUri
 import kotlinx.coroutines.delay
@@ -234,22 +235,19 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         var volume by remember {
             mutableIntStateOf(audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC) * 100 / maxVolume)
         }
-        var brightness by remember {
-            mutableIntStateOf(
-                activity?.window?.attributes?.screenBrightness
-                    ?.takeIf { it in 0.01f..1f }?.times(100)?.toInt() ?: 62,
-            )
-        }
+        // A8：亮度统一走共享助手——进页面捕获窗口原值（含"无覆盖 -1f"）、离开精确写回、
+        // 读数优先窗口 override 再读系统亮度。旧实现把"无覆盖"兜底成 62%，第一帧就是假值。
+        val windowBrightness = rememberWindowBrightness(activity)
+        var brightness by windowBrightness.percent
+        // 截屏开关只负责 FLAG_SECURE，不再顺手做亮度恢复（A8）：
+        // 旧实现把"进页面时的窗口亮度"塞在这条 DisposableEffect 里，收起右栏/翻转截屏开关
+        // 都会走 onDispose→写回旧值，表现为"亮度突然跳回"。
         DisposableEffect(activity, screenshotBlocked) {
             val window = activity?.window
-            val previousBrightness = window?.attributes?.screenBrightness
             if (screenshotBlocked) window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
             else window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
             onDispose {
                 window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-                if (previousBrightness != null) {
-                    window.attributes = window.attributes.apply { screenBrightness = previousBrightness }
-                }
             }
         }
         val mediaKey = mediaMemoryKey(media.sourceId, media.id)
@@ -522,14 +520,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             onClose = dismiss,
                             onPage = { menuPage = it },
                             onLoopMode = session::setLoopMode,
-                            onBrightness = {
-                                brightness = it.coerceIn(1, 100)
-                                activity?.window?.let { window ->
-                                    window.attributes = window.attributes.apply {
-                                        screenBrightness = brightness / 100f
-                                    }
-                                }
-                            },
+                            onBrightness = { windowBrightness.setPercent(it) },
                             onVolume = {
                                 volume = it.coerceIn(0, 100)
                                 audioManager.setStreamVolume(

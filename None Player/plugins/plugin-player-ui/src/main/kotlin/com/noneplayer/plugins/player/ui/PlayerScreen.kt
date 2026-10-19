@@ -63,6 +63,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemGestures
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
@@ -132,6 +133,7 @@ import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 
@@ -224,14 +226,21 @@ import com.noneplayer.kernel.ui.api.NpFormHandoff
 import com.noneplayer.kernel.ui.api.NpMorph
 import com.noneplayer.kernel.ui.api.NpMorphKey
 import com.noneplayer.kernel.ui.api.npMorphPart
+import com.noneplayer.plugins.player.ui.brightness.rememberWindowBrightness
 import com.noneplayer.plugins.player.ui.controls.NpSeekBar
 import com.noneplayer.plugins.player.ui.controls.StatusClockBattery
 import com.noneplayer.plugins.player.ui.gesture.GESTURE_INDICATOR_HOLD_MS
+import com.noneplayer.plugins.player.ui.gesture.STAGE_BOTTOM_DEAD_ZONE_DP
+import com.noneplayer.plugins.player.ui.gesture.STAGE_EDGE_MIN_DP
+import com.noneplayer.plugins.player.ui.gesture.STAGE_TOP_DEAD_ZONE_DP
 import com.noneplayer.plugins.player.ui.gesture.SeekGestureBubble
+import com.noneplayer.plugins.player.ui.gesture.StageGestureZones
 import com.noneplayer.plugins.player.ui.gesture.StageTapZone
 import com.noneplayer.plugins.player.ui.gesture.StageVerticalMode
 import com.noneplayer.plugins.player.ui.gesture.VerticalAdjustIndicator
+import com.noneplayer.plugins.player.ui.gesture.clampSeekTargetMs
 import com.noneplayer.plugins.player.ui.gesture.npStageGestures
+import com.noneplayer.plugins.player.ui.gesture.stageDpAtLeast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -1095,6 +1104,11 @@ fun PlayerScreen(
         userDragging = false
     }
 
+    // A7#8：手势进行中不按旧节拍收起控制层。两个手势态提前声明（自动隐藏守护要读，
+    // 而 Kotlin 局部变量不能先用后声明）。
+    var seekGestureActive by remember { mutableStateOf(false) }
+    var verticalGesture by remember { mutableStateOf<StageVerticalMode?>(null) }
+
     // 播放中控制层自动隐藏；拖动进度条期间不隐藏。
     // 类 PC / **接了指针设备**：控制层常驻（§13.6 与 §8.4——有鼠标时"3.5s 自动消失"是反模式，
     // 用户想点某个钮还得先晃一下把栏唤回来），
@@ -1110,9 +1124,15 @@ fun PlayerScreen(
         isImmersive,
         fsMenuPage,
         stageLocked,
+        // A7#8：手势进行中也算"用户正在操作"，旧 key 不包含手势态，
+        // 长按 3x/横滑 seek 期间控制层会按旧节拍自行收起。
+        seekGestureActive,
+        verticalGesture,
     ) {
         if (pointerAttached && !isImmersive && !stageLocked) return@LaunchedEffect
         if (fsMenuPage != null) return@LaunchedEffect
+        // 手势进行中不收起；手势结束（key 变回 false/null）时重新按完整节拍计时。
+        if (seekGestureActive || verticalGesture != null) return@LaunchedEffect
         if (controlsVisible && state == PlaybackState.Playing && !userDragging) {
             delay(CONTROLS_AUTO_HIDE_MS)
             controlsVisible = false
@@ -1259,31 +1279,21 @@ fun PlayerScreen(
     // 亮度（window attr 0.01..1 映射为 1..100）/ 音量（AudioManager STREAM_MUSIC）
     val audioManager = remember { context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager }
     val maxVolume = remember { audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC) }
-    // §9.2（审核文档 §11 反例②）：亮度/音量在竖滑里**每帧**都写。
-    // 解包成 `var … by …` 只在需要的地方留着 State 句柄（HUD 自身、选项菜单滑杆），
-    // 版式层不再因为一次滑动而整体重组。
-    val brightnessState = rememberSaveable {
-        mutableIntStateOf(
-            ((activityWindow?.attributes?.screenBrightness ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE)
-                .takeIf { it in 0.01f..1f }
-                ?.times(100)?.toInt() ?: 62),
-        )
-    }
+    // A8：亮度读数/捕获/恢复统一走 rememberWindowBrightness（与内嵌播放器共用同一助手）。
+    // 旧实现把"窗口无覆盖(-1f)"当成读不到、兜底写死 62%——用户还没滑窗口就被覆盖成 62%，
+    // 且离开播放页没有任何恢复路径。助手内：进页捕获原值（含 NONE）、离页精确写回、
+    // 读数优先窗口 override 再读系统亮度、都读不到才用中性 50%。
+    val windowBrightness = rememberWindowBrightness(activity)
+    val brightnessState = windowBrightness.percent
     var brightnessPercent by brightnessState
     val volumeState = rememberSaveable {
         mutableIntStateOf(audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC) * 100 / maxVolume)
     }
     var volumePercent by volumeState
     fun setBrightnessPercent(value: Int) {
-        val clamped = value.coerceIn(1, 100)
-        brightnessPercent = clamped
-        val window = activityWindow ?: return
-        val target = clamped / 100f
-        // 逐帧指针事件里"实际亮度没变"是常态，而 `attributes =` 是一次窗口属性更新
-        // （relayout + binder）。判据取**窗口上的现值**而不是记住的整数：进页时窗口
-        // 还是 BRIGHTNESS_OVERRIDE_NONE，拿整数比会把这一发漏掉。
-        if (window.attributes.screenBrightness == target) return
-        window.attributes = window.attributes.apply { screenBrightness = target }
+        // clamp 到 1..100、"平台现值相同不写"、UI 状态回写都在助手内完成（A8 同一份策略，
+        // 内嵌播放器滑杆与舞台竖滑共用）。
+        windowBrightness.setPercent(value)
     }
     fun setVolumePercent(value: Int) {
         val clamped = value.coerceIn(0, 100)
@@ -1332,7 +1342,9 @@ fun PlayerScreen(
      */
     fun seekByGesture(forward: Boolean, stepMs: Long = GESTURE_SEEK_STEP_MS) {
         val raw = player.positionMs.value + if (forward) stepMs else -stepMs
-        val target = raw.coerceIn(0L, durationMs.coerceAtLeast(0L))
+        // A7#7：上限读**回调执行时**的时长——`durationMs` 是组合期快照，AVI 时长回填、
+        // 切集之后旧值会把目标夹进旧片长（甚至为 0）。
+        val target = raw.coerceIn(0L, durationState.value.coerceAtLeast(0L))
         if (target != raw) rejectHaptic() else haptics.performHaptic(NpHaptic.Tick)
         player.seekTo(target)
         val seconds = (stepMs / 1000L).toInt()
@@ -1376,7 +1388,7 @@ fun PlayerScreen(
 
     // 横滑 seek（§4.3）：拖动中视频照常播放，中央气泡只呈现"松手会去哪"；
     // 松手才真正 seekTo（与进度条拖动的"关键帧预览"是两条路径，互不混用）
-    var seekGestureActive by remember { mutableStateOf(false) }
+    // 状态本身声明在自动隐藏守护之前（A7#8），这里不再重复声明。
     // 目标位置每帧都在写（§9.2 同源问题）：留句柄给气泡自身读
     val seekGestureTargetMsState = remember { mutableFloatStateOf(0f) }
     var seekGestureTargetMs by seekGestureTargetMsState
@@ -1392,12 +1404,16 @@ fun PlayerScreen(
         haptics.performHaptic(NpHaptic.Long)
     }
     fun onSeekGestureDelta(deltaMs: Float) {
+        // A7#7：夹取上限读回调执行时的时长（组合期 `maxPosition` 可能是旧片长）；
+        // 时长未知（<=0）时不设上限，只保证非负。
+        val durationNowMs = durationState.value
         val raw = seekGestureTargetMs + deltaMs
-        val clamped = raw.coerceIn(0f, maxPosition)
+        val clamped = clampSeekTargetMs(raw, durationNowMs)
+        val withinRange = if (durationNowMs > 0L) raw in 0f..durationNowMs.toFloat() else raw >= 0f
         if (raw != clamped && !seekGestureEdgeTicked) {
             rejectHaptic()
             seekGestureEdgeTicked = true
-        } else if (raw in 0f..maxPosition) {
+        } else if (withinRange) {
             // 拉回界内后重新武装边界 tick（同一次拖动里反复撞边界各 tick 一次）
             seekGestureEdgeTicked = false
         }
@@ -1412,7 +1428,7 @@ fun PlayerScreen(
     }
 
     // 竖滑亮度/音量指示器（§4.3：160dp 竖条 + 图标 + 百分比，900ms 无更新淡出）
-    var verticalGesture by remember { mutableStateOf<StageVerticalMode?>(null) }
+    // `verticalGesture` 声明在自动隐藏守护之前（A7#8），这里不再重复声明。
     var verticalEdgeRejected by remember { mutableStateOf(false) }
     // 停留计时**不挂组合**：旧写法是 `LaunchedEffect(verticalGesture, verticalGestureTickMs)`，
     // 而那个 tick 每帧都写、又当 key 读——等于把整块舞台拖进每帧重组（§9.2 反例②）。
@@ -1436,16 +1452,21 @@ fun PlayerScreen(
     }
     fun onVerticalGestureStart(mode: StageVerticalMode) {
         endSpeedBoost(withHaptic = false)
-        verticalGesture = mode
         verticalEdgeRejected = false
-        // E129（审查 #7）：竖滑的起点必须读**系统当前**音量，而不是进页时那份本地快照。
-        // 用户先用实体音量键调过档、再来竖滑时，旧快照会让 HUD 从一个早已过期的值起算
-        // （表现为"一滑就跳一大截"，且指示条与听感对不上）。竖滑**起手这一帧**是唯一
-        // 正确的重读时机：每帧读会把用户自己滑动造成的回写读回来，两边互相打架。
-        if (mode == StageVerticalMode.Volume) {
-            val actual = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 / maxVolume
-            if (actual != volumePercent) volumePercent = actual
+        // E129（审查 #7）/ A8：竖滑的起点必须读**平台当前**值，而不是进页时那份本地快照。
+        // 音量：用户先用实体音量键调过档、再来竖滑时，旧快照会让 HUD 从过期值起算
+        // （表现为"一滑就跳一大截"，且指示条与听感对不上）。
+        // 亮度：旧实现进页时把"无覆盖"兜底成 62%，竖滑第一帧 HUD 就显示假值。
+        // 竖滑**起手这一帧**是唯一正确的重读时机：每帧读会把用户自己滑动造成的回写
+        // 读回来，两边互相打架。
+        when (mode) {
+            StageVerticalMode.Brightness -> windowBrightness.refreshFromPlatform()
+            StageVerticalMode.Volume -> {
+                val actual = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) * 100 / maxVolume
+                if (actual != volumePercent) volumePercent = actual
+            }
         }
+        verticalGesture = mode
         restartVerticalGestureHold()
     }
     fun onVerticalGestureDelta(mode: StageVerticalMode, deltaPercent: Float) {
@@ -1467,6 +1488,16 @@ fun PlayerScreen(
             StageVerticalMode.Volume -> setVolumePercent(raw)
         }
         restartVerticalGestureHold()
+    }
+
+    /**
+     * A7#6：竖滑抬手立即收亮度/音量 HUD，不再等 [GESTURE_INDICATOR_HOLD_MS] 超时。
+     *
+     * 同时清零"最后触碰时刻"，避免残留时间戳影响下一次自延后循环的剩余量计算。
+     */
+    fun onVerticalGestureEnd() {
+        verticalLastTouchMs.longValue = 0L
+        verticalGesture = null
     }
 
     fun enterPip() {
@@ -1547,14 +1578,43 @@ fun PlayerScreen(
         }
     }
 
+    // A7#2/#3：舞台死区宽度 = 「系统手势 inset」与固定下限的较大者。
+    // 左右 max(24dp, systemGestures 左右 inset)；顶部 48dp；底部 max(48dp, systemGestures bottom inset)。
+    // 用 systemGestures 而不是 safeDrawing：后者含状态栏/导航条常态高度，会把可操作区域吃掉
+    // 太多；真正会"抢走边缘滑动"的是系统手势区本身。
+    val systemGestureInsets = WindowInsets.systemGestures
+    val gestureDensity = LocalDensity.current
+    val gestureLayoutDirection = LocalLayoutDirection.current
+    val stageGestureZones = remember(systemGestureInsets, gestureDensity, gestureLayoutDirection) {
+        fun insetDp(px: Int): Float = with(gestureDensity) { px.toDp().value }
+        StageGestureZones(
+            leftDp = stageDpAtLeast(
+                insetDp(systemGestureInsets.getLeft(gestureDensity, gestureLayoutDirection)),
+                STAGE_EDGE_MIN_DP,
+            ),
+            rightDp = stageDpAtLeast(
+                insetDp(systemGestureInsets.getRight(gestureDensity, gestureLayoutDirection)),
+                STAGE_EDGE_MIN_DP,
+            ),
+            topDp = STAGE_TOP_DEAD_ZONE_DP,
+            bottomDp = stageDpAtLeast(
+                insetDp(systemGestureInsets.getBottom(gestureDensity)),
+                STAGE_BOTTOM_DEAD_ZONE_DP,
+            ),
+        )
+    }
+
     /**
      * 两种形态的舞台手势接线（§4.3）——收敛成一处，避免双份漂移。
-     * 锁定态（[stageLocked]）禁用全部手势；**点按例外**：它是解锁钮的唤出入口
-     * （锁定后屏幕只剩解锁钮，不许点按就等于没有出口；除显隐解锁钮外不触发任何动作）。
+     * 锁定态（[stageLocked]）只停"动作"（双击/长按/拖动），**点按例外**：它是解锁钮的
+     * 唤出入口（锁定后屏幕只剩解锁钮，不许点按就等于没有出口）。
      */
+    @Composable
     fun stageGestures(): Modifier =
         Modifier.npStageGestures(
-            gesturesEnabled = gesturesEnabled && !stageLocked,
+            gesturesEnabled = gesturesEnabled,
+            stageLocked = stageLocked,
+            deadZones = stageGestureZones,
             onTap = { controlsVisible = !controlsVisible },
             onDoubleTap = ::onStageDoubleTap,
             onLongPressStart = {
@@ -1571,6 +1631,7 @@ fun PlayerScreen(
             onSeekEnd = ::onSeekGestureEnd,
             onVerticalStart = ::onVerticalGestureStart,
             onVerticalDelta = ::onVerticalGestureDelta,
+            onVerticalEnd = ::onVerticalGestureEnd,
         )
 
     // ================= 批次 3：轨道 / 章节 / 画面 / 偏移 / PiP / 睡眠 / 截图 =================

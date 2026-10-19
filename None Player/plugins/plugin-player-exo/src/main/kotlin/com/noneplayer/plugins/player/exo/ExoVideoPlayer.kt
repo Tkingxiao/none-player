@@ -162,6 +162,17 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var appliedItems: List<MediaItem> = emptyList()
 
     /**
+     * 已应用队列的**身份序列**（A15）：[applyQueue] 落地时逐项记下 id（没有 id 的
+     * 条目退化为 uri），与引擎里那份 media3 队列同生共死。
+     *
+     * 此前切集快路径只比 [MediaController.mediaItemCount]——两份**等长**的文件夹
+     * 会被当成同一条队列；探测还在走（[loadPending]）的那 0.5–1.5s 里，用户切到
+     * 另一份文件夹的选集，`seekToDefaultPosition` 就落进了无关文件。项数一样
+     * 只是"长度恰好相同"，不是"同一份队列"的证据。
+     */
+    private var appliedQueueIds: List<String> = emptyList()
+
+    /**
      * 装载落地时的起播意图（A08：装载即起播的"起播"到底要不要）。
      *
      * 装载是异步的（探测 + 建表），意图必须在装载**开始**时就定下来，落地时才知道
@@ -486,6 +497,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 is FormatProbe.Result.Unplayable -> {
                     loadPending = false
                     appliedUri = null
+                    appliedQueueIds = emptyList()
                     probedUri = uri
                     probedContainer = probe.failure.container
                     probedVideoCodec = probe.failure.videoCodec
@@ -689,6 +701,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentCoroutineContext().ensureActive()
         appliedUri = items[safeIndex].localConfiguration?.uri?.toString()
         appliedItems = items
+        appliedQueueIds = queueIdentity(coreItems)
         mountedSubtitle = mount
         loadPending = false
         c.setMediaItems(items, safeIndex, startPositionMs.coerceAtLeast(0L))
@@ -708,27 +721,33 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * 切到正常项时，闩锁不复位、media3 回调被挡，错误面板就永远盖在画面上；
      * 切到不可解项时又会绕过 E80 的探测，黑屏把音轨播完。
      *
-     * 改用 `setMediaItems(items, index)` 整表重设而非仅 seek：队列可能因上一次
-     * 探测失败**根本没进 media3**（setQueue 失败时 applyQueue 未执行），
-     * 此时对旧播放列表 seek 会指到别的媒体甚至越界。
+     * 所以这里分两条路：
+     *
+     * ① **快路径**——只有 [canFastSelectQueueIndex] 全部放行才走（控制器里装着的
+     *    **就是**这份队列：已应用 id 序列逐项相同、引擎项数一致、没有在途装载、
+     *    没有失败闩）。此时直接 seek 到那一项：再整表 `setMediaItems` + 重新探测
+     *    会和正在打开的文件抢句柄，切集停在转圈，直到进程重启才把句柄放掉。
+     * ② **探测 + 整表重设**——其余情况（含探测尚未落地、队列身份对不上、从失败态
+     *    切出）。队列可能因上一次探测失败**根本没进 media3**（setQueue 失败时
+     *    applyQueue 未执行），此时对旧播放列表 seek 会指到别的媒体甚至越界；
+     *    另外两份**等长**的文件夹也不能按项数就当成同一条队列（A15）。
      */
     override fun selectQueueIndex(index: Int) {
         val c = controller ?: return
         val items = _queue.value
         if (index !in items.indices) return
-        // 队列已经在播：直接跳到那一项。再整表 setMediaItems + 重新探测会和正在打开的文件抢句柄，
-        // 切集停在转圈，直到进程重启把句柄放掉。
-        //
-        // 判据只看**控制器里已经装着同一份队列**（项数一致）。此前还额外要求
-        // `appliedItems.size == items.size`——那是"我这边也记着同一份"的代理条件，
-        // 而单媒体项装载（applyMedia / 预载命中）之后 appliedItems 为空，于是每一次
-        // 切集都掉进下面的整表重建 + 重新探测分支：一季几十集就是几十次无谓重装。
-        val queueMounted = c.mediaItemCount == items.size
-        if (queueMounted && index == c.currentMediaItemIndex) {
+        val fast = canFastSelectQueueIndex(
+            appliedQueueIds = appliedQueueIds,
+            requestedQueueIds = queueIdentity(items),
+            engineItemCount = c.mediaItemCount,
+            loadPending = loadPending,
+            terminalFailure = terminalFailure,
+        )
+        if (fast && index == c.currentMediaItemIndex) {
             c.play()
             return
         }
-        if (queueMounted && !terminalFailure) {
+        if (fast) {
             _currentIndex.value = index
             val target = items[index]
             // 新一集不该继承上一集的外挂字幕（与整表重建分支同一语义）。
@@ -780,6 +799,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         pendingSeekMs = null
         appliedUri = null
         appliedItems = emptyList()
+        appliedQueueIds = emptyList()
         loadPending = false
         currentMediaUri = null
         currentMediaId = ""
@@ -1340,6 +1360,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             c.seekTo(position)
         } else {
             appliedItems = listOf(item)
+            // 换成的是一条单项队列（不再是"同一份文件夹队列"），身份作废：
+            // 否则切集可能拿着旧队列的 id 序列走快路径（A15）。
+            appliedQueueIds = emptyList()
             c.setMediaItem(item, position)
             c.prepare()
         }
@@ -1409,6 +1432,38 @@ internal fun npEngineStateOf(playbackState: Int, playWhenReady: Boolean): Playba
         Player.STATE_ENDED -> PlaybackState.Ended
         else -> PlaybackState.Idle
     }
+
+/**
+ * 队列身份序列（A15）：逐项取 id，没有 id 的条目退化为 uri。
+ *
+ * 身份必须"同一份队列"可判：两份文件夹长度相同、甚至标题相似，只要 id 序列不同
+ * 就不是同一条队列。纯函数，便于 JVM 单测（见 QueueIdentityFastSelectTest）。
+ */
+internal fun queueIdentity(items: List<com.noneplayer.core.media.MediaItem>): List<String> =
+    items.map { it.id.ifEmpty { it.uri } }
+
+/**
+ * 切集快路径判据（A15 提纯，便于单测）。
+ *
+ * 只有能**证明**控制器里装着的就是这一份队列时才允许 `seekToDefaultPosition`：
+ * - [appliedQueueIds] 与 [requestedQueueIds] 逐项相同（同一份队列，同序）；
+ * - 引擎媒体项数 [engineItemCount] 与请求项数一致（防御 media3 侧异步变更）；
+ * - 没有在途装载 [loadPending]：探测还在走时按项数 seek 会落进无关文件；
+ * - 没有失败闩 [terminalFailure]：从错误态切出必须走探测闸复位闩锁；
+ * - 请求队列非空（空队列没有可切的项）。
+ */
+internal fun canFastSelectQueueIndex(
+    appliedQueueIds: List<String>,
+    requestedQueueIds: List<String>,
+    engineItemCount: Int,
+    loadPending: Boolean,
+    terminalFailure: Boolean,
+): Boolean =
+    requestedQueueIds.isNotEmpty() &&
+        !loadPending &&
+        !terminalFailure &&
+        engineItemCount == requestedQueueIds.size &&
+        appliedQueueIds == requestedQueueIds
 
 /**
  * media3 Cue → 内核 SubtitleCue（E1）。

@@ -20,14 +20,17 @@ import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.VideoPlayerFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -93,7 +96,9 @@ class PlaybackSession(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
     private var startJob: Deferred<SessionStart>? = null
-    private var startingItem: MediaItem? = null
+
+    /** 在途装载的**完整意图**（A9）；与 [startJob] 同生共死，stop() 时一并清空。 */
+    private var startingIntent: StartIntent? = null
     private val appVisible = MutableStateFlow(true)
     private val _sleepTimerEndsAtMs = MutableStateFlow(0L)
     val sleepTimerEndsAtMs: StateFlow<Long> = _sleepTimerEndsAtMs.asStateFlow()
@@ -121,27 +126,78 @@ class PlaybackSession(
         prepareOnly: Boolean = false,
         audioOnlyMode: Boolean? = null,
     ): SessionStart {
+        val intent = startIntentOf(item, restorePosition, autoPlay, prepareOnly, audioOnlyMode)
         val pending = startJob
-        if (pending?.isActive == true && startingItem?.uri == item.uri && startingItem?.id == item.id) {
-            val result = pending.await()
-            if (result.accepted && audioOnlyMode != null) setAudioOnly(audioOnlyMode)
-            return result
+        val previous = startingIntent
+        when (startDisposition(previous, pending?.isActive == true, intent)) {
+            StartDisposition.JOIN_PENDING -> {
+                // 同一意图：旧任务要做的和这次完全一样，等它落地即可。
+                // audioOnlyMode 相同，旧任务自己会应用；这里再补一次是幂等的，
+                // 只为覆盖"旧任务看到 accepted=true 之后、应用模式之前"的极窄时序。
+                val result = awaitStart(pending!!)
+                if (result.accepted && intent.audioOnlyMode != null) setAudioOnly(intent.audioOnlyMode)
+                return result
+            }
+            StartDisposition.SUPERSEDE_PENDING -> {
+                // A9：旧任务作废、按新意图重跑。cancel() 打在它的挂起点上
+                // （awaitReady / 历史读盘等），取消由协程内部逐层抛出，**不会**
+                // 落成 UI 可读的错误状态；旧 awaiter 也不会收到这个取消（见 awaitStart）。
+                //
+                // 但若它已经跑过 session.open()（会话队列已指向这条媒体），引擎里
+                // 那份装载是按**旧参数**定下的 startPositionMs / playOnLoad——必须清掉，
+                // 否则旧探测落地时会把新意图（从头播 / 只装载）原样盖回去。
+                // 换媒体时不需要：canReusePlayback 本来就不成立，新任务必然重新装载。
+                if (pending != null && previous != null &&
+                    supersedeNeedsEngineReset(previous, intent, _queue.value.getOrNull(_index.value))
+                ) {
+                    _player.value?.clearQueue()
+                }
+                pending?.cancel()
+            }
+            StartDisposition.START_NEW -> pending?.cancel()
         }
-        pending?.cancel()
-        startingItem = item
-        val job = scope.async {
-            val player = acquire(item.mimeType) ?: return@async SessionStart(accepted = false)
-            ensureSessionPlaying(
-                context, registry, settings, history, player, this@PlaybackSession, item,
-                restorePosition = restorePosition,
-                autoPlay = autoPlay,
-                prepareOnly = prepareOnly,
-                audioOnlyMode = audioOnlyMode,
-                onSubtitleMatched = { key, hit -> scope.launch { settings.setSubtitleUri(key, hit) } },
-            )
-        }
+        startingIntent = intent
+        val job = scope.async { ensureStart(intent) }
         startJob = job
-        return job.await()
+        return awaitStart(job)
+    }
+
+    /**
+     * 按 [intent] 装载一次。
+     *
+     * 引擎由会话持有（[acquire] 复用/换代），这里被取消时**不需要**释放引擎：
+     * 它留给下一个意图、或 [stop] 之后的会话继续复用，不随单次装载的生死走
+     * （会话级对象的既有设计，见 [stop] 的 KDoc）。真正耗时的起播探测跑在引擎
+     * 自己的 scope 里，靠装载代际与 [VideoPlayer.clearQueue] 打断，不挂在本协程树下。
+     */
+    private suspend fun ensureStart(intent: StartIntent): SessionStart {
+        val item = intent.item
+        val player = acquire(item.mimeType) ?: return SessionStart(accepted = false)
+        return ensureSessionPlaying(
+            context, registry, settings, history, player, this, item,
+            restorePosition = intent.restorePosition,
+            autoPlay = intent.autoPlay,
+            prepareOnly = intent.prepareOnly,
+            audioOnlyMode = intent.audioOnlyMode,
+            onSubtitleMatched = { key, hit -> scope.launch { settings.setSubtitleUri(key, hit) } },
+        )
+    }
+
+    /**
+     * 等待在途装载，但**不把"被取代"当成播放失败抛给 UI**（A9）。
+     *
+     * 旧任务被 cancel 时 `Deferred.await()` 会抛 CancellationException。对调用方
+     * 来说这不是错误，而是"有更新的意图接管了这次装载"：返回一个中性的未接受结果
+     * 即可（调用方只读 resumedFromMs / coverUri / subtitleMissing，缺失时各自回退）。
+     *
+     * 先 `ensureActive()` 分辨取消来源：若是**调用方自己**被取消（页面销毁 / stop），
+     * 照旧向上抛出——取消的任务必须保持取消，别把页面取消吞成一次"装载完成"。
+     */
+    private suspend fun awaitStart(job: Deferred<SessionStart>): SessionStart = try {
+        job.await()
+    } catch (_: CancellationException) {
+        currentCoroutineContext().ensureActive()
+        SessionStart(accepted = false)
     }
 
     init {
@@ -588,7 +644,7 @@ class PlaybackSession(
         _sleepTimerEndsAtMs.value = 0L
         startJob?.cancel()
         startJob = null
-        startingItem = null
+        startingIntent = null
         val p = _player.value
         p?.pause()
         // 清队列前先把当前项断点落盘：周期落点最多差 5s，显式关闭不该丢掉这一截
@@ -686,4 +742,104 @@ internal fun resolveQueueStart(
     } else {
         listOf(item) to 0
     }
+}
+
+/**
+ * 一次 [PlaybackSession.startPlayback] 的**完整意图**（A9）。
+ *
+ * 会话同一时刻只有一条在途装载（[PlaybackSession.startJob]），后到的调用只有
+ * 意图完全一致才能搭旧任务的车（[startDisposition] → JOIN）。此前只比较 uri+id，
+ * 于是「同一条正在装载时，后到的调用要求从头播 / 打开但保持暂停 / 只装载」全被丢掉：
+ * 旧任务已经按旧参数算好了起始位置、装载后播不播、视频轨开不开，落地时不会再回头看
+ * 调用方一眼。
+ *
+ * 身份判据只取 uri / id / mimeType：标题、封面这些是展示元数据，不同入口
+ * （深链还原、选集面板）拼出来的值可能不同，却指向同一次装载，不该为此重跑。
+ */
+internal data class StartIntent(
+    /** 装载目标；身份字段见 [sameStartIntent] 的说明 */
+    val item: MediaItem,
+    val restorePosition: Boolean,
+    val autoPlay: Boolean,
+    val prepareOnly: Boolean,
+    val audioOnlyMode: Boolean?,
+)
+
+/** 构造一次意图（纯函数，便于单测直接覆盖判据）。 */
+internal fun startIntentOf(
+    item: MediaItem,
+    restorePosition: Boolean,
+    autoPlay: Boolean,
+    prepareOnly: Boolean,
+    audioOnlyMode: Boolean?,
+): StartIntent = StartIntent(item, restorePosition, autoPlay, prepareOnly, audioOnlyMode)
+
+/**
+ * 两次调用是否**完全同意图**（A9 的去重判据）。
+ *
+ * 同一条媒体（uri + id + mimeType）+ 同一组装载参数 = 旧任务要做的和这次一模一样，
+ * 直接 join 即可；任何一项不同都必须取消旧任务、按新参数重跑。
+ */
+internal fun sameStartIntent(a: StartIntent, b: StartIntent): Boolean =
+    a.item.uri == b.item.uri &&
+        a.item.id == b.item.id &&
+        a.item.mimeType == b.item.mimeType &&
+        a.restorePosition == b.restorePosition &&
+        a.autoPlay == b.autoPlay &&
+        a.prepareOnly == b.prepareOnly &&
+        a.audioOnlyMode == b.audioOnlyMode
+
+/** 在途装载的处置：搭旧任务的车 / 取消它重跑 / 新起一条。 */
+internal enum class StartDisposition { JOIN_PENDING, SUPERSEDE_PENDING, START_NEW }
+
+/**
+ * 有在途任务时，这次调用该怎么处置（A9 的纯决策函数）。
+ *
+ * 没有在途任务（[previousActive] = false）时一律新起；有在途任务时只有
+ * 意图完全一致（[sameStartIntent]）才 join，其余一律取代——宁可贵一次重装载，
+ * 也不能让后到的意图被旧参数吞掉。
+ */
+internal fun startDisposition(
+    previous: StartIntent?,
+    previousActive: Boolean,
+    requested: StartIntent,
+): StartDisposition = when {
+    previous == null || !previousActive -> StartDisposition.START_NEW
+    sameStartIntent(previous, requested) -> StartDisposition.JOIN_PENDING
+    else -> StartDisposition.SUPERSEDE_PENDING
+}
+
+/**
+ * 被取代的旧任务是否可能已经把**按旧意图定下的装载**交给引擎，需要先清掉（A9）。
+ *
+ * 两个条件同时成立才需要：
+ * ① 新旧是**同一条媒体**——换媒体时 `canReusePlayback` 本来就不成立，新任务必然
+ *    重新装载，不需要额外清；
+ * ② 变的是**装载参数**：`restorePosition`（从头播还是续播）与 `prepareOnly`
+ *    （装载后播不播）。这两个值由 ensureSessionPlaying 在装载那一刻算好写进
+ *    setQueue 的 `startPositionMs` / `playOnLoad`，旧探测落地时会把它们盖回来。
+ *
+ * `autoPlay` / `audioOnlyMode` 不进这个判据：它们由"同媒体"分支当场应用，
+ * 是播放状态属性，不需要重新装载。
+ *
+ * [sessionItem] 是会话此刻队列里的当前项：只有它已指向这条媒体，才说明旧任务的
+ * `session.open()` 已经执行过（写会话队列与调 `setQueue` 在同一段同步代码里），
+ * 引擎里才可能存在按旧参数发起的探测。
+ */
+internal fun supersedeNeedsEngineReset(
+    previous: StartIntent,
+    requested: StartIntent,
+    sessionItem: MediaItem?,
+): Boolean {
+    val sameMedia = previous.item.uri == requested.item.uri &&
+        previous.item.id == requested.item.id
+    if (!sameMedia) return false
+    if (previous.restorePosition == requested.restorePosition &&
+        previous.prepareOnly == requested.prepareOnly
+    ) {
+        return false
+    }
+    return sessionItem != null &&
+        sessionItem.uri == previous.item.uri &&
+        (previous.item.id.isEmpty() || sessionItem.id == previous.item.id)
 }

@@ -156,10 +156,25 @@ object Motion {
 /**
  * 把"时长令牌(ms)"换算成 spring 刚度：想要多快就给 [Motion] 里对应的值。
  *
- * 例：Hover 100→夹到 140→≈3265；Overlay 280→≈816；Sheet 320→≈625。
+ * 公式 `(8000 / ms)²`，下限取 [NpMotionQuality.lightDurationFloorMs]（45ms）——
+ * 与 [NpMotionQuality.scaled] 在轻量档的时长下限是**同一个数**。A16 之前这里被钉在
+ * 140ms：轻量档 `scaled()` 把短令牌夹进 [45,120]，全都 < 140，于是 Hover 100 /
+ * Panel 180 / Drawer 260 / Sheet 320 在轻量档拿到完全相同的刚度（≈3265），弹簧比
+ * 同屏走 tween 的动画慢约 3 倍——"轻量档更快"变成了"轻量档更拖"。
+ *
+ * 例：Hover 100→6400；Overlay 280→≈816；Sheet 320→625；45（轻量档下限）→≈31605。
+ *
+ * 下限仍要保留（[silkStiffness] 是公开 API，可能收到 0 / 负数）：45ms 对应 ≈31605，
+ * 临界阻尼（见 [silkSpring]）下两三帧就到位，是"看得见但极快"，不是数值不稳定。
+ *
+ * 别把两条边界混为一谈：轻量档里 [Motion.Hover] / [Motion.Press] / [Motion.Field] /
+ * [Motion.Panel] / [Motion.Switch] / [Motion.Tab] 的 `scaled()` 都等于 45ms，因此它们
+ * **共享同一个刚度**——那是 [NpMotionQuality.scaled] 的时长下限造成的设计折叠
+ * （这些反馈令牌在轻量档本就该一样快），不是这里的"弹簧被压平"；45/52/56/64/100/120
+ * 这些不同实际时长仍各自给出不同刚度。
  */
 fun silkStiffness(durationMs: Int): Float {
-    val clamped = durationMs.coerceAtLeast(140).toFloat()
+    val clamped = durationMs.coerceAtLeast(NpMotionQuality.lightDurationFloorMs).toFloat()
     val k = 8000f / clamped
     return k * k
 }
@@ -239,7 +254,14 @@ data class NpMotionQuality(
     val haptics: Boolean,
 ) {
 
-    /** 把令牌时长折算成本档位下的实际时长（毫秒）——所有动画时长只经这一个出口。 */
+    /**
+     * 把令牌时长折算成本档位下的实际时长（毫秒）——所有动画时长只经这一个出口。
+     *
+     * 轻量档 ×0.20 后夹进 [lightDurationFloorMs, lightDurationCeilMs]：短令牌
+     * （Hover / Press / Field / Panel / Switch / Tab）停在 45ms 下限，长令牌停在 120ms
+     * 上限。45ms 同时是 [silkStiffness] 的刚度下限，两条边界现在是同一个数；所以
+     * "轻量档里短令牌同速"是**时长**的上下限折叠，不是弹簧被压平。
+     */
     fun scaled(durationMs: Int): Int {
         if (durationFactor >= 1f) return durationMs
         // 轻量档：×0.20 之后夹进 [45,120]ms——下限保证"还看得见"，上限保证"不再拖沓"。
