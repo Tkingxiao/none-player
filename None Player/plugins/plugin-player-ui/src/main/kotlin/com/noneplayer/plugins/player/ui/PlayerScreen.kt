@@ -5604,9 +5604,10 @@ private val SIBLING_SUBTITLE_EXTENSIONS = listOf("ass", "ssa", "srt", "vtt")
  * `adb shell content query` 看得到，app 查回来 `count=0`。
  *
  * ① MediaStore `Files` 表：仍保留（别的设备/权限组合下可能有效）；
- * ② 已授权的 SAF 树（[authorizedTrees]）：把授权树的文档 id 折成相对路径、与视频的
- *    `relative_path` 比对，再列该目录的孩子按同名+扩展名取优先级最高的一条。
- *    授权过的目录正是本应用扫库的来源，这是主力路径。
+ * ② 已授权的 SAF 树（[authorizedTrees]）：把授权树的文档 id 折成相对路径，视频的
+ *    `relative_path` 落在该树内（等于树根或为其子孙）时逐段下钻到视频所在目录，再列
+ *    该目录的孩子按同名+扩展名取优先级最高的一条。授权过的目录正是本应用扫库的来源，
+ *    这是主力路径。E144 之前只认「等于树根」，子目录里的视频永远挂不上。
  *
  * 查不到返回 null（无字幕 / 不在授权目录里），调用方保持现状。
  */
@@ -5696,9 +5697,21 @@ private fun safSibling(
             android.provider.DocumentsContract.getTreeDocumentId(treeUri)
         }.getOrNull() ?: continue
         val treeRel = treeDocId.substringAfter(':', "").trim('/')
-        if (treeRel != videoRelativePath) continue
+        val segments = subtitleSiblingDirectorySegments(treeRel, videoRelativePath) ?: continue
+        // 授权树根 == 视频所在目录时零段；子目录视频逐段下钻拿目录文档 id（E144）。
+        var dirDocId = treeDocId
+        var walked = true
+        for (name in segments) {
+            val child = findChildDocumentId(resolver, treeUri, dirDocId, name)
+            if (child == null) {
+                walked = false
+                break
+            }
+            dirDocId = child
+        }
+        if (!walked) continue
         val children = runCatching {
-            android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, treeDocId)
+            android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, dirDocId)
         }.getOrNull() ?: continue
         val found = resolver.query(
             children,
@@ -5730,6 +5743,64 @@ private fun safSibling(
     }
     return null
 }
+
+/**
+ * 视频相对路径落在授权树里的**剩余目录段**（E144 修）。
+ *
+ * 旧判据是「视频相对路径 == 授权树相对路径」，等价于**只有直接躺在授权目录根下的视频
+ * 才找同名兄弟字幕**。真机实测：授权 `Movies` 根后，`Movies/<番剧>/<合集>/<子目录>/x.mkv`
+ * 这种正常媒体库结构一律漏挂（SAIO 两层嵌套的 01/.ass、02/.ass 全部没挂上，屏幕只有
+ * 内嵌轨；而根下的 `np-wmv2.ass`、`1080p官方中字.ass` 正常）。这里把判据放宽成
+ * 「等于树根或为其子孙」：
+ * - 等于树根 → 空表（视频所在目录就是授权树根，不用往下钻）；
+ * - 子孙 → 剩下的目录段，调用方逐段下钻到视频所在目录的文档 id；
+ * - 无关路径 → null（授权树管不到这支视频）。
+ *
+ * 纯字符串判据，JVM 单测钉住（`SubtitleSiblingSegmentsTest`）。
+ */
+internal fun subtitleSiblingDirectorySegments(
+    treeRelativePath: String,
+    videoRelativePath: String,
+): List<String>? {
+    val tree = treeRelativePath.trim('/')
+    val video = videoRelativePath.trim('/')
+    // 授权的是存储根（如 `primary:` → 空串）：整条相对路径都是要下钻的段
+    if (tree.isEmpty()) return video.split('/').filter { it.isNotEmpty() }
+    if (video == tree) return emptyList()
+    if (!video.startsWith("$tree/")) return null
+    return video.removePrefix("$tree/").split('/').filter { it.isNotEmpty() }
+}
+
+/**
+ * 在授权树里按**显示名**找直接子文档 id（E144：`subtitleSiblingDirectorySegments` 的
+ * 下钻落点）。只找一层；找不到返回 null（目录被改名/移走，走别的授权树或放弃）。
+ */
+private fun findChildDocumentId(
+    resolver: android.content.ContentResolver,
+    treeUri: android.net.Uri,
+    parentDocumentId: String,
+    displayName: String,
+): String? = runCatching {
+    val children = android.provider.DocumentsContract
+        .buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
+    resolver.query(
+        children,
+        arrayOf(
+            android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+        ),
+        null, null, null,
+    )?.use { c ->
+        var hit: String? = null
+        while (c.moveToNext()) {
+            if (c.getString(1) == displayName) {
+                hit = c.getString(0)
+                break
+            }
+        }
+        hit
+    }
+}.getOrNull()
 
 /**
  * M2 共享封面飞行帧：从卡片机位补间到舞台（挂在舞台 Box 内，坐标相对舞台）。

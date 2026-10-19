@@ -146,6 +146,15 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private var textTracksEnabled = true
     private var videoTracksEnabled = true
 
+    /**
+     * 刚挂上外挂字幕、或刚切到一条带外挂字幕的媒体项之后，待落实的"选中外挂轨"。
+     *
+     * 时机只这一次：外挂轨与内嵌轨都带 [C.SELECTION_FLAG_DEFAULT]，media3 平票时按
+     * 轨道顺序内嵌先胜，自动挂上的外挂字幕于是只剩菜单里一行"已挂载"、屏上照旧出
+     * 内嵌文案（B21②）。落实后置回 false，用户随后在字幕面板里手选内嵌轨不会被抢回。
+     */
+    private var pendingExternalSubtitleSelect = false
+
     // E39/E41：探测期间的挂起操作与轨道信息
     private var prepareJob: Job? = null
     private var pendingSeekMs: Long? = null
@@ -307,6 +316,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                                     }
                                 }
                             subtitle = mountedSubtitle
+                            // 换集自动挂上的外挂字幕同样要顶掉内嵌轨的平票（E144）
+                            pendingExternalSubtitleSelect = mountedSubtitle != null
                             // 队列下标跟随会话（自动连播推进到下一集时也要更新，
                             // 否则迷你条/选集面板会一直停在旧下标）
                             // Clearing the engine after a failed probe is not a queue transition.
@@ -360,6 +371,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                         override fun onTracksChanged(tracks: Tracks) {
                             publishTracks(tracks)
                             publishChapters(tracks, null)
+                            // 外挂轨出现的那一刻把它选中（见 pendingExternalSubtitleSelect）
+                            applyPendingExternalSubtitleSelection(tracks)
                         }
 
                         // 章节经 metadata 通道到达（§12.5：MP4/Matroska 章节元数据）
@@ -1013,6 +1026,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         c.prepare()
         c.playWhenReady = playWhenReady
         mountedSubtitle = subtitle
+        // 新挂上的外挂字幕要顶掉内嵌轨的 SELECTION_FLAG_DEFAULT 平票（E144）
+        pendingExternalSubtitleSelect = mountedSubtitle != null
         setTextTracksEnabled(textTracksEnabled)
     }
 
@@ -1136,6 +1151,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      */
     override fun selectTrack(type: NpTrackType, id: String) {
         val c = controller ?: return
+        // 用户手选轨道即作废"待选中外挂轨"：之后轨道回调不再把选择抢回外挂轨
+        pendingExternalSubtitleSelect = false
         val (group, index) = trackGroupById[id] ?: return
         val trackType = when (type) {
             NpTrackType.AUDIO -> C.TRACK_TYPE_AUDIO
@@ -1147,6 +1164,40 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 .buildUpon()
                 .clearOverridesOfType(trackType)
                 .addOverride(TrackSelectionOverride(trackGroup, index))
+                .build()
+        }
+    }
+
+    /**
+     * 挂上外挂字幕之后，把轨道选中落到外挂轨上（E144）。
+     *
+     * 外挂轨与内嵌轨都带 [C.SELECTION_FLAG_DEFAULT]：平票时 media3 按轨道顺序选，
+     * 内嵌轨（容器里先出现）赢——于是"已挂载"只是菜单里的一行，屏上仍是内嵌文案。
+     * 只在 [pendingExternalSubtitleSelect] 这一拍强制一次；用户手选过轨道后
+     * （[selectTrack] 清标记）不再干预。
+     */
+    private fun applyPendingExternalSubtitleSelection(tracks: Tracks) {
+        if (!pendingExternalSubtitleSelect) return
+        val group = tracks.groups.firstOrNull { g ->
+            g.type == C.TRACK_TYPE_TEXT && g.length > 0 &&
+                // media3 会给侧载字幕的 Format.id 加一段容器/条目前缀（实测形如
+                // "1:np.external.subtitle"），用后缀匹配；不同版本加不加前缀都能中。
+                g.getTrackFormat(0).id?.endsWith(EXTERNAL_SUBTITLE_TRACK_ID) == true
+        } ?: return
+        if (!needsExternalSubtitleSelection(
+                pending = pendingExternalSubtitleSelect,
+                textTracksEnabled = textTracksEnabled,
+                externalTrackPresent = true,
+                externalTrackSelected = group.isTrackSelected(0),
+            )
+        ) return
+        pendingExternalSubtitleSelect = false
+        val c = controller ?: return
+        runCatching {
+            c.trackSelectionParameters = c.trackSelectionParameters
+                .buildUpon()
+                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+                .addOverride(TrackSelectionOverride(group.mediaTrackGroup, 0))
                 .build()
         }
     }
@@ -1379,10 +1430,31 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private fun subtitleConfiguration(mount: SubtitleMount): MediaItem.SubtitleConfiguration =
         MediaItem.SubtitleConfiguration.Builder(mount.uri.toUri())
+            .setId(EXTERNAL_SUBTITLE_TRACK_ID)
             .setMimeType(npSubtitleMime(mount.uri, mount.format))
             .setSelectionFlags(C.SELECTION_FLAG_DEFAULT)
             .build()
 }
+
+/**
+ * 外挂字幕轨的稳定 id（E144）。
+ *
+ * 烘进 [MediaItem.SubtitleConfiguration] 的 id 会原样成为对应文本轨 `Format.id`：
+ * 内外轨平票时靠它把"自动挂上的这一条"从内嵌轨里认出来，交给
+ * [TrackSelectionOverride] 显式选中。
+ */
+internal const val EXTERNAL_SUBTITLE_TRACK_ID = "np.external.subtitle"
+
+/**
+ * 是否需要强制选中外挂字幕轨（E144）：刚挂上/刚切到带外挂字幕的条目、文本轨开着、
+ * 外挂轨存在且尚未被选中，四个条件同时成立才动 [TrackSelectionParameters]。
+ */
+internal fun needsExternalSubtitleSelection(
+    pending: Boolean,
+    textTracksEnabled: Boolean,
+    externalTrackPresent: Boolean,
+    externalTrackSelected: Boolean,
+): Boolean = pending && textTracksEnabled && externalTrackPresent && !externalTrackSelected
 
 /** 一条外挂字幕：地址 + 容器格式（A3）。两者必须成对流转，缺格式就退回按 uri 猜。 */
 internal data class SubtitleMount(val uri: String, val format: NpSubtitleFormat?)
