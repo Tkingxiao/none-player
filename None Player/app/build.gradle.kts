@@ -109,7 +109,9 @@ dependencies {
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)
     implementation(libs.compose.material3)
-    // E10：Application 实现 coil.ImageLoaderFactory（含 VideoFrameDecoder）
-    implementation(libs.coil.compose)
+    // E10：Application 实现 coil.ImageLoaderFactory（含 VideoFrameDecoder）。
+    // app 本身不组合 Coil 的 Compose 组件（AsyncImage 在三个插件里），
+    // 故声明 coil 核心（ImageLoader/ImageLoaderFactory）与抽帧解码器 coil-video 两个即可。
+    implementation(libs.coil)
     implementation(libs.coil.video)
 }

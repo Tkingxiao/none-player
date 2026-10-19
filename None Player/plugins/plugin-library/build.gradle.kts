@@ -28,7 +28,6 @@ dependencies {
     implementation(project(":kernel:kernel-api"))
     implementation(project(":kernel:kernel-ui-api"))
     implementation(project(":core:media"))
-    implementation(project(":core:common"))
     implementation(project(":core:data"))
     implementation(project(":core:database"))
     implementation(project(":core:ui"))
@@ -38,6 +37,8 @@ dependencies {
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.core.ktx)
     implementation(libs.coil.compose)
+    // 卡片封面取视频首帧：`coil.request.videoFrameMillis(0)` 是 coil-video 的扩展，
+    // 属直接引用，必须显式声明（此前只经 :app 的运行时依赖图传递）
     implementation(libs.coil.video)
 
     // 编译期插件发现：由 kernel-ksp 生成 LibraryPluginIndex

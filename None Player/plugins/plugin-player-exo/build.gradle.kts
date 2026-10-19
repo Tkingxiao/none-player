@@ -26,7 +26,6 @@ kotlin {
 dependencies {
     // 插件依赖铁律：只允许 kernel-api / kernel-ui-api / core-*，禁止依赖其他 plugin-*
     implementation(project(":kernel:kernel-api"))
-    implementation(project(":core:common"))
     // L2：PlaybackService 建播放器前要读「硬件解码优先」偏好（渲染器集合在构建期定型，
     // 客户端此时还没连上来，只能由服务侧自己读设置）
     implementation(project(":core:data"))

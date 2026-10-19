@@ -28,6 +28,9 @@ dependencies {
     implementation(project(":core:common"))
     implementation(project(":core:data"))
     implementation(project(":core:database"))
+    // SettingsScreen 直接引用 core:media 的 ProbeMemo（解码能力检测行的数据源），
+    // 此前只靠 kernel-api 的 api 传递，属隐式依赖，显式补上。
+    implementation(project(":core:media"))
     implementation(project(":core:ui"))
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)

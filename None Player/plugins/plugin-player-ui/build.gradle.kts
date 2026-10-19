@@ -29,7 +29,6 @@ dependencies {
     implementation(project(":kernel:kernel-ui-api"))
     implementation(project(":core:media"))
     implementation(project(":core:ui"))
-    implementation(project(":core:common"))
     implementation(project(":core:data"))
     implementation(project(":core:database"))
     implementation(libs.androidx.core.ktx)
@@ -37,6 +36,9 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.androidx.activity.compose)
     implementation(libs.androidx.lifecycle.process)
+    // PlayerScreen 的底栏/返回等图标（Icons.AutoMirrored / ArrowBack / PlayArrow）；
+    // 此前由 core:ui 的 api 传递，属隐式依赖，改在本模块显式声明。
+    implementation(libs.compose.material.icons)
 
     // 编译期插件发现：由 kernel-ksp 生成 PlayerUiPluginIndex
     ksp(project(":kernel:kernel-ksp"))
