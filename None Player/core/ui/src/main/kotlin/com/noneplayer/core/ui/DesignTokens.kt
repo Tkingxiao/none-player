@@ -1,5 +1,6 @@
 package com.noneplayer.core.ui
 
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.Dp
@@ -24,6 +25,7 @@ import androidx.compose.ui.unit.dp
  * 设计稿的 `color-mix(...)` 派生色在这里预乘为带 alpha 的实色——Compose 的
  * `Color` 已含 alpha，运行时再 mix 一遍只会多一层计算。
  */
+@Immutable
 data class InkTokens(
     val bg: Color,            // --bg 页面底
     val surface: Color,       // --surface 卡片 / Sheet / 浮层面板

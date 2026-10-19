@@ -586,11 +586,13 @@ internal fun NpMenuSliderThumb(color: Color = MaterialTheme.colorScheme.primary)
 fun FsMenuSlider(
     label: String,
     icon: ImageVector,
-    value: Int,
+    /** A6：传 [State]——竖滑/拖滑杆时只重组这一行，菜单里的 tile 列表不跟着重建。 */
+    value: State<Int>,
     onValueChange: (Int) -> Unit,
     modifier: Modifier = Modifier,
     dark: Boolean = true,
 ) {
+    val current = value.value
     val ink = LocalNpInk.current
     val labelColor = if (dark) Color.White else ink.fg
     val valueColor = if (dark) Color.White.copy(alpha = 0.6f) else ink.muted
@@ -622,7 +624,7 @@ fun FsMenuSlider(
                 contentAlignment = Alignment.CenterEnd,
             ) {
                 Text(
-                    text = "$value",
+                    text = "$current",
                     style = NpMonoSmall,
                     color = valueColor,
                     maxLines = 1,
@@ -630,7 +632,7 @@ fun FsMenuSlider(
             }
         }
         Slider(
-            value = value.toFloat(),
+            value = current.toFloat(),
             onValueChange = { onValueChange(it.roundToInt()) },
             valueRange = 0f..100f,
             thumb = { NpMenuSliderThumb(activeColor) },
@@ -699,8 +701,8 @@ fun FsLoopChips(loopMode: NpLoopMode, onPick: (NpLoopMode) -> Unit) {
 @Composable
 fun FsMainMenuContent(
     loopMode: NpLoopMode,
-    brightnessPercent: Int,
-    volumePercent: Int,
+    brightnessPercent: State<Int>,
+    volumePercent: State<Int>,
     favorited: Boolean,
     hasChapters: Boolean,
     sleepLabel: String,

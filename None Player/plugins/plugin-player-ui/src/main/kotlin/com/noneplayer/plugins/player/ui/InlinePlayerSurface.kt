@@ -18,7 +18,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -53,9 +55,14 @@ import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.npDuration
 import com.noneplayer.core.ui.npAnchor
 import com.noneplayer.core.ui.rememberNpAnchorHolder
+import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.Navigator
+import com.noneplayer.kernel.api.NpChapter
+import com.noneplayer.kernel.api.NpLoopMode
+import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.NpTrackType
+import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.api.observe
 import com.noneplayer.kernel.api.query
@@ -74,6 +81,64 @@ import androidx.core.net.toUri
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+
+/**
+ * 内嵌菜单一次快照（A6）：把菜单才用的流收集在 [InlineMenuScope] 里，
+ * 舞台/底栏所在的重组域不订阅它们。
+ */
+@Immutable
+private class InlineMenuData(
+    val contributors: List<PlaybackMenuContributor>,
+    val tracks: List<NpTrack>,
+    val chapters: List<NpChapter>,
+    val loopMode: NpLoopMode,
+    val favorited: Boolean,
+    val sleepEndsAt: Long,
+    val screenshotBlocked: Boolean,
+    val savedSubtitle: String?,
+    val subtitleOffsetMs: Long,
+)
+
+/**
+ * 菜单宿主（A6）：只有菜单打开时才调用，订阅点在这里而不是 `InlinePlayerView` 顶层。
+ * `content` 是独立的组合 lambda，数据变化只重算菜单，不带着舞台一起重组。
+ */
+@Composable
+private fun InlineMenuScope(
+    player: VideoPlayer,
+    session: PlaybackSession,
+    settings: AppSettings,
+    history: HistoryRepository,
+    registry: ExtensionRegistry,
+    media: MediaItem,
+    content: @Composable (InlineMenuData) -> Unit,
+) {
+    val contributors by remember { registry.observe<PlaybackMenuContributor>() }
+        .collectAsStateWithLifecycle(initialValue = registry.query<PlaybackMenuContributor>())
+    val tracks by player.tracks.collectAsStateWithLifecycle()
+    val chapters by player.chapters.collectAsStateWithLifecycle()
+    val loopMode by session.loopMode.collectAsStateWithLifecycle()
+    val favorites by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
+    val sleepEndsAt by session.sleepTimerEndsAtMs.collectAsStateWithLifecycle()
+    val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
+    val mediaKey = mediaMemoryKey(media.sourceId, media.id)
+    val savedSubtitle by remember(mediaKey) { settings.subtitleUri(mediaKey) }
+        .collectAsStateWithLifecycle(initialValue = null)
+    val subtitleOffsetMs by session.subtitleOffsetMs.collectAsStateWithLifecycle()
+    content(
+        InlineMenuData(
+            contributors = contributors,
+            tracks = tracks,
+            chapters = chapters,
+            loopMode = loopMode,
+            favorited = HistoryEntry.keyOf(media) in favorites,
+            sleepEndsAt = sleepEndsAt,
+            screenshotBlocked = screenshotBlocked,
+            savedSubtitle = savedSubtitle,
+            subtitleOffsetMs = subtitleOffsetMs,
+        ),
+    )
+}
 
 /** 内嵌控制层自动隐藏延时（与播放页同一节拍） */
 private const val INLINE_CONTROLS_AUTO_HIDE_MS = 3_000L
@@ -212,18 +277,9 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         var subtitleAnchor by remember { mutableStateOf(Rect.Zero) }
         val episodesAnchor = rememberNpAnchorHolder()
         var seekAnchor by remember { mutableStateOf(Rect.Zero) }
-        val contributors by remember { kernel.registry.observe<PlaybackMenuContributor>() }
-            .collectAsStateWithLifecycle(initialValue = kernel.registry.query<PlaybackMenuContributor>())
         val speed by player.speed.collectAsStateWithLifecycle()
-        val tracks by player.tracks.collectAsStateWithLifecycle()
-        val chapters by player.chapters.collectAsStateWithLifecycle()
         val queue by session.queue.collectAsStateWithLifecycle()
         val queueIndex by session.index.collectAsStateWithLifecycle()
-        val loopMode by session.loopMode.collectAsStateWithLifecycle()
-        val favorites by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
-        val favorited = HistoryEntry.keyOf(media) in favorites
-        val sleepEndsAt by session.sleepTimerEndsAtMs.collectAsStateWithLifecycle()
-        val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
         val surfaceRef = remember { mutableStateOf<android.view.TextureView?>(null) }
         // 转屏交接不再从这里抓帧：画面是同一个 TextureView，整屏 morph 直接把它
         // 从右栏的位置搬到竖屏舞台的位置（E133，见 NpMorph），所以 FLAG_SECURE、
@@ -232,13 +288,15 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
             context.getSystemService(android.content.Context.AUDIO_SERVICE) as android.media.AudioManager
         }
         val maxVolume = remember { audioManager.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC).coerceAtLeast(1) }
-        var volume by remember {
+        val volumeState = remember {
             mutableIntStateOf(audioManager.getStreamVolume(android.media.AudioManager.STREAM_MUSIC) * 100 / maxVolume)
         }
+        var volume by volumeState
         // A8：亮度统一走共享助手——进页面捕获窗口原值（含"无覆盖 -1f"）、离开精确写回、
         // 读数优先窗口 override 再读系统亮度。旧实现把"无覆盖"兜底成 62%，第一帧就是假值。
         val windowBrightness = rememberWindowBrightness(activity)
-        var brightness by windowBrightness.percent
+        // 截屏开关（FLAG_SECURE）是窗口级的，留在页面层；菜单里的「允许截图」读同一份。
+        val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
         // 截屏开关只负责 FLAG_SECURE，不再顺手做亮度恢复（A8）：
         // 旧实现把"进页面时的窗口亮度"塞在这条 DisposableEffect 里，收起右栏/翻转截屏开关
         // 都会走 onDispose→写回旧值，表现为"亮度突然跳回"。
@@ -251,9 +309,6 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
             }
         }
         val mediaKey = mediaMemoryKey(media.sourceId, media.id)
-        val savedSubtitle by remember(mediaKey) { settings.subtitleUri(mediaKey) }
-            .collectAsStateWithLifecycle(initialValue = null)
-        val subtitleOffsetMs by session.subtitleOffsetMs.collectAsStateWithLifecycle()
         var scaleMode by remember(media.uri) { mutableStateOf(VideoScaleMode.FIT) }
         var mirrored by remember(media.uri) { mutableStateOf(false) }
         var rotation by remember(media.uri) { mutableIntStateOf(0) }
@@ -424,9 +479,13 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 // A6：与页根同一条纪律——缓冲前沿只留 State，交给 NpSeekBar 在绘制相位读
                 val bufferedState = player.bufferedPositionMs.collectAsStateWithLifecycle()
                 val dragState = rememberUpdatedState(dragPositionMs)
-                val displayState = rememberUpdatedState(
-                    if (userDragging) dragPositionMs else positionState.value.toFloat(),
-                )
+                // A6：不在这里读 `positionState.value`——用 derivedState 把读取推迟到
+                // 底栏真正需要时；它自己只在有人读时重算，不把内嵌页拖进 4Hz 重组。
+                val displayState = remember(positionState) {
+                    derivedStateOf {
+                        if (userDragging) dragPositionMs else positionState.value.toFloat()
+                    }
+                }
                 PlayerBottomControls(
                         visible = controlsVisible && !locked,
                         applyInsets = false,
@@ -502,6 +561,16 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                 )
             }
             menuPage?.let { page ->
+                // A6：菜单才用的流（轨道 / 章节 / 收藏 / 睡眠 / 截屏开关 / 外挂字幕）
+                // 收进这个独立的组合域；它们变化只重组菜单宿主，不惊动舞台与底栏。
+                InlineMenuScope(
+                    player = player,
+                    session = session,
+                    settings = settings,
+                    history = history,
+                    registry = kernel.registry,
+                    media = media,
+                ) { data ->
                 FsDropdown(
                     anchor = activeAnchor,
                     page = page,
@@ -510,13 +579,13 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                     val back = { if (targetPage == menuRoot) dismiss() else menuPage = menuRoot }
                     when (targetPage) {
                         FsMenuPage.MAIN -> FsMainMenuContent(
-                            loopMode = loopMode,
-                            brightnessPercent = brightness,
-                            volumePercent = volume,
-                            favorited = favorited,
-                            hasChapters = chapters.isNotEmpty(),
-                            sleepLabel = if (sleepEndsAt > 0) "睡眠定时已开启" else "睡眠定时",
-                            sleepActive = sleepEndsAt > 0,
+                            loopMode = data.loopMode,
+                            brightnessPercent = windowBrightness.percent,
+                            volumePercent = volumeState,
+                            favorited = data.favorited,
+                            hasChapters = data.chapters.isNotEmpty(),
+                            sleepLabel = if (data.sleepEndsAt > 0) "睡眠定时已开启" else "睡眠定时",
+                            sleepActive = data.sleepEndsAt > 0,
                             onClose = dismiss,
                             onPage = { menuPage = it },
                             onLoopMode = session::setLoopMode,
@@ -540,10 +609,10 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             onFavorite = { scope.launch { history.toggleFavorite(media) } },
                             onScreenshot = {
                                 dismiss()
-                                savePlaybackScreenshot(context, surfaceRef.value, scope, screenshotBlocked, toast::show)
+                                savePlaybackScreenshot(context, surfaceRef.value, scope, data.screenshotBlocked, toast::show)
                             },
                             onSleep = session::toggleSleepTimer,
-                            contributors = contributors,
+                            contributors = data.contributors,
                             contributorMedia = media,
                             contributorPlayer = player,
                         )
@@ -553,10 +622,10 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                         )
                         FsMenuPage.SUBTITLE -> FsSubtitleMenuContent(
                             subtitleOn = subtitleEnabled,
-                            subtitleLoaded = savedSubtitle != null,
-                            savedSubtitleName = savedSubtitle?.toUri()?.lastPathSegment,
-                            textTracks = tracks.filter { it.type == NpTrackType.TEXT },
-                            offsetMs = subtitleOffsetMs,
+                            subtitleLoaded = data.savedSubtitle != null,
+                            savedSubtitleName = data.savedSubtitle?.toUri()?.lastPathSegment,
+                            textTracks = data.tracks.filter { it.type == NpTrackType.TEXT },
+                            offsetMs = data.subtitleOffsetMs,
                             colorArgb = subtitleColorArgb,
                             onColor = { scope.launch { settings.setSubtitleColorArgb(it) } },
                             scale = subtitleScale,
@@ -579,7 +648,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             onBack = back,
                         )
                         FsMenuPage.AUDIO -> FsAudioMenuContent(
-                            tracks.filter { it.type == NpTrackType.AUDIO },
+                            data.tracks.filter { it.type == NpTrackType.AUDIO },
                             onPick = { player.selectTrack(NpTrackType.AUDIO, it.id) },
                             onBack = back,
                         )
@@ -593,10 +662,11 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             queue, queueIndex, onSelect = session::selectQueueIndex, onBack = back,
                         )
                         FsMenuPage.CHAPTERS -> FsChaptersMenuContent(
-                            chapters, player.positionMs.collectAsStateWithLifecycle(),
+                            data.chapters, player.positionMs.collectAsStateWithLifecycle(),
                             onSelect = { player.seekTo(it.startMs) }, onBack = back,
                         )
                     }
+                }
                 }
             }
             NpToastHost(state = toast, modifier = Modifier.align(Alignment.BottomCenter))

@@ -1,5 +1,7 @@
 package com.noneplayer.kernel.api
 
+import androidx.compose.runtime.Immutable
+
 /**
  * 一条字幕 Cue——内核无关的字幕出口模型。
  *
@@ -11,6 +13,7 @@ package com.noneplayer.kernel.api
  * - 位图字幕（PGS/VobSub）：[bitmap] 非空（Android 侧为 `android.graphics.Bitmap`），
  *   [placement] 给出相对视频画面的归一化摆放。
  */
+@Immutable
 data class SubtitleCue(
     val text: String? = null,
     val bitmap: Any? = null,
@@ -18,6 +21,7 @@ data class SubtitleCue(
 )
 
 /** 归一化摆放（0..1，相对视频画面），用于位图字幕等需要按画面定位的场景 */
+@Immutable
 data class CuePlacement(
     val left: Float,
     val top: Float,

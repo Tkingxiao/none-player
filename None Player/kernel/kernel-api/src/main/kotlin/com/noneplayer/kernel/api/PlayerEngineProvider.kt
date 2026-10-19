@@ -1,5 +1,6 @@
 package com.noneplayer.kernel.api
 
+import androidx.compose.runtime.Immutable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -362,6 +363,7 @@ fun npSubtitleFormatOf(nameOrUri: String): NpSubtitleFormat? =
  * 一条可选轨道（内嵌音频/字幕轨）。[label] 是人类可读展示名
  * （语言 / 标题 / 声道数 / 角色标签的组合），由引擎拼装；[id] 是选择键。
  */
+@Immutable
 data class NpTrack(
     val id: String,
     val type: NpTrackType,
@@ -370,6 +372,7 @@ data class NpTrack(
 )
 
 /** 章节（§12.5：MP4/Matroska 章节经 metadata 通道暴露） */
+@Immutable
 data class NpChapter(
     val startMs: Long,
     val endMs: Long,

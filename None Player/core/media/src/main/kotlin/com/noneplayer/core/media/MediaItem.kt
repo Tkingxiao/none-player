@@ -1,11 +1,14 @@
 package com.noneplayer.core.media
 
+import androidx.compose.runtime.Immutable
+
 /**
  * 媒体项——所有来源（本地扫描、网盘、DLNA……）的统一领域模型。
  *
  * 各插件的私有数据通过各自的方式映射为本模型，
  * 内核与扩展点契约只认 [MediaItem]，不感知来源细节。
  */
+@Immutable
 data class MediaItem(
     /** 来源内唯一 id；跨来源以 [sourceId] + [id] 区分 */
     val id: String,

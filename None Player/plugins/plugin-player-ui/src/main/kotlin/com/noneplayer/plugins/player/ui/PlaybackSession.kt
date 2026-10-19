@@ -1,6 +1,7 @@
 package com.noneplayer.plugins.player.ui
 
 import android.content.Context
+import androidx.compose.runtime.Immutable
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -50,6 +51,7 @@ import kotlinx.coroutines.withContext
  *
  * 只带 UI 需要展示的字段，不暴露播放器内部细节。
  */
+@Immutable
 data class NowPlaying(
     val item: MediaItem,
     val index: Int,

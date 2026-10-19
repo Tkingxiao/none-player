@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -84,7 +85,12 @@ import kotlin.math.roundToInt
 @Composable
 internal fun NpSeekBar(
     durationMs: Long,
-    displayPositionMs: Float,
+    /**
+     * 显示位置（A6）：收 [State] 而不是裸值——轨道、拇指与读屏读数都在
+     * **绘制 / 布局 / 语义相位**读，250ms 的位置上报只重画，不重组本组件。
+     * 拖动中的落点胶囊自己读它（只在那时重组，见 [NpSeekBubble]）。
+     */
+    displayPositionMs: State<Float>,
     /**
      * 缓冲前沿（A6）：收 [State] 而不是裸值——前沿变化只在**绘制相位**读，
      * 轨道重画一次，不触发本组件与调用方重组（此前页根解包它，前沿一跳整页跟着走）。
@@ -115,9 +121,8 @@ internal fun NpSeekBar(
 ) {
     val ink = LocalNpInk.current
     val maxPosition = durationMs.coerceAtLeast(1L).toFloat()
-    val fraction = (displayPositionMs / maxPosition).coerceIn(0f, 1f)
-    // A6：缓冲前沿的 fraction **不在这里算**——它读在绘制相位（见下面的 Canvas），
-    // 这样前沿变化只重画轨道，不重组本组件。
+    // A6：位置与缓冲前沿的 fraction **都不在组合期算**——它们读在绘制 / 布局 / 语义相位，
+    // 250ms 的位置上报只重画轨道，不重组本组件。
     // M7（§7.5）：拖=按住 `Long` / 松手 `Tick`，点击定位=一次 `Tick`。
     // 触觉挂在组件上而不是调用方：这里才分得清"点"与"拖"两条路径。
     val haptics = rememberNpHaptics()
@@ -142,6 +147,7 @@ internal fun NpSeekBar(
     val density = LocalDensity.current
     val fallAllowed = npDisplacementAllowed()
     val fallPx = remember(density) { with(density) { NpSeekBubbleFallDp.toPx().roundToInt() } }
+    val risePx = remember(density) { with(density) { NpSeekBubbleRiseDp.roundToPx() } }
     var bubbleHalfWidthPx by remember { mutableFloatStateOf(0f) }
 
     BoxWithConstraints(
@@ -157,14 +163,18 @@ internal fun NpSeekBar(
                 // E8：读屏可达——自绘 Canvas 无默认语义，把进度区间与当前值显式给出，
                 // TalkBack 以滑杆（adjustable 之外还需 range info）朗读当前位置
                 .semantics {
+                    val positionMs = displayPositionMs.value
                     contentDescription = "播放进度"
-                    progressBarRangeInfo = ProgressBarRangeInfo(fraction, 0f..1f)
+                    progressBarRangeInfo = ProgressBarRangeInfo(
+                        (positionMs / maxPosition).coerceIn(0f, 1f),
+                        0f..1f,
+                    )
                     // E129（审查 #11）：光有百分比，读屏用户算不出"还剩多久"——
                     // 时间读数与轨道上的胶囊同源，两处读数不会各说各话。
                     stateDescription = if (durationMs > 0L) {
-                        "${formatTimestamp(displayPositionMs.toLong())} / ${formatTimestamp(durationMs)}"
+                        "${formatTimestamp(positionMs.toLong())} / ${formatTimestamp(durationMs)}"
                     } else {
-                        formatTimestamp(displayPositionMs.toLong())
+                        formatTimestamp(positionMs.toLong())
                     }
                     // E129（审查 #11）：自绘 Canvas 没有可调节动作——读屏能"听到"进度却改不了。
                     // 复用与触摸**完全相同**的提交链（start → change → end），
@@ -212,6 +222,7 @@ internal fun NpSeekBar(
                     }
                 },
         ) {
+            val fraction = (displayPositionMs.value / maxPosition).coerceIn(0f, 1f)
             val trackH = trackHeight.toPx()
             val centerY = size.height / 2f
             val topLeft = Offset(0f, centerY - trackH / 2f)
@@ -248,16 +259,6 @@ internal fun NpSeekBar(
             )
         }
 
-        // 拇指贴边的时候胶囊整颗要留在轨内——半颗跑出屏幕就读不出时间了。
-        // 宽度首帧为 0，此时不做夹取（下一帧即修正，视觉上只是起点稍偏）。
-        val bubbleCenterPx = if (bubbleHalfWidthPx > 0f && trackWidthPx > bubbleHalfWidthPx * 2f) {
-            (trackWidthPx * fraction).coerceIn(
-                bubbleHalfWidthPx,
-                trackWidthPx - bubbleHalfWidthPx,
-            )
-        } else {
-            trackWidthPx * fraction
-        }
         AnimatedVisibility(
             visible = bubbleVisible,
             enter = fadeIn(npMotion(Motion.Field)),
@@ -267,25 +268,52 @@ internal fun NpSeekBar(
                 },
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .offset(
-                    x = with(density) { bubbleCenterPx.toDp() },
-                    y = -NpSeekBubbleRiseDp,
-                )
+                // A6：胶囊的位置也在**布局相位**读位置——组合期不再碰 `.value`。
+                // 拇指贴边时整颗胶囊留在轨内；宽度首帧为 0，此时不做夹取（下一帧修正）。
+                .offset {
+                    val f = (displayPositionMs.value / maxPosition).coerceIn(0f, 1f)
+                    val center = if (bubbleHalfWidthPx > 0f && trackWidthPx > bubbleHalfWidthPx * 2f) {
+                        (trackWidthPx * f).coerceIn(
+                            bubbleHalfWidthPx,
+                            trackWidthPx - bubbleHalfWidthPx,
+                        )
+                    } else {
+                        trackWidthPx * f
+                    }
+                    IntOffset(center.roundToInt(), -risePx)
+                }
                 .onSizeChanged { size: IntSize -> bubbleHalfWidthPx = size.width / 2f }
                 .graphicsLayer { translationX = -size.width / 2f },
         ) {
-            Text(
-                text = formatTimestamp(displayPositionMs.toLong()),
-                style = NpMono,
-                color = ink.accent,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier
-                    .background(ink.scrim, RoundedCornerShape(NpRadius.chip))
-                    .padding(horizontal = 10.dp, vertical = 3.dp),
+            NpSeekBubble(
+                displayPositionMs = displayPositionMs,
+                textColor = ink.accent,
+                backgroundColor = ink.scrim,
             )
         }
     }
+}
+
+/**
+ * 拖动落点胶囊（§5.4②）。位置上报只在这里重组——**只有拖动中才挂载**，
+ * 静止时整棵底栏不随 250ms 的位置更新重组（A6）。
+ */
+@Composable
+private fun NpSeekBubble(
+    displayPositionMs: State<Float>,
+    textColor: Color,
+    backgroundColor: Color,
+) {
+    Text(
+        text = formatTimestamp(displayPositionMs.value.toLong()),
+        style = NpMono,
+        color = textColor,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = Modifier
+            .background(backgroundColor, RoundedCornerShape(NpRadius.chip))
+            .padding(horizontal = 10.dp, vertical = 3.dp),
+    )
 }
 
 /** 落点胶囊松手后的下落量（§5.4②） */

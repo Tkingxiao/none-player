@@ -50,6 +50,7 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -58,6 +59,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.database.HistoryEntry
+import com.noneplayer.core.ui.InkTokens
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
@@ -169,235 +171,19 @@ fun AudioOnlyScreen(
         Box(Modifier.fillMaxSize().background(themeInk.bg.copy(alpha = readableAlpha)))
         // ==================== 版式块：两条版式共用，差异只在排列与对齐 ====================
 
-        // 顶部行：返回 + 标题/来源（设计稿 .audio-top）
-        @Composable
-        fun HeaderRow() {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 10.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                NpIconButton(
-                    icon = NpIcon.ArrowLeft,
-                    contentDescription = "返回",
-                    onClick = onBack,
-                    tint = ink.fg,
-                )
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "正在播放",
-                        style = NpTypography.titleSmall,
-                        color = ink.fg,
-                    )
-                    Text(
-                        text = (snapshot.item.folder ?: "本地音乐") + " · 音频",
-                        style = com.noneplayer.core.ui.NpMonoSmall,
-                        color = ink.muted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-
-        // 信息（设计稿 .audio-info）：竖窗整块居中；横窗它落在黑胶右侧，改左对齐
-        @Composable
-        fun InfoBlock(startAligned: Boolean, modifier: Modifier = Modifier) {
-            Column(
-                modifier = modifier,
-                horizontalAlignment = if (startAligned) Alignment.Start else Alignment.CenterHorizontally,
-            ) {
-                Text(
-                    text = snapshot.title.removeSuffix(".mp3").removeSuffix(".flac").removeSuffix(".m4a"),
-                    style = if (embedded) NpTypography.titleMedium else NpTypography.titleLarge,
-                    color = ink.fg,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = if (startAligned) TextAlign.Start else TextAlign.Center,
-                )
-                Text(
-                    text = "未知艺术家 · " + (snapshot.item.folder ?: "本地音乐"),
-                    style = NpTypography.bodyMedium,
-                    color = ink.muted,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    textAlign = if (startAligned) TextAlign.Start else TextAlign.Center,
-                    modifier = Modifier.padding(top = 6.dp),
-                )
-            }
-        }
+        // 顶部行 / 信息 / 控制排 / 工具区都是**文件级** composable（A6）：
+        // 不再作为局部函数捕获整页的 `snapshot/ink/isPlaying`，各有自己的重组域。
 
         // 进度行（§5.6：装饰波形 + 两端时间码）见文件级 [AudioProgressRow]。
         // 它**不能**写成这里的局部 @Composable：E120 实测，局部函数里解包
         // `player.positionMs` 照样把整页拖进 4/s 重组（拔掉这两个订阅，
         // 12s 内整页重组从 41 次掉到 0 次）。进度必须是独立重组域。
 
-        // 控制排（设计稿 .audio-controls：循环(sm 44) / 上一首(56) / 播放主钮(56) /
-        // 下一首(56) / 播放列表(sm 44)，gap 18）。此前只做了中间三钮，
-        // 两侧的循环与播放列表缺失——与设计稿的 5 钮结构不符。
-        // 排列由版式给：竖窗整排居中；横窗它落在左对齐的标题之下，从栏的左缘起排。
-        @Composable
-        fun TransportRow(arrangement: Arrangement.Horizontal, modifier: Modifier = Modifier) {
-            val loopModes = listOf(NpLoopMode.OFF, NpLoopMode.ONE, NpLoopMode.SHUFFLE, NpLoopMode.ALL)
-            Row(
-                modifier = modifier,
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = arrangement,
-            ) {
-                NpIconButton(
-                    icon = loopIcon,
-                    contentDescription = "循环模式",
-                    onClick = {
-                        session.setLoopMode(loopModes[(loopModes.indexOf(loopMode) + 1) % loopModes.size])
-                    },
-                    size = 44.dp,
-                    iconSize = 22.dp,
-                    tint = if (loopMode == NpLoopMode.OFF) ink.muted else ink.accent,
-                )
-                NpIconButton(
-                    icon = NpIcon.SkipPrevious,
-                    contentDescription = "上一首",
-                    onClick = { session.previous() },
-                    size = if (compactWidth) 48.dp else 56.dp,
-                    iconSize = 26.dp,
-                    tint = ink.fg,
-                    enabled = snapshot.hasPrevious,
-                )
-                Box(
-                    modifier = Modifier
-                        .size(NpDimens.primaryPlay)
-                        .clip(CircleShape)
-                        .background(ink.accent)
-                        .npPressScale(onClick = { session.toggle() }, pressedScale = 0.93f)
-                        // E129（审查 #4）：播放态画的是自绘 `AudioPauseGlyph`，它没有语义节点
-                        // ——名称必须挂在**按钮**上并按状态给，否则读屏只报"按钮"。
-                        .semantics { contentDescription = if (isPlaying) "暂停" else "播放" },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (isPlaying) {
-                        AudioPauseGlyph(tint = ink.bg)
-                    } else {
-                        Icon(
-                            imageVector = NpIcon.Play,
-                            // 名称已由按钮节点给出，图标不再重复报一次
-                            contentDescription = null,
-                            tint = ink.bg,
-                            modifier = Modifier.size(30.dp),
-                        )
-                    }
-                }
-                NpIconButton(
-                    icon = NpIcon.SkipNext,
-                    contentDescription = "下一首",
-                    onClick = { session.next() },
-                    size = if (compactWidth) 48.dp else 56.dp,
-                    iconSize = 26.dp,
-                    tint = ink.fg,
-                    enabled = snapshot.hasNext,
-                )
-                NpIconButton(
-                    icon = NpIcon.QueueMusic,
-                    contentDescription = "播放列表",
-                    onClick = onOpenEpisodes,
-                    size = 44.dp,
-                    iconSize = 22.dp,
-                    tint = ink.muted,
-                )
-            }
-        }
+        // 控制排（设计稿 .audio-controls）：见文件级 [AudioTransportRow]。
 
         // 工具区（原设计稿 .audio-tools 是 2 列网格）。2026-10-13 用户裁定改成自适应单行：
         // 纯音频时「切回视频」为 null，2×2 网格因此留下一格空位，三枚挤在四格里
-        // 读起来像漏了一块；有几枚排几枚才不留洞。
-        // [fillChips]：横窗给 true——设计稿 `.tool-chip{width:100%;justify-content:center}`
-        // 是"胶囊铺满格、内容居中"。
-        @Composable
-        @OptIn(ExperimentalFoundationApi::class)
-        fun ToolChips(
-            modifier: Modifier = Modifier,
-            fillChips: Boolean = false,
-            startAligned: Boolean = false,
-        ) {
-            val speedMenu = remember { BringIntoViewRequester() }
-            val speedMenuDuration = npDuration(Motion.Field)
-            LaunchedEffect(speedPickerVisible) {
-                if (speedPickerVisible) {
-                    delay(speedMenuDuration.toLong())
-                    speedMenu.bringIntoView()
-                }
-            }
-            Column(
-                modifier = modifier,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                horizontalAlignment = if (startAligned) Alignment.Start else Alignment.CenterHorizontally,
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    ToolChip(
-                        icon = NpIcon.Heart,
-                        label = if (favorited) "已收藏" else "收藏",
-                        on = favorited,
-                        onClick = onToggleFavorite,
-                        fill = fillChips,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (onReturnToVideo != null) {
-                        ToolChip(
-                            icon = NpIcon.Film,
-                            label = "切回视频",
-                            onClick = onReturnToVideo,
-                            fill = fillChips,
-                            modifier = Modifier.weight(1f),
-                        )
-                    }
-                    ToolChip(
-                        icon = NpIcon.Speed,
-                        label = "倍速 $speedText",
-                        on = speed != 1f || speedPickerVisible,
-                        onClick = onOpenSpeed,
-                        fill = fillChips,
-                        modifier = Modifier.weight(1f),
-                    )
-                }
-                // 「后台播放中」原先也占一枚 chip 位，但 `onClick = {}`——看着能点、点了没反应。
-                // 它是状态说明而不是动作，降成一行弱化文字，胶囊排布也不再为它留格。
-                // 设计稿这一格本是「睡眠定时」，该能力尚未落地，不做假动作。
-                Text(
-                    text = "后台播放中",
-                    style = com.noneplayer.core.ui.NpMonoSmall,
-                    color = ink.muted,
-                )
-                // 倍速选择条：与播放页同一交互（点钮 → 钮下列表），不走底部弹层
-                // M21：锚在钮上的紧凑菜单走 `Field`；默认的 fadeIn()/fadeOut() 是 150ms
-                // LinearOutSlowIn，和其余钮上菜单不同曲线，同屏会读出两种"出现"的节奏。
-                val speedSlideAllowed = npDisplacementAllowed()
-                androidx.compose.animation.AnimatedVisibility(
-                    visible = speedPickerVisible,
-                    enter = androidx.compose.animation.fadeIn(
-                        animationSpec = npMotion(Motion.Field),
-                    ) +
-                        androidx.compose.animation.slideInVertically(
-                            animationSpec = npMotion(Motion.Field),
-                        ) { if (speedSlideAllowed) it else 0 },
-                    exit = androidx.compose.animation.fadeOut(
-                        animationSpec = npMotion(Motion.Field),
-                    ) +
-                        androidx.compose.animation.slideOutVertically(
-                            animationSpec = npMotion(Motion.Field),
-                        ) { if (speedSlideAllowed) it else 0 },
-                ) {
-                    SpeedChoiceRow(
-                        speed = speed,
-                        onPick = onPickSpeed,
-                        modifier = Modifier.padding(top = 10.dp).bringIntoViewRequester(speedMenu),
-                    )
-                }
-            }
-        }
+        // 读起来像漏了一块；有几枚排几枚才不留洞。见文件级 [AudioToolChips]。
 
         // ==================== 版式分派（§13.2 单点判定）====================
         if (horizontalLayout) {
@@ -412,7 +198,7 @@ fun AudioOnlyScreen(
                     .then(safeInsets)
                     .padding(horizontal = if (embedded) 16.dp else windowInfo.pageGutter, vertical = NpSpace.xs),
             ) {
-                if (!embedded) HeaderRow()
+                if (!embedded) AudioHeaderRow(ink = ink, snapshot = snapshot, onBack = onBack)
                 BoxWithConstraints(modifier = Modifier.fillMaxWidth().weight(1f)) {
                     // 圆盘三条上限：可用高度（别顶穿窗口）、宽度的 42%（给右栏留够）、
                     // 设计稿 258（类 PC 窗口高，放到 300 也不显空）。
@@ -455,7 +241,13 @@ fun AudioOnlyScreen(
                                 Alignment.CenterVertically,
                             ),
                         ) {
-                            InfoBlock(startAligned = true, modifier = Modifier.fillMaxWidth())
+                            AudioInfoBlock(
+                                ink = ink,
+                                snapshot = snapshot,
+                                embedded = embedded,
+                                startAligned = true,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
                             AudioProgressRow(
                                 player = player,
                                 mediaKey = HistoryEntry.keyOf(snapshot.item),
@@ -463,16 +255,36 @@ fun AudioOnlyScreen(
                                 barCount = quality.waveformBars,
                                 modifier = Modifier.fillMaxWidth(),
                             )
-                            TransportRow(
+                            AudioTransportRow(
+                                ink = ink,
+                                snapshot = snapshot,
+                                isPlaying = isPlaying,
+                                loopIcon = loopIcon,
+                                loopMode = loopMode,
+                                compactWidth = compactWidth,
+                                onCycleLoop = { cycleAudioLoop(session, loopMode) },
+                                onPrevious = { session.previous() },
+                                onTogglePlay = { session.toggle() },
+                                onNext = { session.next() },
+                                onOpenEpisodes = onOpenEpisodes,
                                 arrangement = Arrangement.SpaceEvenly,
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             // chips 走自适应单行（不再有 2×2 的空格）；右栏左对齐，
                             // 与上方左对齐的标题/控制排同一条起读线。
-                            ToolChips(
-                                modifier = Modifier.widthIn(max = 420.dp),
+                            AudioToolChips(
+                                ink = ink,
+                                favorited = favorited,
+                                speed = speed,
+                                speedText = speedText,
+                                speedPickerVisible = speedPickerVisible,
+                                onToggleFavorite = onToggleFavorite,
+                                onReturnToVideo = onReturnToVideo,
+                                onOpenSpeed = onOpenSpeed,
+                                onPickSpeed = onPickSpeed,
                                 fillChips = true,
                                 startAligned = true,
+                                modifier = Modifier.widthIn(max = 420.dp),
                             )
                         }
                     }
@@ -487,7 +299,11 @@ fun AudioOnlyScreen(
                     .then(safeInsets)
                     .verticalScroll(rememberScrollState()),
             ) {
-                if (!embedded) HeaderRow() else Spacer(Modifier.height(12.dp))
+                if (!embedded) {
+                    AudioHeaderRow(ink = ink, snapshot = snapshot, onBack = onBack)
+                } else {
+                    Spacer(Modifier.height(12.dp))
+                }
                 // 黑胶（设计稿 .vinyl：min(258px,64vw)，22s 匀速）
                 VinylDisc(
                     coverUri = snapshot.coverUri,
@@ -497,7 +313,10 @@ fun AudioOnlyScreen(
                         .align(Alignment.CenterHorizontally)
                         .size(portraitDiscSize),
                 )
-                InfoBlock(
+                AudioInfoBlock(
+                    ink = ink,
+                    snapshot = snapshot,
+                    embedded = embedded,
                     startAligned = false,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset, vertical = 12.dp),
                 )
@@ -519,16 +338,311 @@ fun AudioOnlyScreen(
                     barCount = quality.waveformBars,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset),
                 )
-                TransportRow(
+                AudioTransportRow(
+                    ink = ink,
+                    snapshot = snapshot,
+                    isPlaying = isPlaying,
+                    loopIcon = loopIcon,
+                    loopMode = loopMode,
+                    compactWidth = compactWidth,
+                    onCycleLoop = { cycleAudioLoop(session, loopMode) },
+                    onPrevious = { session.previous() },
+                    onTogglePlay = { session.toggle() },
+                    onNext = { session.next() },
+                    onOpenEpisodes = onOpenEpisodes,
                     arrangement = Arrangement.SpaceEvenly,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset, vertical = 18.dp),
                 )
-                ToolChips(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset, vertical = 4.dp),
+                AudioToolChips(
+                    ink = ink,
+                    favorited = favorited,
+                    speed = speed,
+                    speedText = speedText,
+                    speedPickerVisible = speedPickerVisible,
+                    onToggleFavorite = onToggleFavorite,
+                    onReturnToVideo = onReturnToVideo,
+                    onOpenSpeed = onOpenSpeed,
+                    onPickSpeed = onPickSpeed,
                     fillChips = embedded,
+                    startAligned = false,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset, vertical = 4.dp),
                 )
                 Spacer(modifier = Modifier.height(32.dp))
             }
+        }
+    }
+}
+
+/** 循环模式的轮换顺序（设计稿 .audio-controls 的 5 钮之一） */
+private val AUDIO_LOOP_MODES = listOf(NpLoopMode.OFF, NpLoopMode.ONE, NpLoopMode.SHUFFLE, NpLoopMode.ALL)
+
+private fun cycleAudioLoop(session: PlaybackSession, current: NpLoopMode) {
+    session.setLoopMode(
+        AUDIO_LOOP_MODES[(AUDIO_LOOP_MODES.indexOf(current) + 1) % AUDIO_LOOP_MODES.size],
+    )
+}
+
+/**
+ * 顶部行（设计稿 .audio-top）：返回 + 标题/来源。
+ *
+ * A6：文件级 composable，不再作为 `AudioOnlyScreen` 的局部函数捕获整页状态——
+ * 局部函数与页面共享重组域，任何捕获值变化都会把整页拖进来。
+ */
+@Composable
+private fun AudioHeaderRow(
+    ink: InkTokens,
+    snapshot: NowPlaying,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        NpIconButton(
+            icon = NpIcon.ArrowLeft,
+            contentDescription = "返回",
+            onClick = onBack,
+            tint = ink.fg,
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "正在播放",
+                style = NpTypography.titleSmall,
+                color = ink.fg,
+            )
+            Text(
+                text = (snapshot.item.folder ?: "本地音乐") + " · 音频",
+                style = com.noneplayer.core.ui.NpMonoSmall,
+                color = ink.muted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+/** 信息块（设计稿 .audio-info）：竖窗整块居中；横窗它落在黑胶右侧，改左对齐。 */
+@Composable
+private fun AudioInfoBlock(
+    ink: InkTokens,
+    snapshot: NowPlaying,
+    embedded: Boolean,
+    startAligned: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier,
+        horizontalAlignment = if (startAligned) Alignment.Start else Alignment.CenterHorizontally,
+    ) {
+        Text(
+            text = snapshot.title.removeSuffix(".mp3").removeSuffix(".flac").removeSuffix(".m4a"),
+            style = if (embedded) NpTypography.titleMedium else NpTypography.titleLarge,
+            color = ink.fg,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = if (startAligned) TextAlign.Start else TextAlign.Center,
+        )
+        Text(
+            text = "未知艺术家 · " + (snapshot.item.folder ?: "本地音乐"),
+            style = NpTypography.bodyMedium,
+            color = ink.muted,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = if (startAligned) TextAlign.Start else TextAlign.Center,
+            modifier = Modifier.padding(top = 6.dp),
+        )
+    }
+}
+
+/**
+ * 控制排（设计稿 .audio-controls：循环 / 上一首 / 播放主钮 / 下一首 / 播放列表）。
+ *
+ * 排列由版式给：竖窗整排居中；横窗它落在左对齐的标题之下，从栏的左缘起排。
+ */
+@Composable
+private fun AudioTransportRow(
+    ink: InkTokens,
+    snapshot: NowPlaying,
+    isPlaying: Boolean,
+    loopIcon: ImageVector,
+    loopMode: NpLoopMode,
+    compactWidth: Boolean,
+    onCycleLoop: () -> Unit,
+    onPrevious: () -> Unit,
+    onTogglePlay: () -> Unit,
+    onNext: () -> Unit,
+    onOpenEpisodes: () -> Unit,
+    arrangement: Arrangement.Horizontal,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier,
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = arrangement,
+    ) {
+        NpIconButton(
+            icon = loopIcon,
+            contentDescription = "循环模式",
+            onClick = onCycleLoop,
+            size = 44.dp,
+            iconSize = 22.dp,
+            tint = if (loopMode == NpLoopMode.OFF) ink.muted else ink.accent,
+        )
+        NpIconButton(
+            icon = NpIcon.SkipPrevious,
+            contentDescription = "上一首",
+            onClick = onPrevious,
+            size = if (compactWidth) 48.dp else 56.dp,
+            iconSize = 26.dp,
+            tint = ink.fg,
+            enabled = snapshot.hasPrevious,
+        )
+        Box(
+            modifier = Modifier
+                .size(NpDimens.primaryPlay)
+                .clip(CircleShape)
+                .background(ink.accent)
+                .npPressScale(onClick = onTogglePlay, pressedScale = 0.93f)
+                // E129（审查 #4）：播放态画的是自绘 `AudioPauseGlyph`，它没有语义节点
+                // ——名称必须挂在**按钮**上并按状态给，否则读屏只报"按钮"。
+                .semantics { contentDescription = if (isPlaying) "暂停" else "播放" },
+            contentAlignment = Alignment.Center,
+        ) {
+            if (isPlaying) {
+                AudioPauseGlyph(tint = ink.bg)
+            } else {
+                Icon(
+                    imageVector = NpIcon.Play,
+                    // 名称已由按钮节点给出，图标不再重复报一次
+                    contentDescription = null,
+                    tint = ink.bg,
+                    modifier = Modifier.size(30.dp),
+                )
+            }
+        }
+        NpIconButton(
+            icon = NpIcon.SkipNext,
+            contentDescription = "下一首",
+            onClick = onNext,
+            size = if (compactWidth) 48.dp else 56.dp,
+            iconSize = 26.dp,
+            tint = ink.fg,
+            enabled = snapshot.hasNext,
+        )
+        NpIconButton(
+            icon = NpIcon.QueueMusic,
+            contentDescription = "播放列表",
+            onClick = onOpenEpisodes,
+            size = 44.dp,
+            iconSize = 22.dp,
+            tint = ink.muted,
+        )
+    }
+}
+
+/**
+ * 工具区（原设计稿 .audio-tools 是 2 列网格）。2026-10-13 用户裁定改成自适应单行：
+ * 纯音频时「切回视频」为 null，2×2 网格因此留下一格空位，三枚挤在四格里
+ * 读起来像漏了一块；有几枚排几枚才不留洞。
+ *
+ * [fillChips]：横窗给 true——设计稿 `.tool-chip{width:100%;justify-content:center}`
+ * 是"胶囊铺满格、内容居中"。
+ */
+@Composable
+@OptIn(ExperimentalFoundationApi::class)
+private fun AudioToolChips(
+    ink: InkTokens,
+    favorited: Boolean,
+    speed: Float,
+    speedText: String,
+    speedPickerVisible: Boolean,
+    onToggleFavorite: () -> Unit,
+    onReturnToVideo: (() -> Unit)?,
+    onOpenSpeed: () -> Unit,
+    onPickSpeed: (Float) -> Unit,
+    fillChips: Boolean,
+    startAligned: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val speedMenu = remember { BringIntoViewRequester() }
+    val speedMenuDuration = npDuration(Motion.Field)
+    LaunchedEffect(speedPickerVisible) {
+        if (speedPickerVisible) {
+            delay(speedMenuDuration.toLong())
+            speedMenu.bringIntoView()
+        }
+    }
+    Column(
+        modifier = modifier,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalAlignment = if (startAligned) Alignment.Start else Alignment.CenterHorizontally,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            ToolChip(
+                icon = NpIcon.Heart,
+                label = if (favorited) "已收藏" else "收藏",
+                on = favorited,
+                onClick = onToggleFavorite,
+                fill = fillChips,
+                modifier = Modifier.weight(1f),
+            )
+            if (onReturnToVideo != null) {
+                ToolChip(
+                    icon = NpIcon.Film,
+                    label = "切回视频",
+                    onClick = onReturnToVideo,
+                    fill = fillChips,
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            ToolChip(
+                icon = NpIcon.Speed,
+                label = "倍速 $speedText",
+                on = speed != 1f || speedPickerVisible,
+                onClick = onOpenSpeed,
+                fill = fillChips,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        // 「后台播放中」原先也占一枚 chip 位，但 `onClick = {}`——看着能点、点了没反应。
+        // 它是状态说明而不是动作，降成一行弱化文字，胶囊排布也不再为它留格。
+        // 设计稿这一格本是「睡眠定时」，该能力尚未落地，不做假动作。
+        Text(
+            text = "后台播放中",
+            style = com.noneplayer.core.ui.NpMonoSmall,
+            color = ink.muted,
+        )
+        // 倍速选择条：与播放页同一交互（点钮 → 钮下列表），不走底部弹层
+        // M21：锚在钮上的紧凑菜单走 `Field`；默认的 fadeIn()/fadeOut() 是 150ms
+        // LinearOutSlowIn，和其余钮上菜单不同曲线，同屏会读出两种"出现"的节奏。
+        val speedSlideAllowed = npDisplacementAllowed()
+        androidx.compose.animation.AnimatedVisibility(
+            visible = speedPickerVisible,
+            enter = androidx.compose.animation.fadeIn(
+                animationSpec = npMotion(Motion.Field),
+            ) +
+                androidx.compose.animation.slideInVertically(
+                    animationSpec = npMotion(Motion.Field),
+                ) { if (speedSlideAllowed) it else 0 },
+            exit = androidx.compose.animation.fadeOut(
+                animationSpec = npMotion(Motion.Field),
+            ) +
+                androidx.compose.animation.slideOutVertically(
+                    animationSpec = npMotion(Motion.Field),
+                ) { if (speedSlideAllowed) it else 0 },
+        ) {
+            SpeedChoiceRow(
+                speed = speed,
+                onPick = onPickSpeed,
+                modifier = Modifier.padding(top = 10.dp).bringIntoViewRequester(speedMenu),
+            )
         }
     }
 }

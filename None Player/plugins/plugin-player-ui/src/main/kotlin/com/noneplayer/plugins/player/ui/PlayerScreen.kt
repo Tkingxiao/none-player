@@ -102,6 +102,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
@@ -245,6 +246,7 @@ import com.noneplayer.plugins.player.ui.gesture.stageDpAtLeast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -558,8 +560,9 @@ fun PlayerScreen(
     LaunchedEffect(coverTakeoff) {
         coverTakeoff ?: return@LaunchedEffect
         coverFlight.snapTo(0f)
-        // 等舞台量出目标矩形（首帧之内）再起飞；量不到就不飞（比飞错位置体面）
-        while (stageRectInWindow == null) delay(16)
+        // 等舞台量出目标矩形（首帧之内）再起飞；量不到就不飞（比飞错位置体面）。
+        // A6：用 snapshotFlow 等首帧，替代 `while (null) delay(16)` 的轮询空转。
+        snapshotFlow { stageRectInWindow }.filterNotNull().first()
         coverFlight.animateTo(1f, tween(coverMorphMs, easing = NpEasing.Emphasized))
         // 落位后短暂停留，再把封面淡出让位给已经出帧的视频（末段 15% 行程读作淡出）。
         // easing 不能省：不写就落 Compose 默认的 FastOutSlowIn，那是 §3.8 曲线集之外的
@@ -2248,8 +2251,8 @@ fun PlayerScreen(
                                 when (targetPage) {
                                     FsMenuPage.MAIN -> FsMainMenuContent(
                                         loopMode = loopMode,
-                                        brightnessPercent = brightnessPercent,
-                                        volumePercent = volumePercent,
+                                        brightnessPercent = brightnessState,
+                                        volumePercent = volumeState,
                                         favorited = favorited,
                                         hasChapters = chapters.isNotEmpty(),
                                         sleepLabel = sleepLabel,
@@ -2755,14 +2758,15 @@ fun PlayerScreen(
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
                                 }
-                                // 设计稿 .epi-list：max-height 264 内部滚动（集数多时不再拉长信息区）
-                                Column(
+                                // 设计稿 .epi-list：max-height 264 内部滚动（集数多时不再拉长信息区）。
+                                // A6：内层改 LazyColumn——几十上百集时只组合视口内的行；
+                                // 高度有上限，同轴嵌套滚动到边界会把手势交还外层信息区。
+                                LazyColumn(
                                     modifier = Modifier
                                         .heightIn(max = 264.dp)
-                                        .verticalScroll(rememberScrollState())
                                         .padding(bottom = NpSpace.sm),
                                 ) {
-                                    queue.forEachIndexed { index, item ->
+                                    itemsIndexed(queue, key = { _, item -> item.id }) { index, item ->
                                         EpisodeRow(
                                             index = index,
                                             title = item.title.ifBlank { item.id },
@@ -3096,12 +3100,7 @@ fun PlayerScreen(
                         .padding(5.dp),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    listOf(
-                        NpLoopMode.OFF to NpIcon.ListView,
-                        NpLoopMode.ONE to NpIcon.Rotate,
-                        NpLoopMode.SHUFFLE to NpIcon.Sort,
-                        NpLoopMode.ALL to NpIcon.Sound,
-                    ).forEach { (mode, icon) ->
+                    NpLoopModeButtons.forEach { (mode, icon) ->
                         val on = loopMode == mode
                         Box(
                             modifier = Modifier
@@ -3137,14 +3136,14 @@ fun PlayerScreen(
                 FsMenuSlider(
                     icon = NpIcon.Sun,
                     label = "亮度",
-                    value = brightnessPercent,
+                    value = brightnessState,
                     onValueChange = ::setBrightnessPercent,
                     dark = false,
                 )
                 FsMenuSlider(
                     icon = NpIcon.Sound,
                     label = "音量",
-                    value = volumePercent,
+                    value = volumeState,
                     onValueChange = ::setVolumePercent,
                     dark = false,
                 )
@@ -4210,6 +4209,54 @@ internal fun npTimeCodeBudgetDp(chars: Int, fontScale: Float): Float =
 /** 底栏时间码（设计稿 `.time-row{font-size:12px}`） */
 private val NpBarTimeCode = NpMono.copy(fontSize = 12.sp)
 
+/** 循环模式四档（A6：文件级常量，不在每次面板重组时新建列表） */
+private val NpLoopModeButtons = listOf(
+    NpLoopMode.OFF to NpIcon.ListView,
+    NpLoopMode.ONE to NpIcon.Rotate,
+    NpLoopMode.SHUFFLE to NpIcon.Sort,
+    NpLoopMode.ALL to NpIcon.Sound,
+)
+
+/**
+ * 已播时间码（A6）：独立重组域，位置上报只重算这一枚读数。
+ *
+ * 已播读数按"本片最长的时间码"定宽：跨过 9:59→10:00、59:59→1:00:00
+ * 这些位数档时，行里唯一 `weight(1f)` 的孩子（进度条）不再被一点点吃掉。
+ */
+@Composable
+private fun BarElapsedTimeCode(
+    positionMs: State<Long>,
+    dragPositionMs: State<Float>,
+    userDragging: Boolean,
+    durationText: String,
+    idleColor: Color,
+) {
+    val elapsedText = formatTimestamp(
+        if (userDragging) dragPositionMs.value.toLong() else positionMs.value,
+    )
+    NpStableWidth(
+        reserve = if (durationText.length >= elapsedText.length) durationText else elapsedText,
+        style = NpBarTimeCode,
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Text(
+            text = elapsedText,
+            // 设计稿 `.time-row{font-size:12px}`——两枚读数同一字号，
+            // 此前已播 12sp、总时长 13sp，同一行里两种大小。
+            style = NpBarTimeCode,
+            color = if (userDragging) MaterialTheme.colorScheme.onPrimary else idleColor,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+            modifier = if (userDragging) {
+                Modifier.npReadoutChip(MaterialTheme.colorScheme.primary)
+            } else {
+                Modifier
+            },
+        )
+    }
+}
+
 /**
  * 拖动读数的胶囊：画在文本外扩 8×3dp，**不占布局**。
  *
@@ -4379,7 +4426,7 @@ internal fun PlayerBottomControls(
                     if (split) {
                         NpSeekBar(
                             durationMs = durationMs,
-                            displayPositionMs = displayPosition.value,
+                            displayPositionMs = displayPosition,
                             bufferedPositionMs = bufferedPositionMs,
                             dragging = userDragging,
                             onScrubStart = onScrubStart,
@@ -4411,36 +4458,19 @@ internal fun PlayerBottomControls(
                         onNext = onNext,
                     )
                 }
-                val elapsedText = formatTimestamp(
-                    if (userDragging) dragPositionMs.value.toLong() else positionMs.value,
-                )
                 val durationText = formatTimestamp(durationMs)
-                // 已播读数按"本片最长的时间码"定宽：跨过 9:59→10:00、59:59→1:00:00
-                // 这些位数档时，行里唯一 weight(1f) 的孩子（进度条）不再被一点点吃掉。
-                NpStableWidth(
-                    reserve = if (durationText.length >= elapsedText.length) durationText else elapsedText,
-                    style = NpBarTimeCode,
-                    contentAlignment = Alignment.CenterStart,
-                ) {
-                    Text(
-                        text = elapsedText,
-                        // 设计稿 `.time-row{font-size:12px}`——两枚读数同一字号，
-                        // 此前已播 12sp、总时长 13sp，同一行里两种大小。
-                        style = NpBarTimeCode,
-                        color = if (userDragging) MaterialTheme.colorScheme.onPrimary else idleColor,
-                        maxLines = 1,
-                        softWrap = false,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = if (userDragging) {
-                            Modifier.npReadoutChip(MaterialTheme.colorScheme.primary)
-                        } else {
-                            Modifier
-                        },
-                    )
-                }
+                // A6：已播读数拆成独立叶子——位置每 250ms 一跳只重组这一枚时间码，
+                // 不再让整行（传输键、进度条、倍速/字幕钮）跟着重组。
+                BarElapsedTimeCode(
+                    positionMs = positionMs,
+                    dragPositionMs = dragPositionMs,
+                    userDragging = userDragging,
+                    durationText = durationText,
+                    idleColor = idleColor,
+                )
                 if (!split) NpSeekBar(
                     durationMs = durationMs,
-                    displayPositionMs = displayPosition.value,
+                    displayPositionMs = displayPosition,
                     bufferedPositionMs = bufferedPositionMs,
                     dragging = userDragging,
                     onScrubStart = onScrubStart,
