@@ -18,6 +18,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -27,6 +29,7 @@ import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpSwitch
 import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.npToggleable
 import com.noneplayer.kernel.api.ExtensionPoint
 import com.noneplayer.kernel.api.VideoPlayer
 
@@ -161,7 +164,8 @@ fun npPlaybackMenuSwitchRow(
             .fillMaxWidth()
             .heightIn(min = NpDimens.touchTarget)
             .clip(RoundedCornerShape(10.dp))
-            .clickable { onCheckedChange(!checked) }
+            // R4-17/REV-14：整行就是一个开关（On/Off + Role.Switch），读屏只报一个节点。
+            .npToggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -193,7 +197,12 @@ fun npPlaybackMenuSwitchRow(
                 )
             }
         }
-        NpSwitch(checked = checked, onCheckedChange = onCheckedChange)
+        // 语义已挂在整行上：里层开关只负责画图形，清空语义避免读屏重复报两个开关。
+        NpSwitch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.clearAndSetSemantics {},
+        )
     }
 }
 

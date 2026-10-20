@@ -71,9 +71,9 @@ import kotlin.math.roundToInt
  *   `silk(Press)`（§5.4③——只有"抓起"该有弹性，松手缩回去要干净）；
  * - **落点胶囊**：拖动中拇指上方显示目标时间，松手后 `ReduceFade 120ms` 淡出
  *   并下落 8dp（§5.4②）——落点确认，避免"手一挡就看不见自己拖到了哪"；
- * - **点击定位**：整条 `seekTouchBand 26dp` 触控带（视觉仍是细线；原规格 32dp，
- *   竖屏小窗里触控带+按钮行占了视频区近三成，实报"底栏占小窗一半"后收窄），
- *   点哪儿定位到哪儿；
+ * - **点击定位**：整条触控带（视觉仍是细线，长出来的只有上下留白）点哪儿定位到哪儿；
+ *   高度**不低于 [NpDimens.touchTarget] 44dp**，且由组件自身夹取（A27，2026-10-15 订正：
+ *   竖屏拆行曾传 18dp，实报"点不中"；旧的小窗 26dp 取舍以 44dp 红线为准）；
  * - **取消 ≠ 提交**（E129 / 审查 #3）：手势被系统边缘返回或父节点打断时走
  *   [onScrubCancel]，**不 seek**——一次被取消的手势不该被读成"确认跳到最后一帧的位置"；
  * - 拖动采用**绝对定位**（滑块跟手到触点），与 M3 Slider 行为一致，
@@ -112,14 +112,15 @@ internal fun NpSeekBar(
     /**
      * 透明可交互槽的高度（§3.1 红线 44dp）。视觉轨仍是一条细线，长出来的只有上下留白。
      *
-     * 默认取 [NpDimens.touchTarget]；**竖屏小窗**那条路显式传 [NpDimens.seekTouchBand]
-     * ——那里视频区只有 16:9 一条（~230dp），44dp 的槽会把控制层顶得过高
-     * （2026-10-05 真机实报"底栏占小窗一半"）。两档都在，是因为"拇指容错"与
-     * "别挡住画面"在竖窗里真的冲突，而在横窗/桌面上并不冲突。
+     * 默认取 [NpDimens.touchTarget]。**不再允许低于红线**：A27（2026-10-15 订正）把
+     * 2026-10-05 的小窗收窄（26dp/竖屏拆行 18dp）推翻——真机实报"点不中"；调用方
+     * 仍传小值时由本组件夹取，新增调用点没有"忘记改"的机会。
      */
     touchBand: Dp = NpDimens.touchTarget,
 ) {
     val ink = LocalNpInk.current
+    // A27：44dp 红线在组件内部兜底（竖屏拆行曾显式传 18dp）。
+    val resolvedTouchBand = touchBand.coerceAtLeast(NpDimens.touchTarget)
     val maxPosition = durationMs.coerceAtLeast(1L).toFloat()
     // A6：位置与缓冲前沿的 fraction **都不在组合期算**——它们读在绘制 / 布局 / 语义相位，
     // 250ms 的位置上报只重画轨道，不重组本组件。
@@ -153,7 +154,7 @@ internal fun NpSeekBar(
     BoxWithConstraints(
         modifier = modifier
             .fillMaxWidth()
-            .height(touchBand),
+            .height(resolvedTouchBand),
         contentAlignment = Alignment.CenterStart,
     ) {
         val trackWidthPx = with(density) { maxWidth.toPx() }
@@ -203,7 +204,11 @@ internal fun NpSeekBar(
                         onDragStart = { offset ->
                             haptics.performHaptic(NpHaptic.Long)
                             onScrubStart()
-                            onScrubChange(offset.x / size.width * maxPosition)
+                            // A27（任务文档 §A27 662）：拖动是绝对定位，起手点同样要夹在轨内——
+                            // 手指从槽的上下留白/左右边缘按下时，未夹取的 x 会算出负数或 >时长。
+                            onScrubChange(
+                                offset.x.coerceIn(0f, size.width.toFloat()) / size.width * maxPosition,
+                            )
                         },
                         onDragEnd = {
                             haptics.performHaptic(NpHaptic.Tick)

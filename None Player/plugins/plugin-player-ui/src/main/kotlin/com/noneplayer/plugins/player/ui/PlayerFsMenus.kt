@@ -12,10 +12,12 @@ import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.npClickable
+import com.noneplayer.core.ui.npToggleable
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -49,9 +51,15 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusProperties
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusTarget
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
@@ -59,8 +67,18 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -196,9 +214,18 @@ fun FsDropdown(
     // 退场由容器撑着：先把 visible 落下、动画跑完才回调真正的 onDismiss。
     var visible by remember { mutableStateOf(false) }
     var exitJob by remember { mutableStateOf<Job?>(null) }
+    // A27（2026-10-19 订正）：菜单自己接管键盘焦点与按键。
+    // 菜单是独立 Popup，焦点进不到页面根节点——此前页面级 onPreviewKeyEvent 的 Esc
+    // 在菜单打开时收不到，只能点外部关闭；方向键也够不到菜单项。
+    // 这里在打开时把焦点送进菜单第一项（由内容里的可聚焦行自然承担方向遍历与确认），
+    // 容器自己只兜底 Esc，并处理"菜单里没有任何可聚焦项"的退化情形。
+    // 注意：真正请求焦点的 LaunchedEffect 必须写在 Popup 内容的子组合里（FsMenuEntryFocus）：
+    // Popup 内容有自己的 ComposeView / FocusOwner，LocalFocusManager 也随之不同，
+    // 在页面组合里取到的 manager 操作的是页面窗口，moveFocus 会静默落空。
+    val entryFocus = remember { FocusRequester() }
     // 换了锚点 = 重新开了一次菜单（包括"退场没跑完又点开别处"）：取消待卸载并重新入场。
     // 页内 drill-in 不换锚点，所以推进/返回不会重播入场。
-    LaunchedEffect(anchor) {
+    LaunchedEffect(anchor, page) {
         exitJob?.cancel()
         visible = true
     }
@@ -250,6 +277,21 @@ fun FsDropdown(
         val pageMs = npDuration(Motion.Field)
         Column(
             modifier = Modifier
+                // A27：菜单容器自己收键盘（详见上方 LaunchedEffect 的注释）。
+                // canFocus=false + focusTarget：容器本身不是焦点停靠点，只作为焦点事件的
+                // 观察者——焦点在行上时按 Esc，事件仍会冒泡到这里的 onPreviewKeyEvent。
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                        // Esc 由菜单自己吃：Popup 抢走焦点后页面根节点收不到 Esc。
+                        // 走 requestDismiss 而不是 latestDismiss，保留退场动画。
+                        requestDismiss()
+                        true
+                    } else {
+                        false
+                    }
+                }
+                .focusProperties { canFocus = false }
+                .focusTarget()
                 .width(menuWidth)
                 .heightIn(max = maxHeight)
                 .graphicsLayer {
@@ -263,6 +305,8 @@ fun FsDropdown(
                 .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(16.dp))
                 .padding(vertical = 6.dp),
         ) {
+            // A27：在 Popup 自己的组合里把焦点送进菜单（详见 FsMenuEntryFocus 的注释）。
+            FsMenuEntryFocus(entryFocus, anchor, page)
             AnimatedContent(
                 targetState = page,
                 transitionSpec = {
@@ -284,10 +328,45 @@ fun FsDropdown(
             ) { targetPage ->
                 Column(
                     modifier = Modifier.verticalScroll(rememberScrollState()),
-                    content = { content(targetPage, requestDismiss) },
+                    content = {
+                        // A27：零尺寸焦点锚点。打开菜单时先让它持焦，再 moveFocus(Down)
+                        // 进入第一个可聚焦行；没有可聚焦行时它兜底接住 Esc/返回。
+                        Box(
+                            Modifier
+                                .size(1.dp)
+                                .focusRequester(entryFocus)
+                                .focusable(),
+                        )
+                        content(targetPage, requestDismiss)
+                    },
                 )
             }
         }
+    }
+}
+
+/**
+ * A27：菜单入场焦点。
+ *
+ * 必须作为 Popup 内容的子组合调用：每个 Popup 内容有自己的 ComposeView 与 FocusOwner
+ * （`AbstractComposeView.setContent` 会给 Popup 内容单独 `ProvideAndroidCompositionLocals`），
+ * 因此只有在 Popup 内容里取到的 [LocalFocusManager] 才操作菜单自己的焦点系统；
+ * 在页面组合里取到的 manager 指向页面窗口，`moveFocus` 会静默落空——菜单看起来打开了，
+ * 但方向键没反应（实测）。
+ *
+ * 入场策略是"零尺寸锚点先持焦 → 方向键下移进第一行"：Compose 1.7.6 的
+ * `requestFocus()` 下降搜索把 Enter 折算成 Right 方向做几何比较，纵向排列、
+ * 与容器同宽的行在右方向上不构成候选，直接对容器 requestFocus 会落空。
+ * 纯说明型内容没有可聚焦行时焦点停在锚点上，Esc/返回依旧可用。
+ */
+@Composable
+private fun FsMenuEntryFocus(entryFocus: FocusRequester, anchor: FsMenuAnchor, page: FsMenuPage) {
+    val focusManager = LocalFocusManager.current
+    LaunchedEffect(anchor, page) {
+        withFrameNanos { }
+        runCatching { entryFocus.requestFocus() }
+        withFrameNanos { }
+        runCatching { focusManager.moveFocus(FocusDirection.Down) }
     }
 }
 
@@ -356,6 +435,18 @@ fun FsMenuBackRow(title: String, onBack: () -> Unit) {
             // 命中 44dp 红线（§14 #13）：页头也是可点项（点它=返回），只靠 9dp 上下内边距是 ~42dp。
             .heightIn(min = NpDimens.touchTarget)
             .clip(RoundedCornerShape(10.dp))
+            // A27：显式 focusable——菜单是独立 Popup，方向键 / D-pad 要能逐行进焦。
+            // 触摸模式下 clickable 自带的可聚焦性（focusableInNonTouchMode）不生效，
+            // 显式声明后触摸模式也能被焦点系统命中（键盘模式行为不变）。
+            .onKeyEvent { event ->
+                if (event.isRowConfirmUp()) {
+                    onBack()
+                    true
+                } else {
+                    false
+                }
+            }
+            .focusable()
             .clickable(onClick = onBack)
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -387,6 +478,20 @@ fun FsMenuBackRow(title: String, onBack: () -> Unit) {
 private val OnMediaDanger = NpMediaPalette.onMediaDanger
 
 /**
+ * A27：菜单行的「确认」键判定（Enter / 小键盘 Enter / D-pad 中心键 / 空格的抬起）。
+ *
+ * 菜单是独立 Popup，行用显式 `focusable()` 保证触摸模式下也能被方向键 / D-pad 命中；
+ * 这种模式下 `clickable` 自带的键盘激活节点不在焦点链上，所以由行自己处理确认键。
+ * 键盘模式下 `clickable` 会先消费同一个事件，不会双触发。
+ */
+private fun KeyEvent.isRowConfirmUp(): Boolean =
+    type == KeyEventType.KeyUp &&
+        (
+            key == Key.Enter || key == Key.NumPadEnter ||
+                key == Key.DirectionCenter || key == Key.Spacebar
+            )
+
+/**
  * 菜单行：图标（可选）+ 文字 + 右侧值/勾选/箭头。
  *
  * [check] 非 null 时展示勾选位（未选中也占位，避免选中瞬间文字被挤动）；
@@ -415,6 +520,16 @@ fun FsMenuRow(
             // 面板本身限高 72% 且内部可滚（见本文件菜单容器），行高加 6dp 不会顶出屏幕。
             .heightIn(min = NpDimens.touchTarget)
             .clip(RoundedCornerShape(10.dp))
+            // A27：显式 focusable（原因同 FsMenuBackRow）——菜单行可被方向键 / D-pad 命中。
+            .onKeyEvent { event ->
+                if (event.isRowConfirmUp()) {
+                    onClick()
+                    true
+                } else {
+                    false
+                }
+            }
+            .focusable()
             .clickable(onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -480,7 +595,19 @@ fun FsMenuSwitchRow(
             .fillMaxWidth()
             .heightIn(min = NpDimens.touchTarget)
             .clip(RoundedCornerShape(10.dp))
-            .clickable { onCheckedChange(!checked) }
+            // A27：显式 focusable（原因同 FsMenuBackRow）。
+            .onKeyEvent { event ->
+                if (event.isRowConfirmUp()) {
+                    onCheckedChange(!checked)
+                    true
+                } else {
+                    false
+                }
+            }
+            .focusable()
+            // A27/REV-14：整行就是一个开关（On/Off + Role.Switch），读屏只报一个节点。
+            // 之前是 clickable(Role.Button) + 里层 NpSwitch(toggleable)，会读成两个控件。
+            .npToggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -493,7 +620,12 @@ fun FsMenuSwitchRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        NpSwitch(checked = checked, onCheckedChange = onCheckedChange)
+        // 语义已挂在整行上：里层开关只负责画图形，清空语义避免读屏重复报两个开关。
+        NpSwitch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
     }
 }
 
@@ -773,12 +905,13 @@ fun FsMainMenuContent(
 }
 
 /** 微调步进钮（L14）：与档位行分开——它改的是当前值的 ±0.05，不是跳档。
- * 2026-10-12 用户裁定"两个白色块变小/变窄"：44dp 方块收成 56×34 的窄条。 */
+ * 2026-10-12 用户裁定"两个白色块变小/变窄"：44dp 方块收成窄条；
+ * A27（2026-10-15 订正）收窄只动宽度，**命中高回到 44dp 红线**（窄高 34dp 实测按不准）。 */
 @Composable
 private fun FsMenuStepButton(label: String, onClick: () -> Unit) {
     Box(
         modifier = Modifier
-            .heightIn(min = 34.dp)
+            .heightIn(min = NpDimens.touchTarget)
             .clip(RoundedCornerShape(NpRadius.button))
             .background(MaterialTheme.colorScheme.surfaceContainerHigh)
             .npClickable(onClick = onClick),

@@ -34,14 +34,13 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionCommand
 import androidx.media3.session.SessionToken
 import com.noneplayer.core.media.PlaybackFailure
+import com.noneplayer.core.media.SubtitleEffectNotice
 import com.noneplayer.core.media.probe.FormatProbe
-import com.noneplayer.kernel.api.CuePlacement
 import com.noneplayer.kernel.api.NpChapter
 import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.PlayerConnection
-import com.noneplayer.kernel.api.SubtitleAlignment
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.NpMediaButtonAction
@@ -1001,6 +1000,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     clearAppliedIdentity()
                     chaptersKey = null
                     _chapters.value = emptyList()
+                    // A12 第一期：装载失败后没有可显示的字幕，特效提示也撤掉
+                    SubtitleEffectNotice.clear()
                     probedUri = uri
                     probedContainer = probe.failure.container
                     probedVideoCodec = probe.failure.videoCodec
@@ -1238,6 +1239,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         appliedItems = items
         appliedQueueIds = queueIdentity(coreItems)
         mountedSubtitle = mount
+        // A12 第一期：目标媒体没挂字幕时，上一条片子的「含特效」提示不该残留
+        if (mount == null) SubtitleEffectNotice.clear()
         loadPending = false
         c.setMediaItems(items, safeIndex, resolvedStartMs.coerceAtLeast(0L))
         c.prepare()
@@ -1382,6 +1385,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentTitle = ""
         subtitle = null
         mountedSubtitle = null
+        // A12 第一期：队列清空后字幕与特效提示都不再属于任何媒体
+        SubtitleEffectNotice.clear()
         _state.value = PlaybackState.Idle
         clearCues()
         _decodeNotice.value = null
@@ -1542,6 +1547,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * `.ass`）同样要重建，所以比较用整个挂载对，不用裸 uri。
      */
     override fun setSubtitle(uri: String?, format: NpSubtitleFormat?) {
+        // A12 第一期：字幕卸下时一并撤掉「含特效」提示，避免下一条片子/无字幕画面残留
+        if (uri == null) SubtitleEffectNotice.clear()
         val previous = subtitle
         subtitle = uri?.let { SubtitleMount(it, format) }
         val media = currentMediaUri ?: return
@@ -1980,6 +1987,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // A18：释放时撤掉进程级回退过滤状态，别影响同一进程里后续的播放意图
         decoderFallbackGate.onMediaChanged()
         decoderFallbackState.clear()
+        // A12 第一期：本实例不再观察字幕，特效提示一并撤掉
+        SubtitleEffectNotice.clear()
         if (!connectDeferred.isCompleted) {
             connectDeferred.completeExceptionally(CancellationException("播放器已释放"))
         }
@@ -2238,32 +2247,28 @@ internal fun canFastSelectQueueIndex(
 private fun Cue.toKernelCue(): SubtitleCue {
     val bmp = bitmap
     if (bmp != null) {
-        val heightFraction = bitmapHeight.takeIf { it != Cue.DIMEN_UNSET && it > 0f && it <= 1f } ?: 1f
-        val aspect = if (bmp.height > 0) bmp.width.toFloat() / bmp.height else 1f
-        val widthFraction = (heightFraction * aspect).coerceAtMost(1f)
-        val anchorX = position.takeIf { it != Cue.DIMEN_UNSET } ?: 0.5f
-        val baselineY = line
-            .takeIf { it != Cue.DIMEN_UNSET && lineType == Cue.LINE_TYPE_FRACTION } ?: 1f
-        val left = (anchorX - widthFraction / 2f).coerceIn(0f, 1f)
-        val top = (baselineY - heightFraction).coerceIn(0f, 1f)
         return SubtitleCue(
             bitmap = bmp,
-            placement = CuePlacement(left, top, widthFraction, heightFraction),
+            placement = npCuePlacement(
+                bitmapWidthPx = bmp.width,
+                bitmapHeightPx = bmp.height,
+                heightFraction = bitmapHeight.takeIf { it != Cue.DIMEN_UNSET },
+                anchorX = position.takeIf { it != Cue.DIMEN_UNSET },
+                baselineY = line
+                    .takeIf { it != Cue.DIMEN_UNSET && lineType == Cue.LINE_TYPE_FRACTION },
+            ),
         )
     }
     // A12 第一期：容器已有的对齐、垂直/水平位置与主色带出去。文本仍是纯文本
     // （富文本 span 第二阶段再做），但顶部对齐/双语分置不再被一律压到底部。
-    val alignment = when (textAlignment) {
-        Layout.Alignment.ALIGN_NORMAL -> SubtitleAlignment.LEFT
-        Layout.Alignment.ALIGN_OPPOSITE -> SubtitleAlignment.RIGHT
-        else -> SubtitleAlignment.CENTER
-    }
-    val lineFraction = line
-        .takeIf { it != Cue.DIMEN_UNSET && lineType == Cue.LINE_TYPE_FRACTION }
-        ?.coerceIn(0f, 1f)
-    val positionFraction = position
-        .takeIf { it != Cue.DIMEN_UNSET }
-        ?.coerceIn(0f, 1f)
+    val alignment = npCueAlignment(
+        isStartAligned = textAlignment == Layout.Alignment.ALIGN_NORMAL,
+        isEndAligned = textAlignment == Layout.Alignment.ALIGN_OPPOSITE,
+    )
+    val lineFraction = npCueFraction(
+        line.takeIf { it != Cue.DIMEN_UNSET && lineType == Cue.LINE_TYPE_FRACTION },
+    )
+    val positionFraction = npCueFraction(position.takeIf { it != Cue.DIMEN_UNSET })
     // media3 的 SSA 解码器把 ASS 主色放进 ForegroundColorSpan；只取首个前景色当
     // "主色"。用户显式改过颜色时渲染层优先用户值（见 SubtitleLayer）。
     val textColorArgb = (text as? Spanned)
@@ -2272,8 +2277,7 @@ private fun Cue.toKernelCue(): SubtitleCue {
                 ?.firstOrNull()
                 ?.foregroundColor
         }
-        ?.toLong()
-        ?.and(0xFFFFFFFFL)
+        .let { npCueColorArgb(it) }
     return SubtitleCue(
         text = text?.toString(),
         alignment = alignment,

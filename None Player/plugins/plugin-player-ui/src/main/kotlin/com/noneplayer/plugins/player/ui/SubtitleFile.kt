@@ -4,6 +4,9 @@ import android.content.Context
 import android.net.Uri
 import androidx.core.net.toUri
 import com.noneplayer.core.media.SubtitleCharset
+import com.noneplayer.core.media.SubtitleEffectDetector
+import com.noneplayer.core.media.SubtitleEffectInfo
+import com.noneplayer.core.media.SubtitleEffectNotice
 import com.noneplayer.kernel.api.CacheProvider
 import com.noneplayer.kernel.api.NpSubtitleFormat
 import com.noneplayer.kernel.api.npSubtitleFormatOf
@@ -40,6 +43,8 @@ internal data class PreparedSubtitle(
  */
 internal suspend fun prepareSubtitleUri(context: Context, source: Uri): PreparedSubtitle =
     withContext(Dispatchers.IO) {
+        // A12 第一期：每次挂载都刷新「含特效」提示；本次没检测到就 publish(null) 覆盖旧提示
+        SubtitleEffectNotice.publish(null)
         // 打开失败与"读得太多判定超限"是两码事：前者是源没了（要提示），
         // 后者文件还在、只是不像字幕（不该说"失效"）
         var missing = false
@@ -62,6 +67,11 @@ internal suspend fun prepareSubtitleUri(context: Context, source: Uri): Prepared
                 ?: return@runCatching source.toString()
 
             val decoded = SubtitleCharset.decode(bytes)
+            // A12 第一期：media3 产出 Cue 前就把 ASS 覆盖标签 strip 掉了（SsaParser），
+            // 只能在这里用原始文本检测；非 ASS/SSA 格式不扫描。
+            SubtitleEffectNotice.publish(
+                subtitleEffectInfoFor(format, source.toString(), decoded.text),
+            )
             if (!decoded.needsRewrite) return@runCatching source.toString()
 
             val dir = File(context.cacheDir, "subs").apply { mkdirs() }
@@ -80,6 +90,26 @@ internal suspend fun prepareSubtitleUri(context: Context, source: Uri): Prepared
         }.getOrDefault(source.toString())
         PreparedSubtitle(uri, format, missing)
     }
+
+/**
+ * A12 第一期：这份外挂字幕里有没有当前渲染层做不到的特效（只对 ASS/SSA 有意义）。
+ *
+ * - 只扫 `NpSubtitleFormat.SSA`（扩展名 ass/ssa；SRT/VTT/TTML 里的 `\pos` 只是正文）；
+ * - 检测不到特效 → null（调用方 publish(null)，提示不出现）；
+ * - [text] 为 null（编码探测失败等）也返回 null，绝不因为字幕异常影响挂载。
+ *
+ * 抽成纯函数是为了纯 JVM 单测能钉住「ASS 有特效才提示」的口径，不依赖 ContentResolver。
+ */
+internal fun subtitleEffectInfoFor(
+    format: NpSubtitleFormat?,
+    sourceUri: String,
+    text: String?,
+): SubtitleEffectInfo? {
+    if (format != NpSubtitleFormat.SSA) return null
+    val report = SubtitleEffectDetector.detect(text)
+    if (!report.hasEffects) return null
+    return SubtitleEffectInfo(sourceUri = sourceUri, tags = report.tags)
+}
 
 /** 转码副本的扩展名：沿用源格式，判不出来才退回 `.srt`（A3） */
 internal fun subtitleCopyExtension(format: NpSubtitleFormat?): String = format?.extension ?: "srt"

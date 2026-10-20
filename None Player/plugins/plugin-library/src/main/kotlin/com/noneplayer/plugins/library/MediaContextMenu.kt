@@ -2,6 +2,7 @@ package com.noneplayer.plugins.library
 
 import android.content.Context
 import android.content.Intent
+import androidx.activity.compose.BackHandler
 import androidx.core.net.toUri
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
@@ -47,6 +48,8 @@ import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
@@ -294,9 +297,38 @@ private fun ContextMenuRow(
 /**
  * 长按「删除」之后的确认。系统在 Android 11+ 仍可能再弹一次授权框，
  * 这一层先把「删的是哪一个、删了回不来」说清楚，并按媒体库自己的表面来画。
+ *
+ * A27：改成真 [Dialog] 窗口（原来是页面内联的 Box 覆盖层）：
+ * - 遮罩在独立窗口里铺满全屏，能盖住外壳底栏 / 迷你播放条上的可点区域；
+ * - 系统返回键被这个窗口吃掉（[BackHandler] 只关确认框），不会顺着页面导航
+ *   把详情页 / 播放页一起退掉；
+ * - 点遮罩仍然只关确认框（dismissOnClickOutside = false，由遮罩自己的 onClick 处理）。
  */
 @Composable
 internal fun DeleteConfirmDialog(
+    item: MediaItem,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            // 铺满全屏：遮罩要盖到外壳底栏/迷你条那一层才有意义（默认宽度会留出边距）
+            usePlatformDefaultWidth = false,
+            // 返回事件落到本窗口的 dispatcher，交给下面的 BackHandler，保证只关确认框
+            dismissOnBackPress = false,
+            // 点外部由遮罩自己的 onClick 处理，取消与点遮罩语义一致
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        // A27：确认框吃掉返回键——返回只关确认框，不落到下层页面导航
+        BackHandler { onDismiss() }
+        DeleteConfirmCard(item = item, onDismiss = onDismiss, onConfirm = onConfirm)
+    }
+}
+
+@Composable
+private fun DeleteConfirmCard(
     item: MediaItem,
     onDismiss: () -> Unit,
     onConfirm: () -> Unit,

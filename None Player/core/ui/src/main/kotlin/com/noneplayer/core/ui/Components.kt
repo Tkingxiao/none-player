@@ -18,6 +18,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -255,6 +256,53 @@ fun Modifier.npClickable(
     // 后者会给同一个布局节点多造一个语义节点（每张卡/每个按钮各一个）。
     role = Role.Button,
     onClick = onClick,
+)
+
+/**
+ * R4-17/REV-14：**单选**语义（菜单项 / 分段控件 / 选项行）——选中状态进入语义树。
+ *
+ * 设计稿的选中态只有字重、颜色与勾位；读屏软件读不到这些，只会把每一行都报成"按钮"。
+ * 单选必须报 `selected` + `Role.RadioButton`，并由父容器 [selectableGroup] 宣布"N 选 1"。
+ * 与 [npClickable] 的分工：打开/关闭/跳转这类**动作**用 [npClickable]；
+ * "从 N 个里选 1 个"用本方法，别把"当前值"伪装成"按下可触发"。
+ *
+ * 视觉零变化：`selectable` 与 `clickable` 同为无涟漪交互层（indication = null），
+ * 按压/选中外观仍由里层的字重、底色与勾位表达。
+ */
+@Composable
+fun Modifier.npSelectable(
+    selected: Boolean,
+    enabled: Boolean = true,
+    role: Role = Role.RadioButton,
+    onClick: () -> Unit,
+): Modifier = selectable(
+    selected = selected,
+    interactionSource = remember { MutableInteractionSource() },
+    indication = null,
+    enabled = enabled,
+    role = role,
+    onClick = onClick,
+)
+
+/**
+ * R4-17/REV-14：**开关**语义（整行开关行）——On/Off 进入语义树，读屏读得出当前档位。
+ *
+ * 与 [NpSwitch] 同一口径（`toggleable` + `Role.Switch`）：整行可点的开关行应把语义
+ * 挂在行上，里层开关只负责画图形并用 `clearAndSetSemantics {}` 清空，否则读屏会报两遍。
+ */
+@Composable
+fun Modifier.npToggleable(
+    value: Boolean,
+    enabled: Boolean = true,
+    role: Role = Role.Switch,
+    onValueChange: (Boolean) -> Unit,
+): Modifier = toggleable(
+    value = value,
+    interactionSource = remember { MutableInteractionSource() },
+    indication = null,
+    enabled = enabled,
+    role = role,
+    onValueChange = onValueChange,
 )
 
 /**
@@ -637,12 +685,9 @@ fun NpSwitch(
             .size(width = NpDimens.switchWidth, height = NpDimens.switchHeight)
             .clip(RoundedCornerShape(NpRadius.chip))
             .background(track)
-            .toggleable(
+            .npToggleable(
                 value = checked,
                 enabled = enabled,
-                role = Role.Switch,
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
                 onValueChange = onCheckedChange,
             ),
     ) {

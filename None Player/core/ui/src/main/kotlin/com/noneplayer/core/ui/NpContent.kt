@@ -201,7 +201,7 @@ fun NpTrackBar(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(20.dp)
+            .height(NpDimens.trackBarHit)
             .pointerInput(Unit) {
                 detectTapGestures { offset ->
                     onSeek((offset.x / size.width).coerceIn(0f, 1f))
@@ -235,14 +235,14 @@ fun NpTrackBar(
                 .height(NpDimens.trackLine)
                 // §19.14 同族：圆角交给 background 自己画，不做 RenderNode 裁剪
                 // （`clip()` 每处都会开一次模板裁剪；卡片热路径上每帧几十次）。
-                .background(track, RoundedCornerShape(2.dp)),
+                .background(track, RoundedCornerShape(NpDimens.trackCornerRadius)),
         ) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth(shown.coerceIn(0f, 1f))
                     .height(NpDimens.trackLine)
                     // 填充轨自带同形圆角：方角会盖住底轨两端的圆角
-                    .background(fill, RoundedCornerShape(2.dp)),
+                    .background(fill, RoundedCornerShape(NpDimens.trackCornerRadius)),
             )
         }
         Box(

@@ -40,6 +40,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -71,6 +72,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -103,7 +105,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.draw.clip
@@ -111,6 +115,8 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusRestorer
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -135,6 +141,8 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 
@@ -266,8 +274,8 @@ import kotlin.math.roundToInt
 /** User-selected six presets, shared by compact and fullscreen menus. */
 internal val SPEED_PRESETS = listOf(0.25f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f)
 
-/** 竖屏未全屏：倍速钮上方只弹这五档。横屏菜单才给 3x 和微调。 */
-internal val SPEED_PORTRAIT_PRESETS = listOf(0.25f, 0.5f, 1.0f, 1.5f, 2.0f)
+/** 竖屏未全屏：倍速钮上方只弹这几档（A27 2026-10-15 订正：补 3.0，用户够不到 3×）。 */
+internal val SPEED_PORTRAIT_PRESETS = listOf(0.25f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f)
 
 /** 微调步进与合法区间（L14：0.05 一档；上限 4x 与长按 boost 的 3x 留余量） */
 internal const val SPEED_FINE_STEP = 0.05f
@@ -1950,6 +1958,26 @@ fun PlayerScreen(
     // 否则这层 onPreviewKeyEvent 永远收不到任何按键。
     val keyFocus = remember { FocusRequester() }
     LaunchedEffect(Unit) { runCatching { keyFocus.requestFocus() } }
+    // A27（2026-10-19 订正）：根节点不再独占方向键。
+    // 此前根 Box 的 onPreviewKeyEvent 无条件把方向键/空格吞成 seek/音量/播放暂停，
+    // 外接键盘与遥控器永远走不出根节点——顶栏返回、底栏倍速、菜单行都够不到。
+    // 现在：只要子树里有节点持焦，方向键/空格/确认就交给焦点系统（遍历 + 激活），
+    // 只有焦点就在根节点自己身上时才承担 seek/音量。
+    var childHasFocus by remember { mutableStateOf(false) }
+    // A27：从菜单/弹层/对话框回来时把键盘焦点交还根节点。
+    // 根节点此前只在首帧请求一次焦点；弹层（独立 Popup/Dialog 窗口）关闭后焦点落空，
+    // 键盘就静默失灵。弹层全关且仍在本页时重新请求一次。
+    val anyOverlayOpen = fsMenuPage != null || speedPickerVisible || episodePanelVisible ||
+        chaptersPanelVisible || subtitleSheetVisible || audioTrackSheetVisible ||
+        pictureSheetVisible || fileInfoVisible || moreSheetVisible
+    LaunchedEffect(anyOverlayOpen) {
+        if (!anyOverlayOpen) runCatching { keyFocus.requestFocus() }
+    }
+    // A27：控制层自动隐藏时，持焦的按钮会离开组合树——隐藏前先把焦点交还根节点，
+    // 否则焦点随按钮一起消失，下一次按键没有落点。
+    LaunchedEffect(controlsVisible) {
+        if (!controlsVisible && childHasFocus) runCatching { keyFocus.requestFocus() }
+    }
     // E102：告诉会话兜底"播放页在场"——方向键归本页处理（带手势提示与边界触觉），
     // 窗口层的兜底派发主动让位
     DisposableEffect(Unit) {
@@ -1960,6 +1988,11 @@ fun PlayerScreen(
         modifier = Modifier
             .fillMaxSize()
             .focusRequester(keyFocus)
+            .onFocusChanged { focusState ->
+                // hasFocus = 自己或后代持焦；isFocused = 只算自己。
+                // 记录"焦点在子树里"（顶栏/底栏/面板控件），供键盘守卫判断是否让位。
+                childHasFocus = focusState.hasFocus && !focusState.isFocused
+            }
             .onPreviewKeyEvent { event ->
                 if (event.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
                 // §8.4：`L` 锁定/解锁。**排在"锁定吞键"之前**——否则锁死之后键盘再也解不开，
@@ -1971,6 +2004,18 @@ fun PlayerScreen(
                 }
                 // 锁定态吞掉全部按键（与手势屏蔽同语义）：键盘也是误触面
                 if (stageLocked) return@onPreviewKeyEvent true
+                // A27：子节点（顶栏/底栏/面板里的可聚焦控件）持焦时，方向键交给焦点系统做
+                // 遍历，空格/回车交给控件做激活；根节点只在"焦点就在自己身上"时承担
+                // seek/音量/播放暂停。Esc/媒体键不受影响（仍然是页面级快捷键）。
+                if (childHasFocus) {
+                    when (event.key) {
+                        Key.DirectionUp, Key.DirectionDown,
+                        Key.DirectionLeft, Key.DirectionRight,
+                        Key.Tab, Key.Spacebar, Key.Enter, Key.NumPadEnter,
+                        -> return@onPreviewKeyEvent false
+                        else -> Unit
+                    }
+                }
                 // §8.4（E50 P1）九件：空格、←/→ ±5s、Shift+←/→ ±30s、↑/↓ 音量 ±5、
                 // M 静音、F 全屏、L 锁定、Esc 退层、Ctrl+O 打开文件。
                 // `,`/`.` 逐帧与 D-pad 方向导航按 §12 归 P2（§11 第 6 条）。
@@ -2698,7 +2743,9 @@ fun PlayerScreen(
                                 showTransport = false,
                                 // 手机竖屏一条到底，不要再叠一行进度把画面盖住。
                                 preferSingleRow = true,
-                                seekTouchBand = 18.dp,
+                                // A27（2026-10-15 订正）：拆行（Split）那条路曾传 18dp，实报点不中；
+                                // 44dp 红线由 NpSeekBar 内部夹取，这里传令牌把调用点也写对。
+                                seekTouchBand = NpDimens.touchTarget,
                                 leadingActions = {
                                     IconButton(
                                         onClick = ::togglePlay,
@@ -3478,8 +3525,18 @@ private fun SubtitleSettingsPanel(
     val ink = LocalNpInk.current
     var showEmbedded by remember { mutableStateOf(false) }
 
-    SubtitleSettingRow(label = "开启字幕") {
-        NpSwitch(checked = enabled, onCheckedChange = onEnabled)
+    SubtitleSettingRow(
+        label = "开启字幕",
+        checked = enabled,
+        onCheckedChange = onEnabled,
+    ) {
+        // A27/REV-14：开关语义挂在整行（SubtitleSettingRow 的 toggleable），
+        // 里层开关只负责画图形并清空语义，否则读屏会把同一开关报两遍。
+        NpSwitch(
+            checked = enabled,
+            onCheckedChange = onEnabled,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
     }
 
     SubtitleSettingRow(label = "字幕颜色") {
@@ -3539,8 +3596,16 @@ private fun SubtitleSettingsPanel(
         }
     }
 
-    SubtitleSettingRow(label = "文字字幕用斜体") {
-        NpSwitch(checked = italic, onCheckedChange = onItalic)
+    SubtitleSettingRow(
+        label = "文字字幕用斜体",
+        checked = italic,
+        onCheckedChange = onItalic,
+    ) {
+        NpSwitch(
+            checked = italic,
+            onCheckedChange = onItalic,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
     }
 
     // A12：竖直位置 / 背景条 / 描边 / 最大行数
@@ -3576,12 +3641,28 @@ private fun SubtitleSettingsPanel(
         }
     }
 
-    SubtitleSettingRow(label = "字幕背景条") {
-        NpSwitch(checked = background, onCheckedChange = onBackground)
+    SubtitleSettingRow(
+        label = "字幕背景条",
+        checked = background,
+        onCheckedChange = onBackground,
+    ) {
+        NpSwitch(
+            checked = background,
+            onCheckedChange = onBackground,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
     }
 
-    SubtitleSettingRow(label = "字幕描边") {
-        NpSwitch(checked = outline, onCheckedChange = onOutline)
+    SubtitleSettingRow(
+        label = "字幕描边",
+        checked = outline,
+        onCheckedChange = onOutline,
+    ) {
+        NpSwitch(
+            checked = outline,
+            onCheckedChange = onOutline,
+            modifier = Modifier.clearAndSetSemantics { },
+        )
     }
 
     SubtitleSettingRow(label = "字幕最大行数") {
@@ -3687,13 +3768,33 @@ private fun SubtitleSettingsPanel(
 private fun SubtitleSettingRow(
     label: String,
     value: String? = null,
+    /**
+     * A27：开关行整行可点。以前只有右端 46×27dp 的开关本体是命中区，
+     * 整行看着像设置项、点标签没反应（无障碍扫描也报命中区过小）。
+     * 传入 checked/onCheckedChange 时整行按开关语义可切换；其它行保持原样（行内自带控件）。
+     */
+    checked: Boolean? = null,
+    onCheckedChange: ((Boolean) -> Unit)? = null,
     content: @Composable () -> Unit,
 ) {
     val ink = LocalNpInk.current
+    val rowToggle = if (checked != null && onCheckedChange != null) {
+        Modifier.toggleable(
+            value = checked,
+            interactionSource = remember { MutableInteractionSource() },
+            // 视觉不动：只扩命中区，不加行级涟漪（版式与 A27 之前一致）。
+            indication = null,
+            role = Role.Switch,
+            onValueChange = onCheckedChange,
+        )
+    } else {
+        Modifier
+    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = NpDimens.touchTarget)
+            .then(rowToggle)
             .padding(vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -4536,6 +4637,7 @@ private fun Modifier.npReadoutChip(color: Color): Modifier = drawBehind {
     )
 }
 
+@OptIn(ExperimentalComposeUiApi::class) // A27：focusRestorer 在 Compose 1.7.6 仍标实验
 @Composable
 internal fun PlayerBottomControls(
     visible: Boolean,
@@ -4680,8 +4782,10 @@ internal fun PlayerBottomControls(
                 val split = barLayout == PlayerBarLayout.Split
                 val showDuration = barLayout == PlayerBarLayout.SingleRow
                 // 单行时行高已由 44dp 的图标撑起来，进度条的触控带跟着吃满同样的高度是
-                // 白得的命中面积（轨道本身仍按 trackHeight 居中画，视觉不变）；
-                // 拆成两行时才用形态各自给的窄带（竖屏 18dp），否则黑条又要垫高一行。
+                // 白得的命中面积（轨道本身仍按 trackHeight 居中画，视觉不变）。
+                // A27（2026-10-15 订正）：拆成两行那一路不再退回 18dp——NpSeekBar 自身夹取
+                // 到 NpDimens.touchTarget，两路命中高都 ≥44dp（触控带变高只加透明命中层，
+                // 轨道仍按 trackHeight 居中，视觉不变）。
                 val inlineSeekBand = seekTouchBand.coerceAtLeast(NpDimens.touchTarget)
                 Column {
                     if (split) {
@@ -4699,9 +4803,15 @@ internal fun PlayerBottomControls(
                         )
                     }
             Row(
-                modifier = Modifier.fillMaxWidth().then(
-                    if (split) Modifier.horizontalScroll(controlScroll) else Modifier,
-                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // A27：底栏是一个焦点组，焦点在组内控件间停留、离开后回来时
+                    // 还原到上次停留的那颗按钮（focusRestorer：记住组内持焦子节点）。
+                    .focusRestorer()
+                    .focusGroup()
+                    .then(
+                        if (split) Modifier.horizontalScroll(controlScroll) else Modifier,
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
@@ -4831,6 +4941,7 @@ internal fun PlayerBottomControls(
  * [showActions] = false 时顶栏只剩标题与环境信息——§8.3 的类 PC「控制层底部集中」，
  * 动作由调用方下沉到底栏左端（鼠标和触控都落在同一条边上，不必在画面上下奔波）。
  */
+@OptIn(ExperimentalComposeUiApi::class) // A27：focusRestorer 在 Compose 1.7.6 仍标实验
 @Composable
 private fun PlayerTopBar(
     visible: Boolean,
@@ -4871,6 +4982,10 @@ private fun PlayerTopBar(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    // A27：顶栏是独立焦点组——方向键/ Tab 进出顶栏时还原到上次停留的
+                    // 那颗按钮（focusRestorer 记住组内持焦子节点），不会每次都回到返回键。
+                    .focusRestorer()
+                    .focusGroup()
                     .then(
                         if (applyInsets) {
                             Modifier.windowInsetsPadding(

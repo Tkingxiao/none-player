@@ -370,6 +370,8 @@ private fun PlaybackSettingsGroup(gutter: Dp) {
             // 如实标注生效时机，而不是让用户以为马上就换（真实接线见 PlaybackService.onCreate）
             subtitle = "关闭后优先用 CPU 软解，兼容性更好但更耗电；下次播放生效",
             icon = NpIcon.Gear,
+            // A27（2026-10-15 订正）：开关行整行可点——此前命中区只有 46×27dp 的开关本身。
+            onClick = { scope.launch { settings.setHardwareDecodePreferred(!hardwareDecode) } },
             trailing = {
                 NpSwitch(
                     checked = hardwareDecode,
@@ -381,6 +383,8 @@ private fun PlaybackSettingsGroup(gutter: Dp) {
             title = "自动连播下一集",
             subtitle = "当前视频结束后自动播放",
             icon = NpIcon.Play,
+            // A27：开关行整行可点——命中区不再只有 46×27dp 的开关本身。
+            onClick = { scope.launch { settings.setAutoplayNext(!autoplayNext) } },
             trailing = {
                 NpSwitch(
                     checked = autoplayNext,
@@ -425,6 +429,8 @@ private fun BackgroundScreenSettingsGroup(gutter: Dp) {
             title = "后台播放",
             subtitle = "打开后返回列表仍继续播放，并在底部显示迷你播放条",
             icon = NpIcon.Sound,
+            // A27：开关行整行可点。
+            onClick = { scope.launch { settings.setBackgroundPlay(!backgroundPlay) } },
             trailing = {
                 NpSwitch(
                     checked = backgroundPlay,
@@ -436,6 +442,8 @@ private fun BackgroundScreenSettingsGroup(gutter: Dp) {
             title = "播放时保持屏幕常亮",
             subtitle = "全屏播放时阻止息屏",
             icon = NpIcon.Clock,
+            // A27：开关行整行可点。
+            onClick = { scope.launch { settings.setKeepScreenOn(!keepScreenOn) } },
             trailing = {
                 NpSwitch(
                     checked = keepScreenOn,
@@ -475,6 +483,8 @@ private fun GestureSettingsGroup(gutter: Dp) {
             title = "启用播放手势",
             subtitle = "横滑快进 · 竖滑亮度/音量 · 双击快退快进 · 长按 3x",
             icon = NpIcon.Sound,
+            // A27：开关行整行可点。
+            onClick = { scope.launch { settings.setGesturesEnabled(!gestures) } },
             trailing = {
                 NpSwitch(
                     checked = gestures,

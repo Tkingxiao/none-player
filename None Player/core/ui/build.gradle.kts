@@ -14,6 +14,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    // R4-17/REV-14：Robolectric 跑 Compose 需要 AAR 资源（含 ui-test-manifest 声明的
+    // Activity）进到单测资源里，否则 createComposeRule 起不来。与 kernel-ui-api 同款配置。
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 kotlin {
@@ -34,4 +41,13 @@ dependencies {
     implementation(libs.androidx.core.ktx)
 
     testImplementation(libs.junit)
+    // R4-17/REV-14：选中/开关语义的行为级回归（Robolectric + Compose 测试床）。
+    // compose ui-test-junit4 会传递依赖 kotlinx-coroutines-test 1.7.3；离线仓库只有项目统一定义
+    // 的 1.9.0（catalog），显式声明把冲突版本抬到 1.9.0，否则离线构建无法解析 1.7.3 的 jar。
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test.junit4)
+    testImplementation(libs.compose.ui.test.manifest)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.ext.junit)
 }

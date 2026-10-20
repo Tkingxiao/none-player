@@ -3,8 +3,10 @@ package com.noneplayer.plugins.player.ui
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -12,7 +14,9 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -35,6 +39,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
+import com.noneplayer.core.media.SubtitleEffectInfo
+import com.noneplayer.core.media.SubtitleEffectNotice
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.kernel.api.CuePlacement
 import com.noneplayer.kernel.api.NpTrackType
@@ -42,6 +48,7 @@ import com.noneplayer.kernel.api.SubtitleAlignment
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.ui.api.PlaybackTextCueArbiter
+import com.noneplayer.kernel.ui.api.TextCueClaim
 import kotlin.math.roundToInt
 
 /**
@@ -101,15 +108,63 @@ fun PlayerSubtitleLayer(
     val claim by PlaybackTextCueArbiter.claim.collectAsStateWithLifecycle()
     val tracks by player.tracks.collectAsStateWithLifecycle()
     val selectedTextId = tracks.firstOrNull { it.type == NpTrackType.TEXT && it.selected }?.id
-    val suppressText = claim != null &&
-        claim?.mediaUri == mediaUri &&
-        selectedTextId != null &&
-        claim?.trackId == selectedTextId
-    SubtitleLayer(
-        cues = if (suppressText) cues.filter { it.bitmap != null } else cues,
-        modifier = modifier,
-        style = style,
-    )
+    val suppressText = shouldSuppressTextCues(claim, mediaUri, selectedTextId)
+    // A12 第一期：外挂字幕含 `\pos`/卡拉OK/旋转等当前做不到的特效时，诚实提示一句。
+    // 检测发生在挂载前处理（SubtitleFile.prepareSubtitleUri），这里只订阅结果。
+    val effectInfo by SubtitleEffectNotice.info.collectAsStateWithLifecycle()
+    // 关闭状态按「字幕来源」记：换一份字幕重新提示；同一份字幕重新挂载不重复打扰
+    var dismissedFor by remember { mutableStateOf<String?>(null) }
+    val dismissed = effectInfo?.let { dismissedFor == it.sourceUri } == true
+    Box(modifier = modifier.fillMaxSize()) {
+        SubtitleLayer(
+            cues = visibleCuesForArbitration(cues, suppressText),
+            modifier = Modifier.fillMaxSize(),
+            style = style,
+        )
+        if (shouldShowSubtitleEffectNotice(style.enabled, effectInfo, dismissed)) {
+            SubtitleEffectNoticePill(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 8.dp),
+                onDismiss = { dismissedFor = effectInfo?.sourceUri },
+            )
+        }
+    }
+}
+
+/**
+ * A12 第一期：「此字幕含特效，当前只显示文本」提示条。
+ *
+ * 贴在画面**上沿居中**、只占一行、背景半透明，不压底部字幕与控制层；右侧「×」
+ * 点一下永久关掉**这一份字幕**的提示（换字幕会重新提示）。提示只说明「含特效」，
+ * 不做逐条判断——ASS 的 span 富文本/卡拉OK/旋转是第二阶段的事。
+ */
+@Composable
+private fun SubtitleEffectNoticePill(
+    modifier: Modifier = Modifier,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier = modifier
+            .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(NpRadius.chip))
+            .padding(start = 10.dp, top = 4.dp, end = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = SUBTITLE_EFFECT_NOTICE_TEXT,
+            color = Color.White,
+            fontSize = 12.sp,
+            maxLines = 1,
+        )
+        Text(
+            text = "×",
+            color = Color.White.copy(alpha = 0.85f),
+            fontSize = 14.sp,
+            modifier = Modifier
+                .clickable(onClick = onDismiss)
+                .padding(horizontal = 6.dp, vertical = 2.dp),
+        )
+    }
 }
 
 @Composable
@@ -216,25 +271,21 @@ private fun TextCue(
                 val hPad = (stageW * 0.04f).roundToInt()
                 val maxTextWidth = (stageW - hPad * 2).coerceAtLeast(1)
                 val placeable = measurable.measure(Constraints(maxWidth = maxTextWidth))
-                val position = cue.positionFraction
-                val x = when {
-                    position != null ->
-                        (stageW * position - placeable.width / 2f).roundToInt()
-                    cue.alignment == SubtitleAlignment.LEFT -> hPad
-                    cue.alignment == SubtitleAlignment.RIGHT -> stageW - placeable.width - hPad
-                    else -> (stageW - placeable.width) / 2
-                }.coerceIn(0, (stageW - placeable.width).coerceAtLeast(0))
-                val line = cue.lineFraction
-                val y = (if (line != null) {
-                    if (line <= 0.5f) {
-                        (stageH * line).roundToInt()
-                    } else {
-                        (stageH * line).roundToInt() - placeable.height
-                    }
-                } else {
-                    val bottomPad = SUBTITLE_BOTTOM_PADDING.roundToPx()
-                    ((stageH - placeable.height - bottomPad) * style.verticalPosition).roundToInt()
-                }).coerceIn(0, (stageH - placeable.height).coerceAtLeast(0))
+                // A12 第一期：摆放算式抽成纯函数（纯 JVM 单测钉住），这里只做测量与落位
+                val x = textCueLeftX(
+                    stageWidth = stageW,
+                    textWidth = placeable.width,
+                    positionFraction = cue.positionFraction,
+                    alignment = cue.alignment,
+                    horizontalPaddingPx = hPad,
+                )
+                val y = textCueTopY(
+                    stageHeight = stageH,
+                    textHeight = placeable.height,
+                    lineFraction = cue.lineFraction,
+                    verticalPosition = style.verticalPosition,
+                    bottomPaddingPx = SUBTITLE_BOTTOM_PADDING.roundToPx(),
+                )
                 layout(stageW, stageH) { placeable.place(x, y) }
             },
         contentAlignment = Alignment.TopStart,
@@ -298,3 +349,92 @@ private class SubtitleBitmapFrame(
 
 /** 底部留白：控制层（进度条）之上，避免字幕被控件遮挡 */
 private val SUBTITLE_BOTTOM_PADDING = 56.dp
+
+// ---------------------------------------------------------------------------
+// A12 纯逻辑（无 Compose 依赖，纯 JVM 单测直接调用）
+// ---------------------------------------------------------------------------
+
+/**
+ * A12：文本 Cue 要不要让位给认领者（内嵌弹幕层）。
+ *
+ * 必须**同一媒体 + 同一条已选文本轨**才让位：换媒体（上一条片子的认领）或同 URI
+ * 分轨（认领的是另一条轨）都不能压住当前字幕。
+ */
+internal fun shouldSuppressTextCues(
+    claim: TextCueClaim?,
+    mediaUri: String,
+    selectedTextId: String?,
+): Boolean = claim != null &&
+    claim.mediaUri == mediaUri &&
+    selectedTextId != null &&
+    claim.trackId == selectedTextId
+
+/** A12：让位时只保留位图 Cue（文本 Cue 交给认领者渲染）。 */
+internal fun visibleCuesForArbitration(
+    cues: List<SubtitleCue>,
+    suppressText: Boolean,
+): List<SubtitleCue> = if (suppressText) cues.filter { it.bitmap != null } else cues
+
+/**
+ * A12 第一期：特效提示的显隐口径。
+ *
+ * 字幕总开关关掉时连提示也不出现；没有检测到特效不提示；用户点过「×」后，同一份
+ * 字幕不再出现（换字幕才重新提示）。
+ */
+internal fun shouldShowSubtitleEffectNotice(
+    enabled: Boolean,
+    info: SubtitleEffectInfo?,
+    dismissed: Boolean,
+): Boolean = enabled && info != null && !dismissed
+
+/** A12 第一期提示文案（任务口径，逐字一致；iOS/设计稿对齐时改这里）。 */
+internal const val SUBTITLE_EFFECT_NOTICE_TEXT = "此字幕含特效，当前只显示文本"
+
+/**
+ * A12：文本 Cue 的水平落点（像素）。
+ *
+ * Cue 自带 [positionFraction] 时按中心点摆放（ASS `\pos`/`\an` 的水平份额），否则
+ * 按 [alignment] 左/中/右；左右各留 [horizontalPaddingPx]，最后钳进画面内。
+ */
+internal fun textCueLeftX(
+    stageWidth: Int,
+    textWidth: Int,
+    positionFraction: Float?,
+    alignment: SubtitleAlignment,
+    horizontalPaddingPx: Int,
+): Int {
+    val raw = when {
+        positionFraction != null ->
+            (stageWidth * positionFraction - textWidth / 2f).roundToInt()
+        alignment == SubtitleAlignment.LEFT -> horizontalPaddingPx
+        alignment == SubtitleAlignment.RIGHT -> stageWidth - textWidth - horizontalPaddingPx
+        else -> (stageWidth - textWidth) / 2
+    }
+    return raw.coerceIn(0, (stageWidth - textWidth).coerceAtLeast(0))
+}
+
+/**
+ * A12：文本 Cue 的垂直落点（像素）。
+ *
+ * - Cue 自带 [lineFraction]（ASS `\an`/`\pos` 的垂直份额）时**优先于**用户设置：
+ *   ≤0.5 视为顶边锚，>0.5 视为底边锚（与抽取前的 inline 行为一致）；
+ * - 否则按用户 [verticalPosition]（0 顶、1 底）在画面高 - 文字高 - 底部留白上插值。
+ */
+internal fun textCueTopY(
+    stageHeight: Int,
+    textHeight: Int,
+    lineFraction: Float?,
+    verticalPosition: Float,
+    bottomPaddingPx: Int,
+): Int {
+    val raw = if (lineFraction != null) {
+        if (lineFraction <= 0.5f) {
+            (stageHeight * lineFraction).roundToInt()
+        } else {
+            (stageHeight * lineFraction).roundToInt() - textHeight
+        }
+    } else {
+        ((stageHeight - textHeight - bottomPaddingPx) * verticalPosition).roundToInt()
+    }
+    return raw.coerceIn(0, (stageHeight - textHeight).coerceAtLeast(0))
+}

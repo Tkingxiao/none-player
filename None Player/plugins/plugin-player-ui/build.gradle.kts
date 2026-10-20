@@ -55,4 +55,10 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.ext.junit)
     testImplementation(libs.kotlinx.coroutines.test)
+    // R4 独立验收（REV-14 选中语义 / A27 触控几何）：Robolectric 跑真实 Compose
+    // 需要 compose ui-test 与 ui-test-manifest 的 Activity 进单测资源，
+    // 配方沿用 kernel/kernel-ui-api 的 ComposeTestHarnessSmokeTest（含 includeAndroidResources）。
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test.junit4)
+    testImplementation(libs.compose.ui.test.manifest)
 }

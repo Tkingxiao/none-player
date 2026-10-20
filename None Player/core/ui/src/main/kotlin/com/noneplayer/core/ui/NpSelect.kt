@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -30,6 +31,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -245,13 +247,15 @@ fun NpFilterMenu(
             .width(IntrinsicSize.Max)
             .widthIn(min = 184.dp, max = 300.dp),
     ) {
-        Column(modifier = Modifier.padding(6.dp)) {
+        Column(modifier = Modifier.selectableGroup().padding(6.dp)) {
             options.forEach { option ->
                 val on = option == selected
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .npClickable { onSelect(option) }
+                        // R4-17/REV-14：单选语义（selected + Role.RadioButton），
+                        // 由外层 selectableGroup 宣布"N 选 1"；视觉仍只靠字重/色/勾。
+                        .npSelectable(selected = on, role = Role.RadioButton) { onSelect(option) }
                         .clip(RoundedCornerShape(10.dp))
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -303,6 +307,8 @@ fun NpSegmented(
     val haptics = rememberNpHaptics()
     Row(
         modifier = modifier
+            // R4-17/REV-14：分段控件是"N 选 1"，组语义让读屏读成一组而不是一排按钮。
+            .selectableGroup()
             .clip(RoundedCornerShape(12.dp))
             .background(ink.fgSoft)
             .padding(4.dp),
@@ -331,7 +337,9 @@ fun NpSegmented(
                         shape = RoundedCornerShape(9.dp),
                     )
                     // M4（§7.5 `Tick`）：点已选中项没有状态变化，不该响。
-                    .npClickable {
+                    // R4-17/REV-14：单选语义（selected + Role.RadioButton）——
+                    // 视觉仍只靠白底/描边/字重表达，语义树里读得出当前档位。
+                    .npSelectable(selected = on, role = Role.RadioButton) {
                         if (!on) {
                             haptics.performHaptic(NpHaptic.Tick)
                             onSelect(option)
