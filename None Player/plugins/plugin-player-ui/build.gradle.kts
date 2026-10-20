@@ -15,6 +15,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    testOptions {
+        unitTests {
+            // R1 会话级回归：Robolectric 下构造真实 Context/AppSettings/Room 历史库，
+            // 用假引擎驱动 PlaybackSession 的会话一致性断言。
+            isIncludeAndroidResources = true
+        }
+    }
 }
 
 kotlin {
@@ -44,4 +51,8 @@ dependencies {
     ksp(project(":kernel:kernel-ksp"))
 
     testImplementation(libs.junit)
+    // R1 会话级回归：Robolectric（SDK 34）+ 协程测试 + AndroidX 测试基础
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.ext.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
 }

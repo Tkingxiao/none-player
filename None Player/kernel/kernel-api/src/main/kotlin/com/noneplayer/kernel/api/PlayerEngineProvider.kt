@@ -68,6 +68,26 @@ interface VideoPlayer {
         get() = MutableStateFlow(null)
 
     /**
+     * 引擎「已真正装载并生效」的媒体键（`sourceId:mediaId`）。
+     *
+     * REV-04：播放页落盘进度时必须核对身份——慢探测/装载窗口内引擎位置仍属于上一条
+     * 媒体，只按"当前队列下标"写历史会把 A 的进度写进 B 的键。null = 引擎没有装载
+     * 身份概念（legacy 引擎）或当前没有已生效的媒体；调用方此时退回旧行为。
+     */
+    val appliedMediaKey: String? get() = null
+
+    /**
+     * [appliedMediaKey] 对应媒体的最近已知位置（毫秒）；无身份信息时为 null。
+     *
+     * 与 [positionMs] 的区别：后者是"控制器当前位置"，在切换装载窗口内可能仍属于上一条
+     * 媒体；本值只随已生效媒体更新，切换后立即归零。
+     */
+    val appliedPositionMs: Long? get() = null
+
+    /** [appliedMediaKey] 对应媒体的总时长（毫秒）；未知/无身份信息为 0 */
+    val appliedDurationMs: Long get() = 0L
+
+    /**
      * 当前应显示的字幕 Cue（外挂与内嵌轨道的统一出口）；
      * 无字幕时为空列表。默认实现恒为空（引擎未接入字幕输出）。
      */
@@ -261,6 +281,22 @@ interface VideoPlayer {
     fun setScrubbing(active: Boolean) {}
 
     /**
+     * 与承载播放服务的连接状态（REV-10）。
+     *
+     * ExoPlayer 实现里播放器驻留后台 MediaSessionService，经 MediaController 通信；
+     * 服务被系统回收时连接会断，命令与位置轮询静默变成空操作。legacy 引擎没有独立
+     * 服务，恒为 [PlayerConnection.CONNECTED]。
+     */
+    val connection: StateFlow<PlayerConnection>
+        get() = MutableStateFlow(PlayerConnection.CONNECTED)
+
+    /**
+     * 请求重连（REV-10）：仅在 [connection] 为 DISCONNECTED/FAILED 时有意义；
+     * 实现应做有界重试并在成功/失败时更新 [connection]。不支持时为空操作。
+     */
+    fun reconnect() {}
+
+    /**
      * 等待播放器就绪（如后台播放会话建立完成）。
      * 立即就绪的实现立即返回；在调用 prepare/play 前先 await。
      */
@@ -272,6 +308,20 @@ interface VideoPlayer {
 
     /** 释放底层解码器等资源；释放后实例不可复用 */
     fun release()
+}
+
+/**
+ * 播放器与承载服务之间的连接状态（REV-10）。
+ *
+ * 断连不是播放错误（不归 [PlaybackState.Error]）：服务被系统回收后可以重连恢复，
+ * UI 应显示"已断开/重连中"并提供重试，而不是"无法播放"。
+ */
+enum class PlayerConnection {
+    CONNECTING,
+    CONNECTED,
+    DISCONNECTED,
+    RECONNECTING,
+    FAILED,
 }
 
 /**

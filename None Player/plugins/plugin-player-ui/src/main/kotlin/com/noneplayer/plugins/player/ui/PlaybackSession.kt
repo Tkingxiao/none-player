@@ -1,6 +1,7 @@
 package com.noneplayer.plugins.player.ui
 
 import android.content.Context
+import android.util.Log
 import androidx.compose.runtime.Immutable
 import androidx.core.net.toUri
 import androidx.lifecycle.Lifecycle
@@ -19,6 +20,7 @@ import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.PlaybackState
+import com.noneplayer.kernel.api.PlayerConnection
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.VideoPlayerFactory
 import kotlinx.coroutines.CancellationException
@@ -366,6 +368,21 @@ class PlaybackSession(
     val index: StateFlow<Int> = _index.asStateFlow()
 
     /**
+     * 装载代际（REV-04）：每次"会话里即将不再是当前这条媒体"的动作**之前**自增——
+     * 换队列/换下标（[open]、[selectQueueIndex]）、清理会话（[stop]）。
+     *
+     * 用途：给断点快照打标记，日志里能看出"这一条进度属于哪一代"，测试也能断言
+     * "这个窗口里确实发生过换代"。**它不是写盘门**——是否落盘由引擎回报的已生效
+     * 身份（`VideoPlayer.appliedMediaKey`）判定；拿代际当门会在"下标已变、引擎还没切"
+     * 的窗口里把合法落点一并丢掉（引擎切集是异步的，代际和身份不同步）。
+     */
+    @Volatile
+    private var loadGeneration: Long = 0L
+
+    /** 当前装载代际（测试/诊断用；生产逻辑内部只读 [loadGeneration]） */
+    internal val loadGenerationNow: Long get() = loadGeneration
+
+    /**
      * 会话是否**真的开始播过**——"有当前项"与"这是一个播放会话"的区别。
      *
      * 竖屏播放页的**未播放态**（路由 `play=0`）也会把媒体装载进会话：`queue`/`index`
@@ -451,6 +468,35 @@ class PlaybackSession(
     val player: VideoPlayer? get() = _player.value
 
     /**
+     * 与**承载当前引擎的播放服务**的连接状态（REV-10）。
+     *
+     * 真实连接态由引擎维护（media3 `MediaController` 的 connected/disconnected），
+     * 会话只做透传；换代时经 `flatMapLatest` 自动改订阅新引擎——不能只订阅一次，
+     * 否则旧引擎 release 时抛出的 DISCONNECTED 会把新会话永久染成"断开"。
+     *
+     * 无引擎（还没装载过任何媒体）按 [PlayerConnection.CONNECTED] 处理：没有服务
+     * 可断，播放页的横幅不应在"还没开始播"时就亮起来。
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val connection: StateFlow<PlayerConnection> =
+        _player.flatMapLatest { engine ->
+            engine?.connection ?: flowOf(PlayerConnection.CONNECTED)
+        }.stateIn(scope, SharingStarted.Eagerly, PlayerConnection.CONNECTED)
+
+    /**
+     * 重连播放服务（REV-10 横幅的「重连」/「重试」按钮）。
+     *
+     * 幂等、不阻塞画面：只把重连请求转给引擎（引擎内部重新 bind `MediaController`），
+     * 结果由 [connection] 自己流回来；无引擎时是空操作。
+     */
+    fun retryConnection() {
+        val engine = _player.value ?: return
+        Log.d(TAG, "retryConnection: engine=$engineId")
+        runCatching { engine.reconnect() }
+            .onFailure { Log.d(TAG, "retryConnection failed: ${it.message}") }
+    }
+
+    /**
      * 迷你条数据源：队列 + 下标 + 引擎实时状态三者组合。
      *
      * 位置轮询本身由引擎每 250ms 写一次 StateFlow（见 `ExoVideoPlayer.pollPosition`），
@@ -525,28 +571,37 @@ class PlaybackSession(
         // 目标 mimeType 归哪个引擎：同引擎（哪怕容器不同）直接复用既有实例
         val targetEngineId = runCatching { factory.engineIdFor(mimeType) }.getOrNull()
         if (existing != null && targetEngineId != null && targetEngineId == engineId) {
+            // 复用时顺手清掉上一次失败的原因：引擎其实好着，面板不该继续挂着
+            _engineError.value = null
             return existing
         }
-        existing?.release()
+        // A23：**先建新、再放旧**。反过来的话 create 失败时旧引擎已经被释放，
+        // 而它可能还在正常播放（从"播视频"切到需要另一个引擎的条目时），
+        // 表现为黑屏/无声，用户手里那条正在播的内容被一次失败的切换带走。
         val created = runCatching { factory.create(context, mimeType) }
             .onFailure { _engineError.value = it.message ?: it.javaClass.simpleName }
             .getOrNull()
         if (created == null) {
-            // 失败收口：旧引擎在上面已经 release，实例字段不能继续指向它——否则
-            // nowPlaying 会继续订阅一个已释放的控制器（位置/状态冻在最后一帧、
-            // 迷你条像卡住），player getter 也会把死对象交给 UI。会话回到"无引擎"干净态。
-            _player.value = null
-            engineId = null
-            _queue.value = emptyList()
-            _index.value = -1
-            _playbackStarted.value = false
+            // 失败收口：旧引擎（若有）**保持原样可用**，队列/下标不动——不能把 _player
+            // 置空，否则 nowPlaying 丢掉在播条目、迷你条凭空消失，而旧控制器其实还活着。
+            // 只有本来就没有引擎时才回到"无引擎"干净态。
+            if (existing == null) {
+                _player.value = null
+                engineId = null
+                _queue.value = emptyList()
+                _index.value = -1
+                _playbackStarted.value = false
+            }
             return null
         }
+        // 新引擎已就绪，此时才换代：先切会话侧引用，再释放旧实例——旧引擎 release
+        // 期间的最后几次状态回流因此不会落到新会话上（连接状态、下标回调都会漏过）。
         engineId = targetEngineId
         _engineError.value = null
         _player.value = created
         created.setSubtitleOffsetMs(_subtitleOffsetMs.value)
         created.setVideoTracksEnabled(!_audioOnly.value)
+        existing?.release()
         return created
     }
 
@@ -569,6 +624,13 @@ class PlaybackSession(
         audioOnlyMode: Boolean? = null,
         startPlaying: Boolean = true,
     ) {
+        // REV-04：换媒体前先把**上一条**的断点落盘。页退时的 persist 只保得住
+        // "当时那一条"：从迷你条/详情页直接打开另一条时，旧媒体会丢掉最后一段进度
+        // （周期落点最多差 5s）。必须放在 acquire/替换队列之前——此刻 _queue/_index
+        // 与引擎都还指向旧媒体，身份核对才会通过。
+        persistPosition()
+        // 换代标记：此后队列/下标不再代表"引擎里正在放的那条"
+        loadGeneration++
         // 无引擎：会话保持干净（不动队列/下标），原因已写入 engineError 由 UI 呈现
         val player = acquire(item.mimeType) ?: return
         val (list, index) = resolveQueueStart(queueOfFolder, item)
@@ -585,11 +647,21 @@ class PlaybackSession(
     /** 切换播放/暂停（迷你条 ▶/⏸ 直接控制会话） */
     fun toggle() {
         val p = _player.value ?: return
-        if (p.state.value == PlaybackState.Playing) p.pause() else p.play()
+        if (p.state.value == PlaybackState.Playing) p.pause() else play()
     }
 
+    /**
+     * 播放（A23）。**停在 [PlaybackState.Ended] 上时先归零再播**：media3 在 ENDED
+     * 状态下 `play()` 是空操作（播放位置已在末尾、没有"下一项"可推进），用户按
+     * 播放键毫无反应，只能自己去拖进度条。
+     *
+     * "同媒体重进播放页"那条路径由 `SessionBootstrap` 单独兜底（那里还要区分
+     * 断点续播与从头播），两条都保留、互不冲突：这里只管用户主动按播放键。
+     */
     fun play() {
-        _player.value?.play()
+        val p = _player.value ?: return
+        if (p.state.value == PlaybackState.Ended) p.seekTo(0L)
+        p.play()
     }
 
     fun pause() {
@@ -623,6 +695,9 @@ class PlaybackSession(
         // 切集前把**离开的那一项**的进度落盘——否则从选集/底栏跳集会把断点丢掉
         // （页退落盘只记得住当前项）。
         persistPosition()
+        // 换代标记（REV-04）：从这一行起"当前下标"不再等于"引擎里正在放的那条"，
+        // 直到引擎回报的 appliedMediaKey 跟上为止，落盘都会因身份不符被跳过。
+        loadGeneration++
         if (_index.value != index) {
             _index.value = index
             restoreAudioMode(_queue.value[index])
@@ -652,6 +727,8 @@ class PlaybackSession(
         // 清队列前先把当前项断点落盘：周期落点最多差 5s，显式关闭不该丢掉这一截
         // （persistPosition 自行短路，队列已空/引擎未就绪时是空操作）。
         persistPosition()
+        // 清理前换代（REV-04）：此后"当前项"已不存在，任何迟到的落点都必须先过身份核对
+        loadGeneration++
         p?.seekTo(0L)
         // 清底层队列：引擎不支持时为空操作，这里仍继续清会话侧状态。
         p?.clearQueue()
@@ -669,20 +746,58 @@ class PlaybackSession(
      *
      * 门槛与"看完"语义收在 [HistoryRepository.shouldPersist]（E12：<10s 且未完看不写）——
      * 此前页面侧的门槛是 1s，切集瞬间的 0 附近位置会把「继续观看」污染成 0:00。
+     *
+     * REV-04：**落盘前先核对身份**。会话下标是引擎异步回写的（`observeEngineIndex`），
+     * 在"引擎已切集、_index 还没跟上"（或反过来）的窗口里，用"当前项 + 引擎位置"落盘
+     * 会把 A 的进度写进 B 的历史键，表现为点开 B 直接跳到 A 看到的位置。判定与取值
+     * 全部收在纯函数 [resolvePersistSnapshot]（可单测），这里只负责日志与写库。
      */
     fun persistPosition() {
-        val item = _queue.value.getOrNull(_index.value) ?: return
+        // 目标 = 会话**当前下标**对应的条目；引擎里真正生效的是哪条，由 appliedMediaKey 核对
+        val target = _queue.value.getOrNull(_index.value) ?: return
         val p = _player.value ?: return
-        val position = p.positionMs.value
-        val duration = p.durationMs.value
-        if (item.id.isEmpty()) return
-        if (!HistoryRepository.shouldPersist(position, duration)) return
+        if (target.id.isEmpty()) return
+        val generation = loadGeneration
+        val snapshot = resolvePersistSnapshot(
+            target = target,
+            appliedMediaKey = p.appliedMediaKey,
+            appliedPositionMs = p.appliedPositionMs,
+            appliedDurationMs = p.appliedDurationMs,
+            controllerPositionMs = p.positionMs.value,
+            controllerDurationMs = p.durationMs.value,
+            generation = generation,
+        )
+        if (snapshot == null) {
+            // 身份不符：引擎里生效的还不是这条（切集/换媒体的异步窗口）。宁可这次不写，
+            // 等下一次落点——写错键的代价是"点开另一集直接跳到别的位置"，比丢 5s 大得多。
+            Log.d(
+                TAG,
+                "persistPosition skipped: identity mismatch target=${keyOf(target)} " +
+                    "applied=${p.appliedMediaKey} gen=$generation",
+            )
+            return
+        }
+        if (!HistoryRepository.shouldPersist(snapshot.positionMs, snapshot.durationMs)) return
+        Log.d(
+            TAG,
+            "persistPosition: ${snapshot.mediaKey} pos=${snapshot.positionMs} " +
+                "dur=${snapshot.durationMs} gen=${snapshot.generation}",
+        )
         scope.launch {
-            withContext(Dispatchers.IO) { history.record(item, positionMs = position, durationMs = duration) }
+            withContext(Dispatchers.IO) {
+                history.record(
+                    target,
+                    positionMs = snapshot.positionMs,
+                    durationMs = snapshot.durationMs,
+                )
+            }
         }
     }
 
     private companion object {
+        /** Logcat 前缀（会话级诊断：断点落盘、引擎换代、连接状态） */
+        const val TAG = "PlaybackSession"
+
         /** §8.3：播放中每 5s 落一次断点 */
         const val PERIODIC_PERSIST_MS = 5_000L
     }

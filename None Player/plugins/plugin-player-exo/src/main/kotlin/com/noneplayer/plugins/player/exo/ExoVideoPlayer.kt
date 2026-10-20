@@ -40,6 +40,7 @@ import com.noneplayer.kernel.api.NpChapter
 import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
+import com.noneplayer.kernel.api.PlayerConnection
 import com.noneplayer.kernel.api.SubtitleAlignment
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.NpLoopMode
@@ -61,8 +62,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
-import kotlin.math.abs
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 /**
  * ExoPlayer 播放器实现——基于 [MediaController] 与后台 [PlaybackService] 会话。
@@ -83,6 +87,27 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private val _durationMs = MutableStateFlow(0L)
     override val durationMs: StateFlow<Long> = _durationMs.asStateFlow()
+
+    // REV-04：引擎**已真正生效**媒体的身份与进度（与上面的"控制器当前值"分开）。
+    // 探测/装载窗口内 controller 的位置/时长仍属于上一条媒体，UI 写历史/进度只能
+    // 用这一组：切换媒体后位置立即归零、时长归零，等新媒体的轮询再填。
+    // 契约里是普通属性（调用方在写进度时读一次，不需要订阅）。
+    private val _appliedMediaKey = MutableStateFlow<String?>(null)
+    override val appliedMediaKey: String?
+        get() = _appliedMediaKey.value
+
+    private val _appliedPositionMs = MutableStateFlow<Long?>(null)
+    override val appliedPositionMs: Long?
+        get() = _appliedPositionMs.value
+
+    private val _appliedDurationMs = MutableStateFlow(0L)
+    override val appliedDurationMs: Long
+        get() = _appliedDurationMs.value
+
+    // REV-10：会话连接状态。断连不是播放错误（不归 PlaybackState.Error）：
+    // 服务被回收后可以重连恢复，UI 应显示"已断开/重连中"并提供重试。
+    private val _connection = MutableStateFlow(PlayerConnection.CONNECTING)
+    override val connection: StateFlow<PlayerConnection> = _connection.asStateFlow()
 
     // S5 缓冲段可视化：与 position 同一轮询节拍读取（MediaController.bufferedPosition）
     private val _bufferedPositionMs = MutableStateFlow(0L)
@@ -128,8 +153,63 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private val _currentIndex = MutableStateFlow(-1)
     override val currentIndex: StateFlow<Int> = _currentIndex.asStateFlow()
 
-    private val connected = CompletableDeferred<MediaController>()
+    /**
+     * 每次连接尝试（首次/重连）都会重新武装的"就绪"信号。
+     *
+     * 旧实现是一次性 `CompletableDeferred`：断连后它早已完成，[awaitReady] 立即
+     * 返回成功，装载链以为会话可用、继续 setQueue/play，全部静默空转（REV-10 的
+     * "假成功"）。现在断连即换一条新的 deferred，只有重连成功才完成；重试耗尽以
+     * [PlayerConnectionUnavailableException] 快速失败。
+     */
+    private var connectDeferred = CompletableDeferred<MediaController>()
+
     private var controller: MediaController? = null
+
+    /** 只有真正连着会话的控制器才能下发命令/读状态（断连后 media3 静默忽略一切） */
+    private val activeController: MediaController?
+        get() = controller?.takeIf { it.isConnected }
+
+    /** REV-10：连接状态机（纯逻辑，见 [PlayerConnectionTracker]） */
+    private val connectionTracker = PlayerConnectionTracker()
+
+    /** 断连期间保留的队列/下标/位置意图：重连成功后按它恢复 setQueue（REV-10） */
+    private var pendingSessionRestore = false
+    private var restorePositionMs = 0L
+
+    private var pollJob: Job? = null
+    private var reconnectJob: Job? = null
+
+    /** 最近一次 playWhenReady 变化原因：media3 没有 getter，只能在回调里缓存（A23） */
+    private var playWhenReadyChangeReason = Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST
+
+    /**
+     * REV-11：媒体尚未真正生效时到达的 seek（探测/装载窗口内的拖动）。
+     * 带目标媒体身份：只有落到同一条媒体上才消费/清理，见 [PendingSeek]。
+     */
+    private var pendingSeek: PendingSeek? = null
+
+    /** 正在装载的目标媒体身份（探测窗口内 seekTo 的归属；装载落地后以 appliedMediaKey 为准） */
+    private var loadingTargetKey: String? = null
+
+    /** 已生效媒体的 media3 mediaId（pollPosition 据此判断"控制器当前条目是不是已生效媒体"） */
+    private var appliedMediaId: String = ""
+
+    /** REV-09：当前章节归属键（媒体身份优先，退回 uri）；切到不同键时清空章节 */
+    private var chaptersKey: String? = null
+
+    /**
+     * REV-10：binder 断开的唯一可靠信号。
+     *
+     * media3 的 `MediaController.Listener` 只能在 Builder 上挂（控制器没有
+     * `addListener(MediaController.Listener)` 重载）：服务被回收时 media3 会
+     * **自动 release 旧控制器**并回调这里，旧实例不可复用，重连必须新建。
+     */
+    private val controllerListener = object : MediaController.Listener {
+        override fun onDisconnected(controller: MediaController) {
+            handleDisconnected(controller)
+        }
+    }
+
     private var attachedDisplay: Any? = null
     private var refreshPausedFrameOnSurface = false
     private var currentMediaUri: String? = null
@@ -159,7 +239,6 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     // E39/E41：探测期间的挂起操作与轨道信息
     private var prepareJob: Job? = null
-    private var pendingSeekMs: Long? = null
 
     /**
      * 自动连播下一集（设置页开关，L1）。连接建立前先记在这里，连上后补发——
@@ -247,194 +326,452 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     }
 
     init {
+        // 首次连接：CONNECTING → CONNECTED（失败 → FAILED + Error 终态）
+        scope.launch { connectInitial() }
+    }
+
+    /**
+     * 建一条新连接并等它连上（首次连接与重连共用）。
+     *
+     * 断连后旧控制器已被 media3 自动释放，**不可复用**——重连必须重新
+     * `buildAsync()`。返回 null 表示本次尝试失败/超时，由调用方决定是否重试。
+     */
+    private suspend fun connectOnce(timeoutMs: Long): MediaController? {
         val future = MediaController.Builder(
-            context,
-            SessionToken(context, ComponentName(context, PlaybackService::class.java)),
-        ).buildAsync()
-        future.addListener(
-            {
-                try {
-                    val c = future.get()
-                    if (released) {
-                        // release() 已先执行：这个连接不再被任何人持有，直接释放。
-                        // connected 必须一并了结——否则仍挂在 awaitReady() 上的装载链
-                        // 会一直挂起到它的作用域被取消（表现为"进页一直转圈"）。
-                        c.release()
-                        connected.completeExceptionally(
-                            CancellationException("播放器已释放，会话连接不再补发"),
-                        )
-                        return@addListener
-                    }
-                    controller = c
-                    c.addListener(object : Player.Listener {
-                        // 首帧不在这里：media3 不把 onRenderedFirstFrame 转发给
-                        // MediaController，控制器侧只能看到 STATE_READY。出画时刻记在会话侧
-                        // （PlaybackService 的播放器监听），同一进程内时间戳可直接对齐。
-                        override fun onPlaybackStateChanged(playbackState: Int) {
-                            if (terminalFailure) return
-                            if (playbackState == Player.STATE_READY) {
-                                NpPerf.mark("READY")
-                                // 就绪才预热邻域探测：这一刻之前磁盘都在回填当前集的缓冲
-                                prefetchProbeWindow()
-                            }
-                            _state.value = npEngineStateOf(playbackState, c.playWhenReady)
+            appContext,
+            SessionToken(appContext, ComponentName(appContext, PlaybackService::class.java)),
+        ).setListener(controllerListener).buildAsync()
+        return try {
+            withTimeoutOrNull(timeoutMs) {
+                suspendCancellableCoroutine { continuation ->
+                    future.addListener({
+                        val result = runCatching { future.get() }
+                        if (!continuation.isActive) {
+                            // 已超时/取消：这条连接没人要了，释放掉，别泄漏 binder
+                            result.getOrNull()?.release()
+                            return@addListener
                         }
-
-                        override fun onVideoSizeChanged(videoSize: VideoSize) {
-                            applyVideoSize(videoSize)
-                        }
-
-                        override fun onSurfaceSizeChanged(width: Int, height: Int) {
-                            if (!refreshPausedFrameOnSurface || width <= 0 || height <= 0) return
-                            refreshPausedFrameOnSurface = false
-                            // A paused decoder may have already released its only frame to the old surface.
-                            if (attachedDisplay != null && videoTracksEnabled &&
-                                c.playbackState == Player.STATE_READY && !c.playWhenReady
-                            ) c.seekTo(c.currentPosition)
-                        }
-
-                        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
-                            _speed.value = playbackParameters.speed
-                        }
-
-                        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                            if (loadPending) return
-                            val index = c.currentMediaItemIndex
-                            // MediaController's Binder snapshot may omit LocalConfiguration.
-                            // Keep the submitted item's URI/subtitles, and validate its identity.
-                            val localItem = appliedItems.getOrNull(index)
-                                ?.takeIf { it.mediaId == mediaItem?.mediaId }
-                            if (mediaItem != null && localItem == null) return
-                            clearCues()
-                            _currentUri.value = localItem?.localConfiguration?.uri?.toString()
-                            currentMediaUri = _currentUri.value
-                            appliedUri = currentMediaUri
-                            currentMediaId = mediaItem?.mediaId.orEmpty()
-                            mountedSubtitle = localItem?.localConfiguration?.subtitleConfigurations
-                                ?.firstOrNull()
-                                ?.let { config ->
-                                    config.uri?.toString()?.let {
-                                        SubtitleMount(it, npSubtitleFormatOfMime(config.mimeType))
-                                    }
-                                }
-                            subtitle = mountedSubtitle
-                            // 换集自动挂上的外挂字幕同样要顶掉内嵌轨的平票（E144）
-                            pendingExternalSubtitleSelect = mountedSubtitle != null
-                            // 队列下标跟随会话（自动连播推进到下一集时也要更新，
-                            // 否则迷你条/选集面板会一直停在旧下标）
-                            // Clearing the engine after a failed probe is not a queue transition.
-                            if (mediaItem != null && index in _queue.value.indices &&
-                                index != _currentIndex.value
-                            ) _currentIndex.value = index
-                        }
-
-                        override fun onIsPlayingChanged(isPlaying: Boolean) {
-                            if (terminalFailure) return
-                            if (isPlaying) {
-                                _state.value = PlaybackState.Playing
-                            } else if (_state.value == PlaybackState.Playing) {
-                                _state.value = PlaybackState.Paused
-                            }
-                        }
-
-                        override fun onPlayerError(error: PlaybackException) {
-                            // 只有"报错的就是刚探测过的那一条"才配得上探测摘要里的容器/编码名；
-                            // 队列快路径切集没有重新探测，名称属于上一条——复用会把
-                            // "切到 B 失败"说成"A 的编码不支持"（曾把 H264 失败显示成 WMV2）。
-                            val probedThis = probedUri != null && probedUri == currentMediaUri
-                            val failure = error.toPlaybackFailure(
-                                probedContainer.takeIf { probedThis },
-                                probedVideoCodec.takeIf { probedThis },
-                                probedAudioCodec.takeIf { probedThis },
-                            )
-                            terminalFailure = true
-                            _state.value = PlaybackState.Error(failure.reason, failure)
-                        }
-
-                        // E1：字幕 Cue 出口——外挂与内嵌轨道统一从这里流向 UI 字幕浮层
-                        override fun onCues(cueGroup: CueGroup) {
-                            if (loadPending) return
-                            val mapped = cueGroup.cues.map { it.toKernelCue() }
-                            pushCues(controller?.currentPosition?.coerceAtLeast(0) ?: 0L, mapped)
-                        }
-
-                        override fun onPositionDiscontinuity(
-                            oldPosition: Player.PositionInfo,
-                            newPosition: Player.PositionInfo,
-                            reason: Int,
-                        ) {
-                            // 同一条目里 seek 后，文本渲染器可能再次吐出与上次相同的 Cue。
-                            // 会话控制器会丢掉重复回调；这里若清空，晚挂字幕就一直空白。
-                            // 换条目的清空仍由 onMediaItemTransition 负责。
-                            if (oldPosition.mediaItemIndex != newPosition.mediaItemIndex) clearCues()
-                        }
-
-                        // 批次 3：内嵌轨道枚举（音轨/字幕面板的数据源）
-                        override fun onTracksChanged(tracks: Tracks) {
-                            publishTracks(tracks)
-                            publishChapters(tracks, null)
-                            // 外挂轨出现的那一刻把它选中（见 pendingExternalSubtitleSelect）
-                            applyPendingExternalSubtitleSelection(tracks)
-                        }
-
-                        // 章节经 metadata 通道到达（§12.5：MP4/Matroska 章节元数据）
-                        @OptIn(UnstableApi::class)
-                        override fun onMetadata(metadata: Metadata) {
-                            publishChapters(controller?.currentTracks ?: Tracks.EMPTY, metadata)
-                        }
-                    })
-                    // 会话建立后补挂显示表面，并同步会话侧既有状态（速度/当前媒体）
-                    attachSurfaceTo(c)
-                    _speed.value = c.playbackParameters.speed
-                    _currentUri.value = c.currentMediaItem?.localConfiguration?.uri?.toString()
-                    // 会话已在播媒体时，新控制器不会再收到 onVideoSizeChanged：
-                    // 主动同步一次画面比例，否则重进播放页"横屏视频自动全屏"因比例未知而失效
-                    c.videoSize.takeIf { it.width > 0 && it.height > 0 }?.let { applyVideoSize(it) }
-                    // 同理：重进时轨道/章节也不会再回调，主动同步一次
-                    publishTracks(c.currentTracks)
-                    publishChapters(c.currentTracks, null)
-                    // 会话侧默认"播完自动推进"：连接建立后补发一次当前偏好，
-                    // 否则"关闭自动连播"在重建控制器后（换 mime / 重进）会失效
-                    sendAutoplayFlag()
-                    setTextTracksEnabled(textTracksEnabled)
-                    setVideoTracksEnabled(videoTracksEnabled)
-                    connected.complete(c)
-                    // E144-1：PiP 动作按钮走同进程广播 → 桥 → 本控制器
-                    NpMediaActionBridge.register(this) { action -> dispatchMediaAction(c, action) }
-                    scope.launch { pollPosition(c) }
-                } catch (t: Throwable) {
-                    _state.value = PlaybackState.Error(t.message ?: "无法建立播放会话")
-                    connected.completeExceptionally(t)
+                        result.onSuccess { continuation.resume(it) }
+                            .onFailure { continuation.resumeWithException(it) }
+                    }, ContextCompat.getMainExecutor(appContext))
+                    continuation.invokeOnCancellation { MediaController.releaseFuture(future) }
                 }
-            },
-            ContextCompat.getMainExecutor(context),
-        )
+            }
+        } catch (t: Throwable) {
+            if (t is CancellationException) throw t
+            null
+        }
+    }
+
+    /** 首次连接：成功后接管控制器；失败则落 Error 终态并让 [awaitReady] 快速失败 */
+    private suspend fun connectInitial() {
+        _connection.value = PlayerConnection.CONNECTING
+        val c = connectOnce(INITIAL_CONNECT_TIMEOUT_MS)
+        if (c == null) {
+            if (released) return
+            connectionTracker.onInitialFailed()
+            _connection.value = PlayerConnection.FAILED
+            _state.value = PlaybackState.Error("无法建立播放会话")
+            connectDeferred.completeExceptionally(
+                PlayerConnectionUnavailableException("无法建立播放会话"),
+            )
+            return
+        }
+        if (released) {
+            // release() 已先执行：这个连接不再被任何人持有，直接释放。
+            // connectDeferred 必须一并了结——否则仍挂在 awaitReady() 上的装载链
+            // 会一直挂起到它的作用域被取消（表现为"进页一直转圈"）。
+            c.release()
+            connectDeferred.completeExceptionally(
+                CancellationException("播放器已释放，会话连接不再补发"),
+            )
+            return
+        }
+        connectionTracker.onConnected()
+        _connection.value = PlayerConnection.CONNECTED
+        installController(c, restoring = false)
+    }
+
+    /**
+     * 接管一条已连上的控制器：挂监听、同步会话侧既有状态、启动位置轮询。
+     *
+     * [restoring] = true 表示这是断连后的重连：会话侧可能已经换了进程、回到默认值，
+     * 本实例记住的偏好（倍速/循环）要重新下发；初次连接则以会话为准（后台可能正
+     * 在播，读回来而不是覆盖）。
+     */
+    private fun installController(c: MediaController, restoring: Boolean) {
+        controller = c
+        c.addListener(playerListener(c))
+        if (restoring) {
+            runCatching { c.playbackParameters = PlaybackParameters(_speed.value) }
+            applyLoopModeTo(c, _loopMode.value)
+        } else {
+            _speed.value = c.playbackParameters.speed
+        }
+        // 会话建立后补挂显示表面，并同步会话侧既有状态（速度/当前媒体）
+        attachSurfaceTo(c)
+        _currentUri.value = c.currentMediaItem?.localConfiguration?.uri?.toString()
+        // 会话已在播媒体时，新控制器不会再收到 onVideoSizeChanged：
+        // 主动同步一次画面比例，否则重进播放页"横屏视频自动全屏"因比例未知而失效
+        c.videoSize.takeIf { it.width > 0 && it.height > 0 }?.let { applyVideoSize(it) }
+        // 同理：重进时轨道/章节也不会再回调，主动同步一次
+        publishTracks(c.currentTracks)
+        publishChapters(c.currentTracks, null)
+        // 会话侧默认"播完自动推进"：连接建立后补发一次当前偏好，
+        // 否则"关闭自动连播"在重建控制器后（换 mime / 重进）会失效
+        sendAutoplayFlag()
+        setTextTracksEnabled(textTracksEnabled)
+        setVideoTracksEnabled(videoTracksEnabled)
+        // E144-1：PiP 动作按钮走同进程广播 → 桥 → 本控制器
+        NpMediaActionBridge.register(this) { action -> dispatchMediaAction(c, action) }
+        pollJob?.cancel()
+        pollJob = scope.launch { pollPosition(c) }
+        connectDeferred.complete(c)
+    }
+
+    /**
+     * 会话回调（每次连接新建一个实例：闭包绑定当次控制器 [c]）。
+     */
+    private fun playerListener(c: MediaController) = object : Player.Listener {
+        // 首帧不在这里：media3 不把 onRenderedFirstFrame 转发给
+        // MediaController，控制器侧只能看到 STATE_READY。出画时刻记在会话侧
+        // （PlaybackService 的播放器监听），同一进程内时间戳可直接对齐。
+        override fun onPlaybackStateChanged(playbackState: Int) {
+            if (terminalFailure) return
+            if (playbackState == Player.STATE_READY) {
+                NpPerf.mark("READY")
+                // 就绪才预热邻域探测：这一刻之前磁盘都在回填当前集的缓冲
+                prefetchProbeWindow()
+            }
+            // A23：末帧暂停（READY + !playWhenReady + END_OF_MEDIA_ITEM）要译成
+            // Ended。同一批回调里 onPlayWhenReadyChanged 可能后到（media3 先派发
+            // 状态、再派发 playWhenReady），这里先用已缓存的原因算一次，原因更新
+            // 后由 onPlayWhenReadyChanged 再算一次。
+            _state.value = npEngineStateOf(playbackState, c.playWhenReady, playWhenReadyChangeReason)
+        }
+
+        /**
+         * A23：缓存 playWhenReady 变化原因（media3 没有 getter，只能在这里记），
+         * 并用它重算状态——关闭自动连播时会话侧 `setPauseAtEndOfMediaItems(true)`
+         * 让末帧停在 READY + !playWhenReady，原因正是 END_OF_MEDIA_ITEM。
+         */
+        override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
+            playWhenReadyChangeReason = reason
+            if (terminalFailure) return
+            _state.value = npEngineStateOf(c.playbackState, playWhenReady, reason)
+        }
+
+        override fun onVideoSizeChanged(videoSize: VideoSize) {
+            applyVideoSize(videoSize)
+        }
+
+        override fun onSurfaceSizeChanged(width: Int, height: Int) {
+            if (!refreshPausedFrameOnSurface || width <= 0 || height <= 0) return
+            refreshPausedFrameOnSurface = false
+            // A paused decoder may have already released its only frame to the old surface.
+            if (attachedDisplay != null && videoTracksEnabled &&
+                c.playbackState == Player.STATE_READY && !c.playWhenReady
+            ) c.seekTo(c.currentPosition)
+        }
+
+        override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+            _speed.value = playbackParameters.speed
+        }
+
+        override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            if (loadPending) return
+            val index = c.currentMediaItemIndex
+            // MediaController's Binder snapshot may omit LocalConfiguration.
+            // Keep the submitted item's URI/subtitles, and validate its identity.
+            val localItem = appliedItems.getOrNull(index)
+                ?.takeIf { it.mediaId == mediaItem?.mediaId }
+            if (mediaItem != null && localItem == null) return
+            clearCues()
+            _currentUri.value = localItem?.localConfiguration?.uri?.toString()
+            currentMediaUri = _currentUri.value
+            appliedUri = currentMediaUri
+            currentMediaId = mediaItem?.mediaId.orEmpty()
+            mountedSubtitle = localItem?.localConfiguration?.subtitleConfigurations
+                ?.firstOrNull()
+                ?.let { config ->
+                    config.uri?.toString()?.let {
+                        SubtitleMount(it, npSubtitleFormatOfMime(config.mimeType))
+                    }
+                }
+            subtitle = mountedSubtitle
+            // 换集自动挂上的外挂字幕同样要顶掉内嵌轨的平票（E144）
+            pendingExternalSubtitleSelect = mountedSubtitle != null
+            // 队列下标跟随会话（自动连播推进到下一集时也要更新，
+            // 否则迷你条/选集面板会一直停在旧下标）
+            // Clearing the engine after a failed probe is not a queue transition.
+            if (mediaItem != null && index in _queue.value.indices &&
+                index != _currentIndex.value
+            ) _currentIndex.value = index
+            // REV-04/REV-09：自动连播/循环/换集后 applied 身份与章节归属切到新条目、
+            // 位置归零；同一条目的"重设"（字幕重建后 setMediaItems）保持已记录的
+            // 续播位置——身份没变就不该归零。
+            val core = _queue.value.getOrNull(index)
+            val newKey = core
+                ?.takeIf { it.id.isNotEmpty() && it.id == mediaItem?.mediaId }
+                ?.let { mediaKeyOf(it.sourceId, it.id) }
+            val newId = mediaItem?.mediaId.orEmpty()
+            val restarted = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
+            if (restarted || newKey != _appliedMediaKey.value || newId != appliedMediaId) {
+                setAppliedMedia(newKey, newId, 0L, resetDuration = restarted)
+            }
+        }
+
+        override fun onIsPlayingChanged(isPlaying: Boolean) {
+            if (terminalFailure) return
+            if (isPlaying) {
+                _state.value = PlaybackState.Playing
+            } else if (_state.value == PlaybackState.Playing) {
+                _state.value = PlaybackState.Paused
+            }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            // 只有"报错的就是刚探测过的那一条"才配得上探测摘要里的容器/编码名；
+            // 队列快路径切集没有重新探测，名称属于上一条——复用会把
+            // "切到 B 失败"说成"A 的编码不支持"（曾把 H264 失败显示成 WMV2）。
+            val probedThis = probedUri != null && probedUri == currentMediaUri
+            val failure = error.toPlaybackFailure(
+                probedContainer.takeIf { probedThis },
+                probedVideoCodec.takeIf { probedThis },
+                probedAudioCodec.takeIf { probedThis },
+            )
+            terminalFailure = true
+            _state.value = PlaybackState.Error(failure.reason, failure)
+        }
+
+        // E1：字幕 Cue 出口——外挂与内嵌轨道统一从这里流向 UI 字幕浮层
+        override fun onCues(cueGroup: CueGroup) {
+            if (loadPending) return
+            val mapped = cueGroup.cues.map { it.toKernelCue() }
+            pushCues(c.currentPosition.coerceAtLeast(0), mapped)
+        }
+
+        override fun onPositionDiscontinuity(
+            oldPosition: Player.PositionInfo,
+            newPosition: Player.PositionInfo,
+            reason: Int,
+        ) {
+            // 同一条目里 seek 后，文本渲染器可能再次吐出与上次相同的 Cue。
+            // 会话控制器会丢掉重复回调；这里若清空，晚挂字幕就一直空白。
+            // 换条目的清空仍由 onMediaItemTransition 负责。
+            if (oldPosition.mediaItemIndex != newPosition.mediaItemIndex) clearCues()
+        }
+
+        // 批次 3：内嵌轨道枚举（音轨/字幕面板的数据源）
+        override fun onTracksChanged(tracks: Tracks) {
+            publishTracks(tracks)
+            publishChapters(tracks, null)
+            // 外挂轨出现的那一刻把它选中（见 pendingExternalSubtitleSelect）
+            applyPendingExternalSubtitleSelection(tracks)
+        }
+
+        // 章节经 metadata 通道到达（§12.5：MP4/Matroska 章节元数据）
+        @OptIn(UnstableApi::class)
+        override fun onMetadata(metadata: Metadata) {
+            publishChapters(c.currentTracks, metadata)
+        }
+    }
+
+    /**
+     * REV-10：会话断开（服务被回收/进程崩溃/连接被释放）。
+     *
+     * 旧控制器已被 media3 自动释放，不能再发命令：清掉引用、停掉位置轮询、把连接
+     * 状态交给 UI；**保留**队列/下标/起播意图与最后位置，供 [reconnect] 恢复。
+     * 断连不是播放错误：不改 `_state` 为 Error（UI 依据 [connection] 显示断开层）。
+     */
+    private fun handleDisconnected(disconnected: MediaController) {
+        if (released) return
+        // 旧连接迟到的回调（重连已经换上新控制器）不许把新连接拆掉
+        if (controller !== disconnected) return
+        controller = null
+        pollJob?.cancel()
+        pollJob = null
+        NpMediaActionBridge.unregister(this)
+        // 记下最后位置：重连后按它续播（此刻 _positionMs 还是断连前最后一次轮询值）
+        restorePositionMs = _positionMs.value.coerceAtLeast(0L)
+        // REV-10 关键：断连后必须把"恢复意图"钉住。正常播放中发生断连时没有走任何
+        // 装载路径，pendingSessionRestore 仍是 false——不置位的话重连成功后的
+        // restoreSessionState() 会直接返回，新会话里没有 setMediaItems，表现就是
+        // "重连成功但画面永远停住/不恢复播放"。用纯函数判定有无可恢复目标，与
+        // restoreSessionState 共用，避免以后又漏。
+        pendingSessionRestore = shouldRestoreAfterDisconnect(_queue.value.size, currentMediaUri)
+        // 引擎里已经没有这条媒体的会话：applied 身份作废（UI 不得再拿它写历史）
+        clearAppliedIdentity()
+        // 章节/轨道是会话侧的，断连后同样没有归属
+        chaptersKey = null
+        _chapters.value = emptyList()
+        _tracks.value = emptyList()
+        clearCues()
+        connectionTracker.onDisconnected()
+        _connection.value = PlayerConnection.DISCONNECTED
+        // 重新武装：断连后 awaitReady() 不许立即返回假成功
+        connectDeferred = CompletableDeferred()
+    }
+
+    /** 清空"已生效媒体"身份（REV-04）：断连/释放/装载失败后不得再报告旧媒体的进度 */
+    private fun clearAppliedIdentity() {
+        appliedItems = emptyList()
+        appliedUri = null
+        appliedQueueIds = emptyList()
+        appliedMediaId = ""
+        loadingTargetKey = null
+        _appliedMediaKey.value = null
+        _appliedPositionMs.value = null
+        _appliedDurationMs.value = 0L
+    }
+
+    /**
+     * 记录"引擎已真正生效"的媒体身份（REV-04）：applied* 只在这里被改写。
+     *
+     * [positionMs] 是装载落地的起播位置；时长先清 0，由 [pollPosition] 在新媒体
+     * 真正报出时长后填。章节归属键同时切到新媒体——换媒体必须清空上一集的章节
+     * （REV-09）。
+     */
+    private fun setAppliedMedia(
+        mediaKey: String?,
+        mediaId: String,
+        positionMs: Long,
+        resetDuration: Boolean = true,
+    ) {
+        val changed = mediaKey != _appliedMediaKey.value || mediaId != appliedMediaId
+        _appliedMediaKey.value = mediaKey
+        appliedMediaId = mediaId
+        // 契约：没有身份信息（无 mediaId）时 appliedPositionMs 为 null
+        _appliedPositionMs.value = if (mediaKey != null) positionMs.coerceAtLeast(0L) else null
+        if (changed || resetDuration) _appliedDurationMs.value = 0L
+        syncChaptersKey(mediaKey)
+    }
+
+    /** REV-09：媒体切换时清空上一集章节，并把章节归属键切到新媒体 */
+    private fun syncChaptersKey(mediaKey: String?) {
+        val key = ChapterIdentity.keyOf(mediaKey, currentMediaUri)
+        if (key == chaptersKey) return
+        chaptersKey = key
+        _chapters.value = emptyList()
+    }
+
+    /**
+     * REV-10：请求重连（UI 在 `connection` 为 DISCONNECTED/FAILED 时调用）。
+     *
+     * 有界重试：≤3 次，每次尝试前退避 500ms/1s/2s；并发调用只会有一次重连在跑
+     * （[PlayerConnectionTracker.beginReconnect] 去重）。成功后按断连前保留的
+     * 队列/下标/最后位置恢复装载（见 [restoreSessionState]）；重试耗尽落 FAILED，
+     * 并让等待 [awaitReady] 的装载链快速失败而不是静默空转。
+     */
+    override fun reconnect() {
+        if (released) return
+        val firstDelayMs = connectionTracker.beginReconnect() ?: return
+        _connection.value = PlayerConnection.RECONNECTING
+        connectDeferred = CompletableDeferred()
+        reconnectJob?.cancel()
+        reconnectJob = scope.launch {
+            var waitMs = firstDelayMs
+            while (isActive) {
+                delay(waitMs)
+                val c = connectOnce(RECONNECT_ATTEMPT_TIMEOUT_MS)
+                if (released) {
+                    c?.release()
+                    return@launch
+                }
+                if (c != null) {
+                    connectionTracker.onAttemptSucceeded()
+                    _connection.value = PlayerConnection.CONNECTED
+                    installController(c, restoring = true)
+                    restoreSessionState()
+                    return@launch
+                }
+                val nextDelayMs = connectionTracker.onAttemptFailed()
+                if (nextDelayMs == null) {
+                    _connection.value = PlayerConnection.FAILED
+                    connectDeferred.completeExceptionally(
+                        PlayerConnectionUnavailableException("会话重连失败（已重试 $RECONNECT_MAX_ATTEMPTS 次）"),
+                    )
+                    return@launch
+                }
+                waitMs = nextDelayMs
+            }
+        }
+    }
+
+    /**
+     * 重连成功后按断连前保留的意图恢复装载（REV-10，与断连期间 [setQueue] 的登记共用）。
+     *
+     * 有队列：按 `_queue/_currentIndex/最后位置/起播意图` 重新 setQueue（会再过一遍
+     * 起播探测，失败时得到与正常切集一致的结构化失败）；只有单媒体：按
+     * `currentMediaUri` 重新走 prepare 同款探测路径，起播位置由 pendingSeek 携带。
+     */
+    private fun restoreSessionState() {
+        if (!pendingSessionRestore) return
+        pendingSessionRestore = false
+        // 与 handleDisconnected 共用同一判定（REV-10）：没有可恢复目标就什么都不装，
+        // 避免空队列 / 空 URI 时 setQueue 空转、也避免误清 restorePositionMs。
+        if (!shouldRestoreAfterDisconnect(_queue.value.size, currentMediaUri)) return
+        val items = _queue.value
+        if (items.isNotEmpty()) {
+            val index = _currentIndex.value.takeIf { it in items.indices } ?: 0
+            // 断连期间用户可能拖过进度（seekTo 记在 pendingSeek 上）：优先用它，否则
+            // 用断连瞬间的最后位置。setQueue 内部会以同一目标键重建 pending，不会
+            // 出现"恢复位置被二次消费成 0"——startPositionMs 只在 >0 时覆盖 pending。
+            val targetKey = mediaKeyOf(items[index].sourceId, items[index].id)
+            val resumeMs = pendingSeek?.takeIf { it.mediaKey == targetKey }?.positionMs
+                ?: restorePositionMs
+            setQueue(items, index, resumeMs, loadIntentPlay)
+            return
+        }
+        val uri = currentMediaUri ?: return
+        // 单媒体路径没有 mediaId（身份键为 null），同样优先用断连期间的 seek 目标
+        val resumeMs = pendingSeek?.takeIf { it.mediaKey == null }?.positionMs ?: restorePositionMs
+        pendingSeek = nextPendingSeek(pendingSeek, resumeMs, null)
+        probeThenLoad(uri, currentMimeType, playIntent = loadIntentPlay) { applyMedia(uri) }
     }
 
     /**
      * 位置轮询：不设 isPlaying 门槛——缓冲中/暂停时也要回显 seek 结果与时长，
      * 否则进页仍在缓冲时进度条 `valueRange` 只有 1ms、暂停态 seek 不刷新。
      * 仅在值变化时写 StateFlow，避免无意义的 UI 失效。
+     *
+     * REV-04：只有控制器当前条目**就是已生效媒体**时才更新 applied*（探测/装载
+     * 窗口内 controller 的位置/时长仍属于上一条媒体，不能拿去写历史）。
+     * REV-11：挂起 seek 只在该媒体已生效、且落点收敛时才清——只判位置不判身份，
+     * 就是旧实现"切集后挂起值永远清不掉"的成因。
      */
     private suspend fun pollPosition(c: MediaController) {
         while (currentCoroutineContext().isActive) {
+            // 控制器被换掉/断连后这个轮询必须退出：旧控制器上的读数不再有意义
+            if (controller !== c || !c.isConnected) return
             val position = c.currentPosition.coerceAtLeast(0)
             if (_positionMs.value != position) _positionMs.value = position
-            // seek 落实（位置收敛到目标）后清掉挂起值：它只该服务"媒体装载完成前
-            // 到达的 seek"（E39）。不清理的话会一直留到下一次媒体项重建
-            // （切字幕等触发 applyMedia），被当成"恢复位置"用，把已播到的位置
-            // 拉回上一次 seek 的目标（位置回退）。
-            pendingSeekMs?.let { pending -> if (abs(position - pending) <= SEEK_SETTLE_MS) pendingSeekMs = null }
             val duration = c.duration
             if (duration > 0 && _durationMs.value != duration) _durationMs.value = duration
             // 缓冲前沿夹在 [0, duration]：未就绪/未知时 media3 可能给 TIME_UNSET 或超出值，
             // 直接透传会让进度条画出一段超出时长的"假缓冲"
             val buffered = c.bufferedPosition.coerceIn(0L, if (duration > 0) duration else Long.MAX_VALUE)
             if (_bufferedPositionMs.value != buffered) _bufferedPositionMs.value = buffered
+            // REV-04：applied 身份只随已生效媒体更新
+            if (isAppliedMediaCurrent(c)) {
+                if (_appliedPositionMs.value != position) _appliedPositionMs.value = position
+                if (duration > 0 && _appliedDurationMs.value != duration) _appliedDurationMs.value = duration
+                // REV-11：挂起 seek 只属于当前已生效媒体，且位置收敛到目标附近才算落实
+                if (shouldClearPendingSeekAfterPoll(pendingSeek, _appliedMediaKey.value, position, SEEK_SETTLE_MS)) {
+                    pendingSeek = null
+                }
+            }
             // 字幕偏移非零时，按位置重取对应时间窗的 Cue（窗口边界由 onCues 到达时机维护）
             if (subtitleOffsetMs != 0L) recomputeCues(position)
             delay(250)
         }
+    }
+
+    /** 控制器当前条目是不是"已生效媒体"（mediaId 是 media3 侧稳定身份） */
+    private fun isAppliedMediaCurrent(c: MediaController): Boolean {
+        if (_appliedMediaKey.value == null) return false
+        val engineMediaId = c.currentMediaItem?.mediaId ?: return false
+        return engineMediaId.isNotEmpty() && engineMediaId == appliedMediaId
     }
 
     private fun applyVideoSize(videoSize: VideoSize) {
@@ -449,8 +786,28 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             videoSize.height.toFloat()
     }
 
+    /**
+     * 等待会话就绪（REV-10）。
+     *
+     * 旧实现 `connected.await()` 的 deferred 是一次性的：断连后它早已完成，这里会
+     * 立即"成功"返回，装载链继续 setQueue/play——全部落进已释放的控制器静默空转
+     * （REV-10 的"假成功"）。现在每次连接尝试都会重新武装 deferred：
+     * - CONNECTED：立即返回；
+     * - CONNECTING/DISCONNECTED/RECONNECTING：挂到本次尝试上（断连时等待重连；
+     *   调用方应同时观察 [connection]，DISCONNECTED 时提示用户重试）；
+     * - FAILED / 本次尝试失败：抛 [PlayerConnectionUnavailableException]（可捕获），
+     *   调用方据此显示"已断开"而不是无限转圈。
+     */
     override suspend fun awaitReady() {
-        connected.await()
+        when (_connection.value) {
+            PlayerConnection.CONNECTED -> return
+            PlayerConnection.FAILED -> throw PlayerConnectionUnavailableException("播放会话不可用")
+            // 已断连：顺手发起一次有界重连（并发去重由状态机保证），然后等这一次
+            // 尝试的结果。若 UI 已经先点了重试，这里只是挂到同一个 deferred 上。
+            PlayerConnection.DISCONNECTED -> reconnect()
+            else -> Unit
+        }
+        connectDeferred.await()
     }
 
     /**
@@ -463,6 +820,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentMimeType = mimeType
         currentTitle = title
         currentArtworkUri = artworkUri
+        // 单媒体 prepare 没有媒体 id，也就没有身份键（appliedMediaKey = null）
+        loadingTargetKey = null
         probeThenLoad(uri, currentMimeType) { applyMedia(uri) }
     }
 
@@ -496,6 +855,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         loadIntentPlay = playIntent
         loadPending = true
         appliedUri = null
+        // 注意：这里**不**清 applied 身份（REV-04）——探测/装载窗口内旧媒体仍在
+        // 会话里播，appliedMediaKey/appliedPositionMs 必须继续指向它；身份在真正
+        // 换媒体（applyQueue/applyMedia）或装载失败时才改写。
         clearCues()
         // 用户已经动手切了，就别再替他猜：预探测和这一次真探测走同一条磁盘通道，
         // 平板实测撞上时单条探测从 589ms 涨到 1799ms——预热反倒拖慢了切换。
@@ -513,18 +875,20 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             when (probe) {
                 is FormatProbe.Result.Unplayable -> {
                     loadPending = false
-                    appliedUri = null
-                    appliedQueueIds = emptyList()
+                    // 引擎里的媒体已被 stop + clearMediaItems：身份/章节一并作废
+                    clearAppliedIdentity()
+                    chaptersKey = null
+                    _chapters.value = emptyList()
                     probedUri = uri
                     probedContainer = probe.failure.container
                     probedVideoCodec = probe.failure.videoCodec
                     probedAudioCodec = probe.failure.audioCodec
                     // 先停掉会话里可能还在播的上一个媒体，再落终态失败
-                    runCatching { controller?.stop() }
+                    runCatching { activeController?.stop() }
                     // 连同**上一条媒体的进度残留**一起清掉：media3 的 stop() 不重置
                     // 播放位置/时长（上一条停在 1:03 就还是 1:03），不清的话错误面板
                     // 背後与迷你条会把"什么都没装载"显示成"快播完了"。
-                    runCatching { controller?.clearMediaItems() }
+                    runCatching { activeController?.clearMediaItems() }
                     _positionMs.value = 0L
                     _durationMs.value = 0L
                     _bufferedPositionMs.value = 0L
@@ -650,12 +1014,31 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         startPositionMs: Long,
         playOnLoad: Boolean,
     ) {
-        if (controller == null) return
         if (items.isEmpty()) return
         val safeIndex = startIndex.coerceIn(0, items.lastIndex)
+        // REV-10：先把"要装什么"记进引擎，再判连接。断连期间用户点播放/切集时
+        // controller 为 null，若像旧实现那样直接 return，意图就丢了、重连后无从恢复。
         _queue.value = items
         _currentIndex.value = safeIndex
-        pendingSeekMs = startPositionMs.takeIf { it > 0 }
+        loadIntentPlay = playOnLoad
+        val target = items[safeIndex]
+        setCurrentTarget(target)
+        // REV-11：本次装载的起播位置挂到目标媒体的身份键上，只有该媒体真正生效
+        // （applyQueue）后才消费；探测窗口里它一直保留，不会被误当成旧媒体的位置。
+        // 起播位置为 0（从头播）时：只保留本来就属于目标媒体的挂起 seek（用户在
+        // 探测窗口里拖过这一条），旧媒体的挂起值一律丢弃，不让它残留到下一次装载。
+        loadingTargetKey = mediaKeyOf(target.sourceId, target.id)
+        pendingSeek = if (startPositionMs > 0) {
+            nextPendingSeek(pendingSeek, startPositionMs, loadingTargetKey)
+        } else {
+            pendingSeek?.takeIf { it.mediaKey == loadingTargetKey }
+        }
+        if (activeController == null) {
+            // 断连：只登记意图，等 reconnect() 成功后由 restoreSessionState() 恢复
+            loadPending = false
+            pendingSessionRestore = true
+            return
+        }
 
         // E80 修复：**队列路径也必须过起播前探测**（详细缘由见 [probeThenLoad]）。
         //
@@ -666,8 +1049,6 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // 播完 4 秒音频并显示"播放结束"，用户只看到**纯黑屏**，无从知道是编码不支持。
         //
         // 这里对**即将播放的那一项**做探测：不可解则不装载队列，直接落结构化失败态。
-        val target = items[safeIndex]
-        setCurrentTarget(target)
         probeThenLoad(
             uri = target.uri,
             expectedMime = target.mimeType,
@@ -687,10 +1068,22 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         safeIndex: Int,
         startPositionMs: Long,
     ) {
-        val c = controller ?: return
+        val c = activeController ?: run {
+            // 断连：装载没有落地，保留意图等重连恢复（绝不静默假成功）
+            loadPending = false
+            pendingSessionRestore = true
+            return
+        }
         // 同 [applyMedia]：任何一次新装载都放下失败闩（旧错误面板不许跨媒体残留）
         terminalFailure = false
         coreItems.getOrNull(safeIndex)?.let { _currentUri.value = it.uri }
+        // REV-11/REV-04：pending 只属于"目标媒体"，且只有目标媒体真正落地才消费；
+        // 落点用 pending 的位置，而不是 setQueue 时捕获的旧 startPositionMs。
+        val target = coreItems[safeIndex]
+        val targetKey = mediaKeyOf(target.sourceId, target.id)
+        val resolvedStartMs = resolveStartPosition(pendingSeek, targetKey, startPositionMs)
+        if (shouldConsumePendingSeek(pendingSeek, targetKey)) pendingSeek = null
+        loadingTargetKey = targetKey
         // 批次 3 修复：队列路径此前从不带 SubtitleConfiguration——字幕记忆/同名挂载
         // 在"进页即 setQueue"的主流程上整体失效（applyMedia 只服务单媒体项路径）。
         // 给**即将播放的那一项**烘上当前字幕地址；切集后由 setSubtitle 走重建路径。
@@ -721,8 +1114,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         appliedQueueIds = queueIdentity(coreItems)
         mountedSubtitle = mount
         loadPending = false
-        c.setMediaItems(items, safeIndex, startPositionMs.coerceAtLeast(0L))
+        c.setMediaItems(items, safeIndex, resolvedStartMs.coerceAtLeast(0L))
         c.prepare()
+        // REV-04：整表装载落地 = 目标媒体真正生效，applied 身份切到它（位置归零/
+        // 续播位置，时长先清 0 等轮询填）
+        setAppliedMedia(targetKey, items[safeIndex].mediaId, resolvedStartMs)
         // A08 的"装载即起播"要按**这一次装载的意图**决定：`playOnLoad = false`
         // （竖屏未播放态）时停在就绪态。不能靠调用方事后 `pause()`——那一记落在
         // 探测窗口里是空操作，被这里的一句 `play()` 原样覆盖（真机实报自动起播）。
@@ -750,9 +1146,20 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      *    另外两份**等长**的文件夹也不能按项数就当成同一条队列（A15）。
      */
     override fun selectQueueIndex(index: Int) {
-        val c = controller ?: return
         val items = _queue.value
         if (index !in items.indices) return
+        val target = items[index]
+        val targetKey = mediaKeyOf(target.sourceId, target.id)
+        val c = activeController
+        if (c == null) {
+            // REV-10：断连期间切集也要登记意图（用户点的那一集是重连后的落点）
+            _currentIndex.value = index
+            setCurrentTarget(target)
+            _currentUri.value = target.uri
+            loadIntentPlay = true
+            pendingSessionRestore = true
+            return
+        }
         val fast = canFastSelectQueueIndex(
             appliedQueueIds = appliedQueueIds,
             requestedQueueIds = queueIdentity(items),
@@ -761,16 +1168,27 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             terminalFailure = terminalFailure,
         )
         if (fast && index == c.currentMediaItemIndex) {
+            // 同一集：挂起 seek 只在属于它时才保留（REV-11，旧实现的"无脑保留"会
+            // 在切集后把位置拉回上一集的目标）
+            pendingSeek = pendingSeek?.takeIf { it.mediaKey == targetKey }
+            // A23：播完后再点同一集 = 重播，ENDED 上直接 play() 是空操作，先退位
+            if (_state.value == PlaybackState.Ended) {
+                c.seekTo(0L)
+                pendingSeek = null
+                if (_appliedMediaKey.value != null) _appliedPositionMs.value = 0L
+            }
             c.play()
             return
         }
         if (fast) {
             _currentIndex.value = index
-            val target = items[index]
             // 新一集不该继承上一集的外挂字幕（与整表重建分支同一语义）。
             // 该集自己的记忆字幕由会话层在切下标后解析并重挂（A4）。
             subtitle = null
             mountedSubtitle = null
+            // REV-11：快路径没有重新探测，pending 只在属于目标媒体时才带过去
+            pendingSeek = pendingSeek?.takeIf { it.mediaKey == targetKey }
+            loadingTargetKey = targetKey
             setCurrentTarget(target)
             _currentUri.value = target.uri
             appliedUri = target.uri
@@ -780,10 +1198,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             return
         }
         _currentIndex.value = index
-        val target = items[index]
         subtitle = null
         mountedSubtitle = null
-        pendingSeekMs = null
+        // REV-11：慢路径丢弃属于上一集的挂起 seek（它已经不可能落实了），
+        // 只保留属于目标媒体的那条；旧实现这里直接置 null，会把"切集前 seek
+        // 到 30s 再切集"的意图连同用户的 seek 一起丢掉。
+        pendingSeek = pendingSeek?.takeIf { it.mediaKey == targetKey }
+        loadingTargetKey = targetKey
         setCurrentTarget(target)
         probeThenLoad(target.uri, target.mimeType, target.sizeBytes, target.lastModifiedSec) {
             // 切集是一次播放意图（用户点的那一集就是要看的），照旧装载即起播
@@ -804,7 +1225,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         prefetchJob?.cancel()
         prepareGeneration++
         terminalFailure = false
-        val c = controller
+        val c = activeController
         runCatching { c?.stop() }
         runCatching { c?.clearMediaItems() }
         _queue.value = emptyList()
@@ -813,10 +1234,16 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         _positionMs.value = 0L
         _durationMs.value = 0L
         _bufferedPositionMs.value = 0L
-        pendingSeekMs = null
-        appliedUri = null
-        appliedItems = emptyList()
-        appliedQueueIds = emptyList()
+        // REV-11：队列都没了，挂起 seek 与断连恢复意图一并作废
+        pendingSeek = null
+        loadingTargetKey = null
+        pendingSessionRestore = false
+        restorePositionMs = 0L
+        // REV-04/REV-09：身份与章节归属随媒体一起清空（旧实现不清 _chapters，
+        // 迷你条/播放页会一直显示上一个视频的章节列表）
+        clearAppliedIdentity()
+        chaptersKey = null
+        _chapters.value = emptyList()
         loadPending = false
         currentMediaUri = null
         currentMediaId = ""
@@ -936,8 +1363,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             .build()
 
     override fun setSpeed(speed: Float) {
-        controller?.playbackParameters = PlaybackParameters(speed)
+        // 先记偏好再下发：断连期间也要保留，重连后由 installController 重新下发
         _speed.value = speed
+        activeController?.playbackParameters = PlaybackParameters(speed)
     }
 
     private val _loopMode = MutableStateFlow(NpLoopMode.OFF)
@@ -948,7 +1376,13 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * SHUFFLE = 列表循环 + shuffleModeEnabled（media3 按默认 ShuffleOrder 洗牌队列）。
      */
     override fun setLoopMode(mode: NpLoopMode) {
-        val c = controller ?: return
+        // 先记偏好再下发：断连期间保留，重连后由 installController 重新下发
+        _loopMode.value = mode
+        activeController?.let { applyLoopModeTo(it, mode) }
+    }
+
+    /** 把循环模式下发到一条连接（[setLoopMode] 与重连恢复共用） */
+    private fun applyLoopModeTo(c: MediaController, mode: NpLoopMode) {
         when (mode) {
             NpLoopMode.OFF -> {
                 c.repeatMode = Player.REPEAT_MODE_OFF
@@ -967,7 +1401,6 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 c.shuffleModeEnabled = true
             }
         }
-        _loopMode.value = mode
     }
 
     /**
@@ -981,7 +1414,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val previous = subtitle
         subtitle = uri?.let { SubtitleMount(it, format) }
         val media = currentMediaUri ?: return
-        controller ?: return
+        if (activeController == null) return
         when {
             subtitle == previous -> Unit
             subtitle == null && mountedSubtitle != null ->
@@ -1010,7 +1443,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     /** Preserve the actual item, including identity, metadata and CUE clipping. */
     @OptIn(UnstableApi::class)
     private fun replaceCurrentSubtitle() {
-        val c = controller ?: return
+        val c = activeController ?: return
         val items = appliedItems
         if (items.isEmpty()) {
             // applyMedia 现在是 suspend（封面读盘走 IO），这里只能起协程接力——
@@ -1022,7 +1455,12 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             ?: c.currentMediaItemIndex.takeIf { it in items.indices }
             ?: return
         val local = items[index]
-        val position = pendingSeekMs ?: c.currentPosition.coerceAtLeast(0L)
+        // REV-11：pending 只有在**属于当前已生效媒体**时才是"重建后的恢复位置"；
+        // 属于上一条/目标媒体的挂起 seek 不能拿来定位（旧实现直接用裸 pendingSeekMs）。
+        val position = pendingSeek
+            ?.takeIf { it.mediaKey == _appliedMediaKey.value }
+            ?.positionMs
+            ?: c.currentPosition.coerceAtLeast(0L)
         val playWhenReady = c.playWhenReady
         val subtitles = subtitle?.let { listOf(subtitleConfiguration(it)) }.orEmpty()
         // 控制器回传的 MediaItem 会丢掉 LocalConfiguration，不能拿它的 mediaId/uri 当闸门。
@@ -1041,6 +1479,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         c.setMediaItems(updated, index, position.coerceAtLeast(0L))
         c.prepare()
         c.playWhenReady = playWhenReady
+        // REV-04：同一条目重建（身份不变），applied 位置跟着落到重建位置；
+        // 时长不清——媒体没变，等轮询照旧刷新
+        if (_appliedMediaKey.value != null) _appliedPositionMs.value = position.coerceAtLeast(0L)
         mountedSubtitle = subtitle
         // 新挂上的外挂字幕要顶掉内嵌轨的 SELECTION_FLAG_DEFAULT 平票（E144）
         pendingExternalSubtitleSelect = mountedSubtitle != null
@@ -1070,7 +1511,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      */
     override fun setTextTracksEnabled(enabled: Boolean) {
         textTracksEnabled = enabled
-        val c = controller ?: return
+        val c = activeController ?: return
         c.trackSelectionParameters = c.trackSelectionParameters
             .buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, !enabled)
@@ -1079,7 +1520,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     override fun setVideoTracksEnabled(enabled: Boolean) {
         videoTracksEnabled = enabled
-        val c = controller ?: return
+        val c = activeController ?: return
         c.trackSelectionParameters = c.trackSelectionParameters
             .buildUpon()
             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, !enabled)
@@ -1158,7 +1599,27 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             }
             .distinctBy { it.startMs }
             .sortedBy { it.startMs }
-        if (entries.isNotEmpty()) _chapters.value = entries
+        // REV-09：章节属于"当前已生效媒体"。
+        // ① 回调可能晚到（换集瞬间旧媒体的 metadata 才到）——只在回调键与当前
+        //    归属键一致时才写，不能把上一集的章节写到新一集上；
+        // ② 同一媒体收到空回调（部分容器只在 metadata 通道给章节、tracks 通道
+        //    为空）不许清掉已有效章节——旧实现 `if (entries.isNotEmpty())` 正是
+        //    为躲这个坑，但代价是永不清空（换集后仍显示上一集章节）。
+        val callbackKey = ChapterIdentity.keyOf(
+            _appliedMediaKey.value,
+            currentMediaUri ?: _currentUri.value,
+        ) ?: return
+        if (!ChapterIdentity.shouldApplyChapters(
+                currentKey = chaptersKey,
+                callbackKey = callbackKey,
+                incomingCount = entries.size,
+                existingCount = _chapters.value.size,
+            )
+        ) {
+            return
+        }
+        chaptersKey = callbackKey
+        _chapters.value = entries
     }
 
     /**
@@ -1166,7 +1627,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * 经 MediaController 设置，对会话侧播放器生效且不重建媒体项）。
      */
     override fun selectTrack(type: NpTrackType, id: String) {
-        val c = controller ?: return
+        val c = activeController ?: return
         // 用户手选轨道即作废"待选中外挂轨"：之后轨道回调不再把选择抢回外挂轨
         pendingExternalSubtitleSelect = false
         val (group, index) = trackGroupById[id] ?: return
@@ -1208,7 +1669,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             )
         ) return
         pendingExternalSubtitleSelect = false
-        val c = controller ?: return
+        val c = activeController ?: return
         runCatching {
             c.trackSelectionParameters = c.trackSelectionParameters
                 .buildUpon()
@@ -1221,7 +1682,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     /** 字幕偏移（E43）：正数=延后。立即按当前位置重取时间窗 */
     override fun setSubtitleOffsetMs(offsetMs: Long) {
         subtitleOffsetMs = offsetMs
-        controller?.let { recomputeCues(it.currentPosition.coerceAtLeast(0)) }
+        activeController?.let { recomputeCues(it.currentPosition.coerceAtLeast(0)) }
     }
 
     /**
@@ -1229,7 +1690,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * API、MediaController 不暴露，与 np.scrub 同路转发（见 PlaybackService）。
      */
     override fun setVideoCrop(crop: Boolean) {
-        controller?.sendCustomCommand(
+        activeController?.sendCustomCommand(
             SessionCommand(CROP_COMMAND, Bundle.EMPTY),
             Bundle().apply { putBoolean(CROP_ARG_ACTIVE, crop) },
         )
@@ -1249,7 +1710,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     /** 补发当前自动连播偏好；控制器未就绪时是空操作（连上后会补发一次） */
     private fun sendAutoplayFlag() {
-        controller?.sendCustomCommand(
+        activeController?.sendCustomCommand(
             SessionCommand(AUTOPLAY_COMMAND, Bundle.EMPTY),
             Bundle().apply { putBoolean(AUTOPLAY_ARG_ENABLED, autoplayNext) },
         )
@@ -1258,18 +1719,31 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun play() {
         // 用户意图即最新意图：探测没落地时先记下，落地按它起播（见 [loadIntentPlay]）
         loadIntentPlay = true
-        controller?.play()
+        val c = activeController ?: return
+        // A23：关闭自动连播时，末帧停在 READY + !playWhenReady（原因 END_OF_MEDIA_ITEM），
+        // 状态已译成 Ended；此时对 media3 直接 play() 是空操作（STATE_ENDED 不会自己
+        // 回到播放），用户按播放像"没反应"。先回退到 0 再起播，并把已生效位置归零。
+        if (_state.value == PlaybackState.Ended) {
+            c.seekTo(0L)
+            pendingSeek = null
+            if (_appliedMediaKey.value != null) _appliedPositionMs.value = 0L
+        }
+        c.play()
     }
 
     override fun pause() {
         loadIntentPlay = false
-        controller?.pause()
+        activeController?.pause()
     }
 
     override fun seekTo(positionMs: Long) {
-        // 探测阶段媒体尚未装载：挂起 seek，装载完成后再落实（E39 使 prepare 变为异步）
-        pendingSeekMs = positionMs
-        controller?.seekTo(positionMs)
+        // 探测阶段媒体尚未装载：挂起 seek，装载完成后再落实（E39 使 prepare 变为异步）。
+        // REV-11：挂起值必须带上"目标属于哪条媒体"——只判位置不判身份，切集后它
+        // 永远清不掉，又被下一次重建当成恢复位置用（位置回退）。
+        val target = positionMs.coerceAtLeast(0L)
+        val targetKey = if (loadPending) loadingTargetKey else _appliedMediaKey.value
+        pendingSeek = nextPendingSeek(pendingSeek, target, targetKey)
+        activeController?.seekTo(target)
     }
 
     /**
@@ -1278,7 +1752,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      * 故经自定义命令 np.scrub 转发给 PlaybackService。
      */
     override fun setScrubbing(active: Boolean) {
-        controller?.sendCustomCommand(
+        activeController?.sendCustomCommand(
             SessionCommand(SCRUB_COMMAND, Bundle.EMPTY),
             Bundle().apply { putBoolean(SCRUB_ARG_ACTIVE, active) },
         )
@@ -1327,6 +1801,15 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         /** seek 落定判据：位置与挂起目标相差在此之内即视为 seek 已落实 */
         const val SEEK_SETTLE_MS = 1_500L
 
+        /** 首次连接超时：会话起不来时要让 awaitReady 失败，不能无限挂起 */
+        const val INITIAL_CONNECT_TIMEOUT_MS = 10_000L
+
+        /** 单次重连尝试超时（每次尝试都新建控制器，超时后丢弃再试） */
+        const val RECONNECT_ATTEMPT_TIMEOUT_MS = 5_000L
+
+        /** 重连最多尝试次数（与 [PlayerConnectionTracker] 默认一致） */
+        const val RECONNECT_MAX_ATTEMPTS = 3
+
         /** 预探测窗口：与 [PlaybackService] 的 L2 预载窗口同量级（后 3 前 1），多探无益 */
         const val PROBE_PREFETCH_FWD = 3
         const val PROBE_PREFETCH_BACK = 1
@@ -1350,25 +1833,47 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         scope.cancel()
         // E144-1：摘掉 PiP 动作桥（按 owner 校验，不误清后来者的登记）
         NpMediaActionBridge.unregister(this)
+        pollJob?.cancel()
+        pollJob = null
+        reconnectJob?.cancel()
+        reconnectJob = null
         // 注意：会话侧播放器由 PlaybackService 持有，后台播放继续；
         // 这里只解除 UI 与会话的连接
         controller?.release()
         controller = null
+        // REV-04：本实例已不再观察任何媒体，身份作废；仍挂在 awaitReady 上的
+        // 装载链要立刻失败，不能挂到作用域取消为止
+        clearAppliedIdentity()
+        chaptersKey = null
+        _chapters.value = emptyList()
+        if (!connectDeferred.isCompleted) {
+            connectDeferred.completeExceptionally(CancellationException("播放器已释放"))
+        }
     }
 
     @OptIn(UnstableApi::class)
     private suspend fun applyMedia(mediaUri: String) {
-        val c = controller ?: return
+        val c = activeController ?: run {
+            // REV-10：断连时装载没落地，保留意图等重连恢复
+            loadPending = false
+            pendingSessionRestore = true
+            return
+        }
         // 失败闩必须随**任何一次新装载**放下（用户实报：看过不可播的视频后换别的视频，
         // 旧错误面板一直挂着）。闩的本意是"stop+clearMediaItems 之后 Error 不许被
         // Idle 冲掉"，但此前只在 probeThenLoad 里复位——凡是不经探测的装载路径
         // （同媒体续播、预载命中、字幕重建之外的直装等）都会带着闩进来：引擎其实
         // 已经在新视频上正常播放，状态监听却被闩住，UI 停在上一支的 Error 上。
         terminalFailure = false
-        // E74 修复：此前恢复位置只读 c.currentPosition，没有优先消费未落实的
-        // pendingSeekMs——几乎同时切字幕与拖动进度条时，字幕触发的媒体项重建会用
-        // 稍微过期的位置恢复播放，产生极窄的"位置回退"窗口。
-        val position = pendingSeekMs ?: c.currentPosition
+        // REV-04：单媒体路径的身份键——队列当前项若确实是这条 uri 才带身份
+        val core = _queue.value.getOrNull(c.currentMediaItemIndex)
+            ?.takeIf { it.uri == mediaUri }
+        val targetKey = core?.let { mediaKeyOf(it.sourceId, it.id) }
+        // REV-11：挂起 seek 只在属于这条媒体时才消费；E74 的"重建时优先用挂起位置"
+        // 语义保留，但不再无条件信任裸值（它可能属于上一条媒体）。
+        val pending = pendingSeek?.takeIf { shouldConsumePendingSeek(it, targetKey) }
+        val position = pending?.positionMs ?: c.currentPosition.coerceAtLeast(0L)
+        if (pending != null) pendingSeek = null
         val wasPlaying = c.isPlaying || c.playWhenReady
         // 封面读盘放 IO：装载协程跑在主线程，即便只有一张小图也不该在主线程同步读
         val artworkUri = currentArtworkUri
@@ -1427,6 +1932,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             c.prepare()
             // replaceMediaItem 把位置重置到该项起点，需显式还原（含待落实 seek）
             c.seekTo(position)
+            // REV-04：同一条目重建（身份不变），applied 位置落到重建位置；时长不清
+            setAppliedMedia(targetKey, item.mediaId, position, resetDuration = false)
         } else {
             appliedItems = listOf(item)
             // 换成的是一条单项队列（不再是"同一份文件夹队列"），身份作废：
@@ -1434,11 +1941,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             appliedQueueIds = emptyList()
             c.setMediaItem(item, position)
             c.prepare()
-        }
-        // 落实探测期间挂起的 seek（进页断点续播在 prepare 与 probe 完成之间到达）
-        pendingSeekMs?.let { pending ->
-            c.seekTo(pending)
-            pendingSeekMs = null
+            // REV-04：单项装载落地 = 新身份生效（无 id 时 appliedMediaKey 为 null）
+            setAppliedMedia(targetKey, item.mediaId, position)
         }
         appliedUri = mediaUri
         mountedSubtitle = subtitle
@@ -1514,14 +2018,27 @@ internal fun npSubtitleFormatOfMime(mimeType: String?): NpSubtitleFormat? = when
  * 全程 false，不会再回调）会把状态永久停在 `Ready` 上——中央播放钮消失、
  * `FLAG_KEEP_SCREEN_ON` 与播放降档与弹幕判定一起错。就绪态本来就是二者之一：
  * 该播的（`playWhenReady`）是 `Playing`，停着的（含 `play=0` 只装载）是 `Paused`。
+ *
+ * A23：关闭自动连播时会话侧 `setPauseAtEndOfMediaItems(true)`，一集播完停在
+ * `READY + !playWhenReady`，但 `playWhenReady` 变化原因是 `END_OF_MEDIA_ITEM`——
+ * 这是"播完了"，不是"用户暂停"。必须译成 `Ended`，否则 UI 不显示重播/下一集，
+ * 用户按播放也像没反应（media3 在 ENDED 上 play() 是空操作）。
  */
-internal fun npEngineStateOf(playbackState: Int, playWhenReady: Boolean): PlaybackState =
-    when (playbackState) {
-        Player.STATE_BUFFERING -> PlaybackState.Buffering
-        Player.STATE_READY -> if (playWhenReady) PlaybackState.Playing else PlaybackState.Paused
-        Player.STATE_ENDED -> PlaybackState.Ended
-        else -> PlaybackState.Idle
+internal fun npEngineStateOf(
+    playbackState: Int,
+    playWhenReady: Boolean,
+    playWhenReadyChangeReason: Int = Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST,
+): PlaybackState = when (playbackState) {
+    Player.STATE_BUFFERING -> PlaybackState.Buffering
+    Player.STATE_READY -> when {
+        playWhenReady -> PlaybackState.Playing
+        playWhenReadyChangeReason == Player.PLAY_WHEN_READY_CHANGE_REASON_END_OF_MEDIA_ITEM ->
+            PlaybackState.Ended
+        else -> PlaybackState.Paused
     }
+    Player.STATE_ENDED -> PlaybackState.Ended
+    else -> PlaybackState.Idle
+}
 
 /**
  * 队列身份序列（A15）：逐项取 id，没有 id 的条目退化为 uri。

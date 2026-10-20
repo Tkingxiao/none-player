@@ -217,6 +217,7 @@ import com.noneplayer.kernel.api.NpMediaButtonAction
 import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
+import com.noneplayer.kernel.api.PlayerConnection
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.VideoPlayerFactory
@@ -508,6 +509,9 @@ fun PlayerScreen(
     // 渲染体面失败面板后早退；session.engineError 携带工厂给出的原因。
     // 早退是稳定的（同一 mime 恒 null）：其余组合分支不会因它来回挂卸。
     val engineError by session.engineError.collectAsStateWithLifecycle()
+    // REV-10：播放服务连接状态（被系统回收 / 正在重连 / 重连失败）。只驱动顶部一条
+    // 轻横幅——不参与布局、不接管手势，画面照常可交互。
+    val connection by session.connection.collectAsStateWithLifecycle()
     if (player == null) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             ErrorPanel(
@@ -3353,6 +3357,18 @@ fun PlayerScreen(
             )
         }
 
+        // REV-10：播放服务断开/重连中的轻提示。放在根 Box 最上层（Toast 之前），
+        // 不参与页面布局：竖屏/全屏/纯音频三种形态都覆盖，且不遮挡画面交互。
+        ConnectionBanner(
+            connection = connection,
+            onRetry = session::retryConnection,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top))
+                // 64dp 落在竖屏顶栏/全屏控制条之下，避免压住标题与返回键
+                .padding(top = 64.dp),
+        )
+
         // 操作反馈（设计稿 .toast）
         NpToastHost(state = toast, modifier = Modifier.align(Alignment.BottomCenter))
     }
@@ -5385,6 +5401,85 @@ internal fun PauseGlyph(
                 .clip(RoundedCornerShape(2.dp))
                 .background(tint),
         )
+    }
+}
+
+/**
+ * 播放服务连接状态横幅（REV-10）——**轻提示，不阻塞画面**。
+ *
+ * Android 随时可能回收承载媒体会话的进程（后台内存压力、厂商省电、播放服务崩溃）。
+ * 那之后画面会冻住/黑掉，而改造前用户只会看到"卡了"：既没有解释，也没有恢复入口。
+ * 这里只在三种异常态浮一条顶部横幅：
+ *
+ * - [PlayerConnection.DISCONNECTED]：已断开 + 「重连」（引擎会重新 bind 控制器）
+ * - [PlayerConnection.RECONNECTING]：正在重连——不给按钮，避免重复请求
+ * - [PlayerConnection.FAILED]：重连失败 + 「重试」
+ *
+ * [PlayerConnection.CONNECTING]（正常启动过程）与 [PlayerConnection.CONNECTED]
+ * 不显示。横幅挂在根 Box 顶层、不参与布局，只有按钮可点，画面交互不受影响。
+ */
+@Composable
+private fun ConnectionBanner(
+    connection: PlayerConnection,
+    onRetry: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val text = when (connection) {
+        PlayerConnection.DISCONNECTED -> "播放服务已断开（可能被系统回收）"
+        PlayerConnection.RECONNECTING -> "正在重连播放服务…"
+        PlayerConnection.FAILED -> "重连失败"
+        PlayerConnection.CONNECTING, PlayerConnection.CONNECTED -> ""
+    }
+    val actionLabel = when (connection) {
+        PlayerConnection.DISCONNECTED -> "重连"
+        PlayerConnection.FAILED -> "重试"
+        else -> null
+    }
+    val ink = LocalNpInk.current
+    AnimatedVisibility(
+        visible = text.isNotEmpty(),
+        modifier = modifier,
+        enter = fadeIn(animationSpec = npMotion(Motion.Field)),
+        exit = fadeOut(animationSpec = npMotion(Motion.Field)),
+    ) {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(NpRadius.chip))
+                .background(Color.Black.copy(alpha = 0.72f))
+                .border(1.dp, Color.White.copy(alpha = 0.14f), RoundedCornerShape(NpRadius.chip))
+                .padding(
+                    start = 12.dp,
+                    end = if (actionLabel != null) 6.dp else 12.dp,
+                    top = 6.dp,
+                    bottom = 6.dp,
+                ),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Text(
+                text = text,
+                style = NpMonoSmall,
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (actionLabel != null) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(NpRadius.chip))
+                        .background(ink.accent)
+                        .npPressScale(onClick = onRetry, pressedScale = 0.97f)
+                        .padding(horizontal = 12.dp, vertical = 5.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = actionLabel,
+                        style = NpTypography.labelLarge,
+                        color = ink.bg,
+                    )
+                }
+            }
+        }
     }
 }
 
