@@ -2960,14 +2960,39 @@ fun PlayerScreen(
                     // 无条件用路由 uri 会把"重试"变成"打开另一条文件"。
                     // 闸门（mediaOpened）不用拉回：装载入口会同步把状态降到 Buffering，
                     // 旧错误面板随之消失；若再次失败仍能重新浮出，不会把用户卡在黑屏。
+                    //
+                    // A17 收尾：重试要**从断点续**而不是回片头。断点读取是挂起调用，
+                    // 整段重载放进页面 scope；探测侧由引擎按"错误后的重试"自动 bypassCache
+                    // （否则缓存里那条失败结论会把用户原样送回同一个错误）。
                     val items = queue
                     val idx = queueIndex
-                    if (items.isNotEmpty() && idx in items.indices) {
-                        player.setQueue(items, idx, 0L)
-                    } else {
-                        player.prepare(uri, mimeType)
+                    scope.launch {
+                        if (items.isNotEmpty() && idx in items.indices) {
+                            val target = items[idx]
+                            val resumeMs = history.positionOfIfIntact(target) ?: 0L
+                            player.setQueue(items, idx, resumeMs)
+                        } else {
+                            // 单媒体路径：prepare ≠ 装载位置参数，改为 prepare 后立刻
+                            // seekTo——引擎在探测窗口内会把它记为挂在目标媒体上的
+                            // pendingSeek，装载落地时消费，一样能续上断点。
+                            // 断点查询优先用会话当前的权威条目（带真实 sourceId 与文件
+                            // 指纹），但必须确认它确实是路由这一条，避免把上一条的位置
+                            // 套到新文件；查不到就用路由参数拼兜底条目（多半没有断点）。
+                            val lookup = session.nowPlayingSummary.value?.item
+                                ?.takeIf { it.uri == uri }
+                                ?: MediaItem(
+                                    id = mediaId,
+                                    sourceId = "",
+                                    title = displayTitle,
+                                    uri = uri,
+                                    mimeType = resolvedMimeType ?: mimeType,
+                                )
+                            val resumeMs = history.positionOfIfIntact(lookup) ?: 0L
+                            player.prepare(uri, resolvedMimeType ?: mimeType)
+                            if (resumeMs > 0L) player.seekTo(resumeMs)
+                        }
+                        player.play()
                     }
-                    player.play()
                 },
                 onBack = navigator::popBackStack,
                 modifier = Modifier.align(Alignment.Center),

@@ -285,6 +285,14 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     // 下一次 prepare 时清除（重试）
     private var terminalFailure = false
 
+    /**
+     * A18：解码器初始化失败的一次性回退闸门（媒体键校验 + 切媒体复位）。
+     *
+     * 回退状态本身在进程级 [decoderFallbackState] 里，供服务进程的
+     * `MediaCodecSelector` 包装读取；这里只记"这条媒体已经回退过一次没有"。
+     */
+    private val decoderFallbackGate = DecoderFallbackGate()
+
     // E62 修复：release() 可能先于 MediaController.Builder.buildAsync() 的异步连接完成
     // 执行（例如用户快速退出播放页）。该监听器运行在独立于 scope 的 MainExecutor 上，
     // 此前会无条件把新连接的 controller 赋给实例字段——release() 已经跑过，不会再有人
@@ -440,6 +448,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             if (terminalFailure) return
             if (playbackState == Player.STATE_READY) {
                 NpPerf.mark("READY")
+                // A18：回退重试奏效（解码器已经建起来），撤掉过滤状态——之后字幕重建
+                // 之类的同媒体重新 prepare 不再排除 codec；"已回退过"的闸门保留到换媒体。
+                if (decoderFallbackState.isArmed) decoderFallbackState.clear()
                 // 就绪才预热邻域探测：这一刻之前磁盘都在回填当前集的缓冲
                 prefetchProbeWindow()
             }
@@ -518,6 +529,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             val restarted = reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT
             if (restarted || newKey != _appliedMediaKey.value || newId != appliedMediaId) {
                 setAppliedMedia(newKey, newId, 0L, resetDuration = restarted)
+                // A18：自动连播/循环到新一条后回退状态复位，避免上一条的
+                // "排除 codec / 只走软解"污染下一条媒体
+                decoderFallbackGate.onMediaChanged()
+                decoderFallbackState.clear()
             }
         }
 
@@ -535,6 +550,33 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             // 队列快路径切集没有重新探测，名称属于上一条——复用会把
             // "切到 B 失败"说成"A 的编码不支持"（曾把 H264 失败显示成 WMV2）。
             val probedThis = probedUri != null && probedUri == currentMediaUri
+            if (isDecoderFailureCode(error.errorCode)) {
+                // A18：跨 binder 后拿不到 DecoderInitializationException 的类型信息，
+                // 只能从容错的 message 里解析失败轨的 mime / codec 名。
+                val parsed = parseDecoderFailureMessage(error.message)
+                val kind = classifyDecoderFailure(error.errorCode, parsed)
+                if (isAudioDecoderFailure(kind, parsed.mime)) {
+                    // A18：音频轨解码错误绝不能回到下面的 videoCodecUnsupported，
+                    // 否则会给出"转码视频"的建议，而问题其实在音轨
+                    terminalFailure = true
+                    val audioFailure = PlaybackFailure.audioCodecUnsupported(
+                        probedContainer.takeIf { probedThis },
+                        probedAudioCodec.takeIf { probedThis },
+                    )
+                    _state.value = PlaybackState.Error(audioFailure.reason, audioFailure)
+                    return
+                }
+                // A18：视频解码失败先做一次受控回退（同一媒体只一次）；重试装载成功
+                // 就不会落到错误态，重试再失败才走下面的终态映射。
+                val plan = fallbackPlan(kind, parsed)
+                val mediaKey = _appliedMediaKey.value ?: loadingTargetKey
+                if (plan.action != DecoderFallbackAction.GIVE_UP &&
+                    decoderFallbackGate.canRetry(kind, mediaKey)
+                ) {
+                    retryAfterDecoderFailure(plan, mediaKey)
+                    return
+                }
+            }
             val failure = error.toPlaybackFailure(
                 probedContainer.takeIf { probedThis },
                 probedVideoCodec.takeIf { probedThis },
@@ -822,7 +864,58 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentArtworkUri = artworkUri
         // 单媒体 prepare 没有媒体 id，也就没有身份键（appliedMediaKey = null）
         loadingTargetKey = null
+        // A18：新的播放意图到来，上一条媒体的回退状态/闸门一律复位
+        decoderFallbackGate.onMediaChanged()
+        decoderFallbackState.clear()
         probeThenLoad(uri, currentMimeType) { applyMedia(uri) }
+    }
+
+    /**
+     * A18：解码器初始化失败后的**一次性受控回退**。
+     *
+     * 1. 把「排除失败的平台 codec」或「mp4v 只走软解链」写进进程级
+     *    [decoderFallbackState]——服务进程里的解码器选择器包装（见
+     *    [NpRenderersFactory]）会在下一次 prepare 查询候选时读到它；
+     * 2. 记下当前位置，重新走探测 + 装载同一条媒体，尽量从原位置续播；
+     * 3. [decoderFallbackGate] 保证同一媒体只回退一次：重试再失败就直接落 Error。
+     *
+     * 不做无限重试；解析不出 codec 名时只做"同媒体重试一次"，不臆造过滤条件。
+     */
+    private fun retryAfterDecoderFailure(plan: DecoderFallbackPlan, mediaKey: String?) {
+        val uri = currentMediaUri ?: return
+        decoderFallbackGate.markAttempted(mediaKey)
+        when (plan.action) {
+            DecoderFallbackAction.RETRY_WITHOUT_FAILED_CODEC -> {
+                val codecName = plan.codecName
+                val mime = plan.mime
+                if (codecName != null && mime != null) {
+                    decoderFallbackState.armExcludedCodec(mediaKey, mime, codecName)
+                }
+            }
+
+            DecoderFallbackAction.RETRY_WITH_SOFT_ONLY ->
+                decoderFallbackState.armSoftOnlyVideo(mediaKey, MP4V_VIDEO_MIME)
+
+            DecoderFallbackAction.GIVE_UP -> return
+        }
+        // 回退不该把用户送回片头：按当前位置重新起播（媒体身份不变，
+        // pollPosition 落地后会继续维护 appliedPositionMs）
+        val resumeMs = _positionMs.value.coerceAtLeast(0L)
+        pendingSeek = nextPendingSeek(pendingSeek, resumeMs, mediaKey)
+        // 队列里能查到同 uri 的条目就带上体积/时间戳，让探测缓存命中
+        val core = _queue.value.firstOrNull { it.uri == uri }
+        probeThenLoad(
+            uri = uri,
+            expectedMime = currentMimeType,
+            sizeBytes = core?.sizeBytes ?: 0L,
+            lastModifiedSec = core?.lastModifiedSec ?: 0L,
+            playIntent = loadIntentPlay,
+            // A18 回退是"失败后的再来一次"：失败闩此刻没置、状态可能仍停在 Playing，
+            // 必须显式绕过探测缓存（A17），否则回退探测会拿到上次的旧结论。
+            retryingAfterFailure = true,
+        ) {
+            applyMedia(uri)
+        }
     }
 
     /**
@@ -849,8 +942,29 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         lastModifiedSec: Long = 0L,
         /** 这一次装载落地后起不起播（见 [loadIntentPlay]）；探测窗口内用户按下的意图会覆盖它 */
         playIntent: Boolean = true,
+        /**
+         * A17：本次是不是"A18 解码器失败后的受控回退重探"。
+         *
+         * 该路径进入时失败闩还没置、`_state` 也可能仍停在 Playing，仅靠状态判定会漏掉，
+         * 所以由 [retryAfterDecoderFailure] 显式带进来强制绕过探测缓存。
+         */
+        retryingAfterFailure: Boolean = false,
         apply: suspend () -> Unit,
     ) {
+        // A17：必须在下面把 [terminalFailure] 复位**之前**捕获"这是不是错误后的重试"。
+        // 是则本次探测 bypassCache——缓存里那条确定性失败结论是上次错误的来源，命中它
+        // 等于让「重试」原样回到同一个错误。常规装载仍走缓存。
+        val bypassProbeCache = shouldBypassProbeCache(
+            terminalFailure = terminalFailure,
+            state = _state.value,
+            retryingAfterFailure = retryingAfterFailure,
+        )
+        if (bypassProbeCache) {
+            // 与 bypassCache 互补（见 FormatProbe.invalidate）：把旧结论清掉，否则这次
+            // 重探若落成瞬态结论（Unknown/读取异常不写缓存），旧的失败条目会继续躺着，
+            // 下次**常规**装载还会被它"二次定罪"。
+            FormatProbe.invalidate(uri)
+        }
         prepareJob?.cancel()
         loadIntentPlay = playIntent
         loadPending = true
@@ -869,7 +983,15 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val myGeneration = ++prepareGeneration
         NpPerf.begin("probe uri=${uri.substringAfterLast('/')}")
         prepareJob = scope.launch {
-            val probe = FormatProbe.probe(appContext, uri, expectedMime, sizeBytes, lastModifiedSec)
+            val probe = FormatProbe.probe(
+                appContext,
+                uri,
+                expectedMime,
+                sizeBytes,
+                lastModifiedSec,
+                // A17：错误后的重试强制现场重探，不被缓存里那条失败结论"二次定罪"
+                bypassCache = bypassProbeCache,
+            )
             NpPerf.mark("probe done (${probe.javaClass.simpleName})")
             if (myGeneration != prepareGeneration) return@launch // 已有更新的装载，丢弃
             when (probe) {
@@ -1023,6 +1145,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         loadIntentPlay = playOnLoad
         val target = items[safeIndex]
         setCurrentTarget(target)
+        // A18：新的队列/新的落点 = 新的播放意图，回退状态与闸门复位
+        decoderFallbackGate.onMediaChanged()
+        decoderFallbackState.clear()
         // REV-11：本次装载的起播位置挂到目标媒体的身份键上，只有该媒体真正生效
         // （applyQueue）后才消费；探测窗口里它一直保留，不会被误当成旧媒体的位置。
         // 起播位置为 0（从头播）时：只保留本来就属于目标媒体的挂起 seek（用户在
@@ -1150,6 +1275,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         if (index !in items.indices) return
         val target = items[index]
         val targetKey = mediaKeyOf(target.sourceId, target.id)
+        // A18：切集是新的播放意图（重播同一集也算），回退状态与闸门复位
+        decoderFallbackGate.onMediaChanged()
+        decoderFallbackState.clear()
         val c = activeController
         if (c == null) {
             // REV-10：断连期间切集也要登记意图（用户点的那一集是重连后的落点）
@@ -1239,6 +1367,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         loadingTargetKey = null
         pendingSessionRestore = false
         restorePositionMs = 0L
+        // A18：队列都没了，解码器回退状态与闸门一并复位
+        decoderFallbackGate.onMediaChanged()
+        decoderFallbackState.clear()
         // REV-04/REV-09：身份与章节归属随媒体一起清空（旧实现不清 _chapters，
         // 迷你条/播放页会一直显示上一个视频的章节列表）
         clearAppliedIdentity()
@@ -1846,6 +1977,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         clearAppliedIdentity()
         chaptersKey = null
         _chapters.value = emptyList()
+        // A18：释放时撤掉进程级回退过滤状态，别影响同一进程里后续的播放意图
+        decoderFallbackGate.onMediaChanged()
+        decoderFallbackState.clear()
         if (!connectDeferred.isCompleted) {
             connectDeferred.completeExceptionally(CancellationException("播放器已释放"))
         }
@@ -2039,6 +2173,28 @@ internal fun npEngineStateOf(
     Player.STATE_ENDED -> PlaybackState.Ended
     else -> PlaybackState.Idle
 }
+
+/**
+ * A17 收尾：本次起播前探测是否必须绕过 `FormatProbe` 结果缓存。
+ *
+ * 常规装载（首次打开 / 切集 / 播完重播）照旧走缓存——命中能把探测那 0.5–1.5s 省掉，
+ * 那正是缓存存在的理由。**错误之后的再来一次**不行：缓存里若躺着一条确定性失败结论
+ * （容器不支持 / 视频编码不支持），`probe()` 会把同一条结论原样送回，用户点「重试」
+ * 永远回到同一个错误（A17 的"二次定罪"）。
+ *
+ * 两条重试路径都要覆盖：
+ * - 用户点错误面板「重试」：引擎里还留着失败闩 [terminalFailure]，状态停在
+ *   [PlaybackState.Error]——所以要在 `probeThenLoad` 复位闩**之前**捕获；
+ * - A18 解码器初始化失败的受控回退：此时失败闩没置、`_state` 也可能还停在 Playing，
+ *   靠 [retryingAfterFailure] 显式带进来（否则回退探测会命中"可播"缓存，白跑一趟）。
+ *
+ * 纯函数，便于 JVM 单测（见 ProbeBypassOnRetryTest）。
+ */
+internal fun shouldBypassProbeCache(
+    terminalFailure: Boolean,
+    state: PlaybackState,
+    retryingAfterFailure: Boolean,
+): Boolean = retryingAfterFailure || terminalFailure || state is PlaybackState.Error
 
 /**
  * 队列身份序列（A15）：逐项取 id，没有 id 的条目退化为 uri。

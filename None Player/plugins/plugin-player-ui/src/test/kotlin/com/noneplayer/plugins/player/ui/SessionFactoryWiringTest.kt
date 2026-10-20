@@ -9,11 +9,6 @@ import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.ServiceLocator
 import com.noneplayer.kernel.api.VideoPlayerFactory
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.test.UnconfinedTestDispatcher
-import kotlinx.coroutines.test.resetMain
-import kotlinx.coroutines.test.setMain
-import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Before
@@ -34,6 +29,11 @@ import kotlin.reflect.KClass
  *
  * 本用例用**记录型** ServiceLocator 直接断言取用键集合：多取/少取、按接口键取，
  * 都会红。以后会话依赖增删，也要同步更新此清单。
+ *
+ * 依赖在 `sessionFactoryOf` 创建时就解析（见 `SessionDependencies`），因此本用例
+ * **不构造** [PlaybackSession]：会话会起一条常驻协程（5s 断点循环等）且没有关闭
+ * API，留在测试里与 `Dispatchers.resetMain()` 并发会偶发
+ * 「Dispatchers.Main is used concurrently with setting it」。
  */
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -42,12 +42,6 @@ internal class SessionFactoryWiringTest {
     @Before
     fun setUp() {
         DataStoreTestReset.reset()
-        Dispatchers.setMain(UnconfinedTestDispatcher())
-    }
-
-    @After
-    fun tearDown() {
-        Dispatchers.resetMain()
     }
 
     @Test
@@ -65,27 +59,25 @@ internal class SessionFactoryWiringTest {
             ),
         )
 
-        val session = sessionFactoryOf(locator).newSession()
-        try {
-            assertEquals(
-                "会话依赖必须全部命中内核已注册的服务键（Kernel.registerKernelServices）",
-                setOf(
-                    Context::class,
-                    VideoPlayerFactory::class,
-                    ExtensionRegistry::class,
-                    AppSettings::class,
-                    EventBus::class,
-                    HistoryRepository::class,
-                ),
-                locator.requested.toSet(),
-            )
-            assertFalse(
-                "PlaybackHistoryStore 是会话契约接口而非内核服务键；按接口键查找会导致真机引导失败",
-                locator.requested.contains(PlaybackHistoryStore::class),
-            )
-        } finally {
-            session.stop()
-        }
+        // 只创建工厂、不建会话：依赖在此刻取齐（回归点），且不会留下常驻协程。
+        sessionFactoryOf(locator)
+
+        assertEquals(
+            "会话依赖必须全部命中内核已注册的服务键（Kernel.registerKernelServices）",
+            setOf(
+                Context::class,
+                VideoPlayerFactory::class,
+                ExtensionRegistry::class,
+                AppSettings::class,
+                EventBus::class,
+                HistoryRepository::class,
+            ),
+            locator.requested.toSet(),
+        )
+        assertFalse(
+            "PlaybackHistoryStore 是会话契约接口而非内核服务键；按接口键查找会导致真机引导失败",
+            locator.requested.contains(PlaybackHistoryStore::class),
+        )
     }
 }
 

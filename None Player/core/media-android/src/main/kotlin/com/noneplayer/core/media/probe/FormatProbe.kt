@@ -108,43 +108,67 @@ object FormatProbe {
         lastModifiedSec: Long = 0L,
         /** 预探测传 false：`ProbeMemo` 是"最近**起播**的那一条"的排障入口，不该被预热写脏 */
         recordMemo: Boolean = true,
+        /**
+         * REV-04/A17：错误面板「重试」必须绕过缓存。
+         *
+         * 之前只有 `cacheable` 一道门：缓存里躺着一条"容器不支持"，用户点重试还是同一条，
+         * 永远回到同一个错误。传 true 强制现场重探（配合 [invalidate] 清掉旧结论）。
+         */
+        bypassCache: Boolean = false,
     ): Result {
         val cacheable = sizeBytes > 0L && uriString.isNotEmpty()
-        if (cacheable) {
+        if (cacheable && !bypassCache) {
             resultCache.get(uriString)?.takeIf {
                 it.sizeBytes == sizeBytes && it.lastModifiedSec == lastModifiedSec
             }?.let { hit ->
                 // 命中要留声：切集耗时里"probe 段变短"必须能区分是命中还是碰巧读得快
-                android.util.Log.d("FormatProbe", "命中缓存(${hit.result.javaClass.simpleName}) $uriString")
-                return hit.result
+                android.util.Log.d(
+                    "FormatProbe",
+                    "命中缓存(${hit.outcome.result.javaClass.simpleName}) $uriString",
+                )
+                return hit.outcome.result
             }
         }
         return withContext(Dispatchers.IO) {
             try {
                 probeLocal(context.applicationContext, uriString, expectedMime)
-                    .also { if (recordMemo) recordMemo(uriString, it) }
+                    .also { outcome ->
+                        if (recordMemo) recordMemo(uriString, outcome.result)
+                        // REV-04/A17：只有确定性结论进缓存；Unknown / unreadable / 查询异常
+                        // 都是瞬态，重探一次可能就通了，不能把它们固化成永久判决
+                        if (cacheable && outcome.cacheable) {
+                            resultCache.put(
+                                uriString,
+                                ProbeCacheEntry(sizeBytes, lastModifiedSec, outcome),
+                            )
+                        }
+                    }
+                    .result
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (t: Throwable) {
+                // 查询/读取异常 → Unknown（诊断放行），不冒充确定结论、不缓存
                 Result.Unknown
-            }
-        }.also {
-            // Unknown（远程流 / 读取异常 / 超预算）没有结论，不缓存——放行不等于验证过
-            if (cacheable && it != Result.Unknown) {
-                resultCache.put(uriString, Memoized(sizeBytes, lastModifiedSec, it))
             }
         }
     }
 
-    /** 探测结果缓存条目：结论 + 它成立时所依据的文件指纹 */
-    private data class Memoized(val sizeBytes: Long, val lastModifiedSec: Long, val result: Result)
+    /**
+     * REV-04/A17：错误面板「重试」前清掉该 uri 的缓存结论。
+     *
+     * 与 `probe(bypassCache = true)` 互补：一个清旧账，一个强制现场重探。
+     */
+    fun invalidate(uriString: String) {
+        resultCache.invalidate(uriString)
+    }
 
     /**
-     * uri → 结论。上限按"一个文件夹一季"量级给 64 条，结论本身是几个字符串，不心疼。
+     * uri → 确定性结论。上限按"一个文件夹一季"量级给 64 条，结论本身是几个字符串，不心疼。
      *
-     * `LruCache` 自身方法同步，够这里用（并发预探测最多几条，撞上了也就是多探一次）。
+     * 纯 Kotlin 的 [ProbeResultCache]（不是 `android.util.LruCache`）：缓存策略因此能在
+     * 纯 JVM 单测里直接验证；并发预探测最多几条，撞上了也就是多探一次。
      */
-    private val resultCache = android.util.LruCache<String, Memoized>(64)
+    private val resultCache = ProbeResultCache()
 
     /**
      * 最近探测摘要（E39 余项 + §12.3 解码诊断，批次 8）：设置页「解码诊断」的
@@ -209,11 +233,18 @@ object FormatProbe {
     private const val HEAD_CAP = 4 * 1024
 
     /**
+     * REV-05：读取样本时的固定 scratch（每次 read 请求上限）。
+     * 不再按样本 `length` 分配整段数组——超大样本（可达数十 MB）会直接 OOM；
+     * 分块读完后只截留 head 需要的前缀，其余块读完即丢。
+     */
+    private const val SAMPLE_SCRATCH_BYTES = 64 * 1024
+
+    /**
      * suspend + 循环内 `ensureActive()`：探测跑在 IO 线程上、一读最多 400 轮，
      * 不可取消的话，"已经被用户切集取代的那次预热探测"会把磁盘通道占到底——
      * 平板实测撞上时同一次真探测从 589ms 涨到 1799ms。取消必须能在两轮读之间落地。
      */
-    private suspend fun probeLocal(context: Context, uriString: String, expectedMime: String?): Result {
+    private suspend fun probeLocal(context: Context, uriString: String, expectedMime: String?): ProbeOutcome {
         // 预期类型决定"没有视频轨"怎么判读（批次 8，音频文件实播暴露）：
         //  - 音频文件（mime audio/*）：只有音频轨是**正常**，不是失败；
         //  - 视频文件：缺视频轨照旧拦截（E80——wmv2-clip.avi 的"音频播完无声失败"）；
@@ -222,7 +253,7 @@ object FormatProbe {
             if (it.startsWith("audio/", true)) false else if (it.startsWith("video/", true)) true else null
         }
         val uri = uriString.toUri()
-        if (uri.scheme?.lowercase() !in PROBE_SCHEMES) return Result.Unknown
+        if (uri.scheme?.lowercase() !in PROBE_SCHEMES) return ProbeOutcome.transient(Result.Unknown)
 
         val containerName = MediaNames.containerName(uriString)
         val totalLength = localLength(context, uri)
@@ -252,17 +283,27 @@ object FormatProbe {
                 input.resetPeekPosition()
             }
             if (matched == null) {
-                return Result.Unplayable(
-                    if (sniffThrew) PlaybackFailure.unreadable(containerName)
-                    else PlaybackFailure.containerUnsupported(containerName),
-                )
+                // sniff 抛异常 = 瞬态读失败，不缓存；没有解封装器认领才是确定结论
+                return if (sniffThrew) {
+                    ProbeOutcome.transient(
+                        Result.Unplayable(PlaybackFailure.unreadable(containerName)),
+                    )
+                } else {
+                    ProbeOutcome(
+                        Result.Unplayable(PlaybackFailure.containerUnsupported(containerName)),
+                        ProbeVerdict.CONTAINER_UNSUPPORTED,
+                    )
+                }
             }
 
             val output = ProbeOutput()
             try {
                 matched.init(output)
             } catch (_: Throwable) {
-                return Result.Unplayable(PlaybackFailure.unreadable(containerName))
+                // 解封装器初始化失败（I/O、SAF 失效…）：瞬态，不缓存
+                return ProbeOutcome.transient(
+                    Result.Unplayable(PlaybackFailure.unreadable(containerName)),
+                )
             }
             // MediaStore 的 content:// 地址没有扩展名：容器名以"谁认领了它"为准
             val effectiveContainer = containerFromExtractor(matched) ?: containerName
@@ -326,9 +367,15 @@ object FormatProbe {
             if (output.formats.isEmpty() &&
                 (readThrew || (!output.tracksEnded && reads >= MAX_READS))
             ) {
-                return Result.Unknown
+                return ProbeOutcome.transient(Result.Unknown)
             }
-            return output.decide(effectiveContainer, expectVideo)
+            val outcome = output.decide(effectiveContainer, expectVideo)
+            // 解复用中途失败过：即便算出了结论，也按瞬态处理（不写缓存，下次重探）
+            return if (readThrew) {
+                ProbeOutcome(outcome.result, ProbeVerdict.NON_DETERMINISTIC)
+            } else {
+                outcome
+            }
         } finally {
             runCatching { dataSource.close() }
         }
@@ -366,21 +413,11 @@ object FormatProbe {
     }.getOrNull()
 
     /**
-     * 平台音频解码器查询（批次 8）：与视频版 [hasPlatformDecoder] 同源，
-     * 采样率/声道缺失时按常见档位查询；查询失败 fail-open（视为支持）。
+     * 平台音频解码器三态查询（批次 8 + REV-04/A17）：null=查询异常，不得冒充确定支持/不支持。
+     * 采样率/声道缺失时按常见档位查询（与视频查询同源，见 [PlatformDecoderSupport.platformDecoderQuery]）。
      */
-    private fun hasPlatformAudioDecoder(format: Format): Boolean {
-        val mime = format.sampleMimeType ?: return true
-        return runCatching {
-            val platform = PlatformMediaFormat.createAudioFormat(
-                mime,
-                // media3 的 sampleRate/channelCount 是 int（缺省哨兵 -1），非空判断恒真
-                if (format.sampleRate > 0) format.sampleRate else 48_000,
-                if (format.channelCount > 0) format.channelCount else 2,
-            )
-            MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(platform) != null
-        }.getOrDefault(true)
-    }
+    private fun platformAudioDecoderQuery(format: Format): Boolean? =
+        PlatformDecoderSupport.platformDecoderQuery(format)
 
     /** 声道数 → 常见布局名（§12.3 面板展示用；非标准声道如实给数字） */
     private fun audioLayoutName(channels: Int): String = when (channels) {
@@ -394,7 +431,8 @@ object FormatProbe {
     private val Format.isVideoTrack: Boolean
         get() = sampleMimeType?.startsWith("video/") == true
 
-    private class ProbeOutput : ExtractorOutput {
+    // R3-11/REV-05：internal 仅为同模块纯 JVM 测试可见（零行为变化；可见性偏差已报 Lead）
+    internal class ProbeOutput : ExtractorOutput {
         val formats = mutableListOf<Format>()
         var tracksEnded = false
             private set
@@ -411,6 +449,8 @@ object FormatProbe {
             private val isVideo = type == C.TRACK_TYPE_VIDEO
             private val head: ByteArrayOutputStream? = if (isVideo) ByteArrayOutputStream() else null
             private var sampleCaptured = false
+            // 视频轨专用的固定读取 scratch（惰性分配；REV-05：不随样本 length 增长）
+            private var scratch: ByteArray? = null
 
             override fun format(format: Format) {
                 formats.add(format)
@@ -426,18 +466,20 @@ object FormatProbe {
                 if (head == null || firstVideoSampleHead != null) {
                     return discard.sampleData(input, length, allowEndOfInput, sampleDataPart)
                 }
-                // 视频轨首样本：自读以截留前导字节，读完即丢（不改变 input 消费语义）
-                val buf = ByteArray(length)
+                // 视频轨首样本：固定 scratch 分块自读，只截留前导字节，其余读完即丢。
+                // REV-05：禁止 ByteArray(length) 整段分配（大样本会 OOM）；分块只改变
+                // 读取粒度，不改变 input 消费语义与返回字节数（EOF 处理与旧实现一致）。
+                val buffer = scratch ?: ByteArray(SAMPLE_SCRATCH_BYTES).also { scratch = it }
                 var read = 0
                 while (read < length) {
-                    val n = input.read(buf, read, length - read)
+                    val n = input.read(buffer, 0, minOf(buffer.size, length - read))
                     if (n == -1) {
                         if (allowEndOfInput) break
                         error("unexpected EOF in sampleData read=$read/$length")
                     }
+                    captureHead(head, buffer, 0, n)
                     read += n
                 }
-                captureHead(head, buf, 0, read)
                 return read
             }
 
@@ -491,8 +533,14 @@ object FormatProbe {
             return !needsHead || firstVideoSampleHead != null
         }
 
-        /** 探测结论：容器/编码名 + 平台解码器查询（含 §12.9.4 profile 求交） */
-        fun decide(containerName: String?, expectVideo: Boolean?): Result {
+        /**
+         * 探测结论（REV-04/A17 起带确定性分类）：容器/编码名 + 解码器查询（含 §12.9.4 profile 求交）。
+         *
+         * 关键区分：查询异常 ≠ 确定不支持。以前查询失败按 fail-open 返回「支持」，
+         * 后续播放失败又被缓存“定罪”；现在异常一律走 [ProbeVerdict.NON_DETERMINISTIC]，
+         * 结果照常放行给引擎，但不写缓存。
+         */
+        fun decide(containerName: String?, expectVideo: Boolean?): ProbeOutcome {
             val video = formats.firstOrNull { it.isVideoTrack }
             val audio = formats.firstOrNull { it.sampleMimeType?.startsWith("audio/") == true }
             val videoName = MediaNames.videoCodecName(video?.sampleMimeType)
@@ -501,20 +549,35 @@ object FormatProbe {
             if (video == null) {
                 // 纯音频文件（audio/* 预期）：音频轨在、且本机解得动 → 可播
                 if (expectVideo == false && audio != null) {
-                    val audioDecodable = hasPlatformAudioDecoder(audio) || ffmpegSupports(audio.sampleMimeType)
+                    // A17：平台查询三态——查询异常不能当「支持」，也不能当「不支持」
+                    val audioQuery = platformAudioDecoderQuery(audio)
+                    val audioDecodable = audioQuery == true || ffmpegSupports(audio.sampleMimeType)
                     if (audioDecodable) {
-                        return Result.Playable(
-                            container = containerName,
-                            videoCodec = null,
-                            audioCodec = audioName,
-                            audioChannels = audio.channelCount.takeIf { it > 0 }?.let(::audioLayoutName),
+                        return ProbeOutcome(
+                            Result.Playable(
+                                container = containerName,
+                                videoCodec = null,
+                                audioCodec = audioName,
+                                audioChannels = audio.channelCount.takeIf { it > 0 }?.let(::audioLayoutName),
+                            ),
+                            verdict = if (audioQuery != null) {
+                                ProbeVerdict.PLAYABLE
+                            } else {
+                                ProbeVerdict.NON_DETERMINISTIC
+                            },
                         )
                     }
-                    return Result.Unplayable(
-                        PlaybackFailure.audioCodecUnsupported(containerName, audioName),
+                    // audioCodecUnsupported 不在可缓存的三类结论里：按瞬态处理，下次重探
+                    return ProbeOutcome.transient(
+                        Result.Unplayable(
+                            PlaybackFailure.audioCodecUnsupported(containerName, audioName),
+                        ),
                     )
                 }
-                return Result.Unplayable(PlaybackFailure.unknownVideoCodec(containerName, audioName))
+                // 有音频轨却没视频轨：可能是读取被截断导致的轨道表不全，拿不准
+                return ProbeOutcome.transient(
+                    Result.Unplayable(PlaybackFailure.unknownVideoCodec(containerName, audioName)),
+                )
             }
             // 解码能力 = 平台解码器 或 内置 FFmpeg 软解 或 AVI MJPEG 位图软解
             // （播放链是"硬解优先 + 扩展兜底 + MJPEG 位图兜底"，三段的顺序与来源见
@@ -527,67 +590,93 @@ object FormatProbe {
                 else -> null
             }
             val audioLayout = audio?.channelCount?.takeIf { it > 0 }?.let(::audioLayoutName)
-            val platformVideo = hasPlatformDecoder(video)
+            val platformVideoQuery = platformVideoDecoderQuery(video)
+            val platformVideo = platformVideoQuery == true
             val ffmpegVideo = ffmpegSupports(video.sampleMimeType)
             val bitmapVideo = bitmapRendererSupports(video.sampleMimeType)
             val legacyVideo = legacySupports(video.sampleMimeType)
             // A11：有视频轨时也要查音频解码器。H.264 + WMA/DTS/TrueHD 这类组合
             // 以前一律判 Playable，起播后无声或音频渲染器报错，用户拿不到原因。
+            // A17：只有平台**明确**说没有时才敢声明 audioUnsupported（查询异常不冒充）。
+            val audioQuery = audio?.let { platformAudioDecoderQuery(it) }
             val audioUnsupported = audio != null &&
-                !hasPlatformAudioDecoder(audio) &&
+                audioQuery == false &&
                 !ffmpegSupports(audio.sampleMimeType)
             if (!platformVideo && !ffmpegVideo && !bitmapVideo && !legacyVideo) {
-                return Result.Unplayable(
-                    PlaybackFailure.videoCodecUnsupported(containerName, videoName, audioName),
-                )
+                // A17：平台查询异常时「没有解码器」可能只是没查到，不能冒充确定不支持
+                return if (platformVideoQuery == null) {
+                    ProbeOutcome.transient(Result.Unknown)
+                } else {
+                    ProbeOutcome(
+                        Result.Unplayable(
+                            PlaybackFailure.videoCodecUnsupported(containerName, videoName, audioName),
+                        ),
+                        ProbeVerdict.VIDEO_CODEC_UNSUPPORTED,
+                    )
+                }
             }
             // §12.9.4：有解码器，但档次可能不被设备解码器支持（mp4v ASP vs Simple-only）
             profileMismatch(video, containerName, videoName, audioName)?.let { return it }
-            return Result.Playable(
-                container = containerName,
-                videoCodec = videoName,
-                audioCodec = audioName,
-                hdr = hdr,
-                audioChannels = audioLayout,
-                // 平台没有该编码的解码器、只能靠 FFmpeg 或 MJPEG 位图出画时，同样是"仅软解可用"，
-                // 也要给 C21 前置提示（否则用户只会觉得"莫名其妙很卡/很烫"）。
-                // 不用再判 `ffmpegVideo || bitmapVideo`：上面 unsupported 的早退已保证三者至少
-                // 其一成立，走到这里 `!platformVideo` 就必然是两条软解之一出画。
-                softwareVideoOnly = onlySoftwareDecoder(video) || !platformVideo,
-                audioUnsupported = audioUnsupported,
+            val queryFailed = platformVideoQuery == null || (audio != null && audioQuery == null)
+            return ProbeOutcome(
+                Result.Playable(
+                    container = containerName,
+                    videoCodec = videoName,
+                    audioCodec = audioName,
+                    hdr = hdr,
+                    audioChannels = audioLayout,
+                    // 平台没有该编码的解码器、只能靠 FFmpeg 或 MJPEG 位图出画时，同样是"仅软解可用"，
+                    // 也要给 C21 前置提示（否则用户只会觉得"莫名其妙很卡/很烫"）。
+                    // 不用再判 `ffmpegVideo || bitmapVideo`：上面 unsupported 的早退已保证三者至少
+                    // 其一成立，走到这里 `!platformVideo` 就必然是两条软解之一出画。
+                    softwareVideoOnly = onlySoftwareDecoder(video) || !platformVideo,
+                    audioUnsupported = audioUnsupported,
+                ),
+                verdict = if (queryFailed) ProbeVerdict.NON_DETERMINISTIC else ProbeVerdict.PLAYABLE,
             )
         }
 
         /**
-         * MPEG-4 ASP 档次拦截（§12.9.4）：判读码流需要的 profile，与设备 mp4v 解码器声明的
-         * `profileLevels` 求交。仅当"码流确需 Advanced Simple 且无任何解码器声明 ASP"时
-         * 返回 [Result.Unplayable]；拿不准一律返回 null（fail-open 放行给引擎）。
+         * MPEG-4 ASP 档次拦截（§12.9.4 + A17）：判读码流需要的 profile，与**将被选中的**
+         * 那个 mp4v 解码器声明的 `profileLevels` 求交；全设备并集只在拿不到选中信息时兜底。
+         *
+         * 三态：false → 放行平台链；null → 查询异常，放行（fail-open）但结论不缓存；
+         * true → 返回确定的「档次不支持」，可缓存。
          */
         private fun profileMismatch(
             video: Format,
             containerName: String?,
             videoName: String?,
             audioName: String?,
-        ): Result? {
+        ): ProbeOutcome? {
             if (video.sampleMimeType != MIME_MP4V) return null
             val header = video.initializationData.firstOrNull()?.takeIf { it.isNotEmpty() }
                 ?: firstVideoSampleHead
                 ?: return null
-            if (!Mp4vAspGate.requiresDedicatedDecoder(header)) return null
-            // 设备上所有 mp4v 解码器声明的 profile 集合。走到这里时列表非空且不含 ASP。
-            val deviceProfiles = Mp4vAspGate.deviceProfiles()
-            return Result.Unplayable(
-                PlaybackFailure.videoProfileUnsupported(
-                    container = containerName,
-                    videoCodec = videoName,
-                    audioCodec = audioName,
-                    requiredProfile = "Advanced Simple Profile",
-                    deviceProfiles = deviceProfiles
-                        .map { mpeg4ProfileName(it) }
-                        .distinct()
-                        .joinToString(" / "),
-                ),
-            )
+            return when (Mp4vAspGate.needsDedicatedDecoder(header, video)) {
+                false -> null
+                // 设备查询异常：不冒充「设备不支持 ASP」，也不缓存这条结论
+                null -> ProbeOutcome.transient(Result.Unknown)
+                true -> {
+                    // 诊断展示用：设备上所有 mp4v 解码器声明的 profile 集合
+                    val deviceProfiles = Mp4vAspGate.deviceProfiles()
+                    ProbeOutcome(
+                        Result.Unplayable(
+                            PlaybackFailure.videoProfileUnsupported(
+                                container = containerName,
+                                videoCodec = videoName,
+                                audioCodec = audioName,
+                                requiredProfile = "Advanced Simple Profile",
+                                deviceProfiles = deviceProfiles
+                                    .map { mpeg4ProfileName(it) }
+                                    .distinct()
+                                    .joinToString(" / "),
+                            ),
+                        ),
+                        ProbeVerdict.VIDEO_CODEC_UNSUPPORTED,
+                    )
+                }
+            }
         }
     }
 
@@ -613,9 +702,9 @@ object FormatProbe {
     private fun onlySoftwareDecoder(format: Format): Boolean =
         !PlatformDecoderSupport.hasHardwareDecoder(format)
 
-    /** 平台解码器查询：与系统同源（MediaCodecList），尺寸缺失时按常见档位查询 */
-    private fun hasPlatformDecoder(format: Format): Boolean =
-        PlatformDecoderSupport.hasPlatformDecoder(format)
+    /** 平台视频解码器三态查询（REV-04/A17）：null=查询异常，不得冒充确定支持/不支持。 */
+    private fun platformVideoDecoderQuery(format: Format): Boolean? =
+        PlatformDecoderSupport.platformDecoderQuery(format)
 
     /**
      * 内置 FFmpeg（NextLib）能否软解该编码。
@@ -647,9 +736,94 @@ object FormatProbe {
     private fun bitmapRendererSupports(mime: String?): Boolean = mime == MIME_MJPEG
 
     /**
-     * libnplegacy 是否认这个 mime。加载失败是 false，不能像 [hasPlatformDecoder] 那样 fail-open。
-     * 表外 mime 不触发加载。
+     * libnplegacy 是否认这个 mime。加载失败是 false，不能像
+     * [PlatformDecoderSupport.hasPlatformDecoder] 那样 fail-open。表外 mime 不触发加载。
      */
     private fun legacySupports(mime: String?): Boolean =
         runCatching { LegacyDecoderLibrary.supports(mime) }.getOrDefault(false)
+}
+
+// ---------------------------------------------------------------------------
+// R3-14 / REV-04 / A17：探测结论的确定性分类与缓存
+// ---------------------------------------------------------------------------
+
+/**
+ * 结论的确定性分类：决定它能否被缓存。
+ *
+ * [FormatProbe.Result] 本身分不出「明确的结论」与「查询异常下算出的结论」——
+ * `PlaybackFailure.reason` 是自由文本，不能当分类依据。A17 的「同一份错误结论二次定罪」
+ * 就是缺了这层分类：只缓存 Playable / 容器不支持 / 视频编码（含档次）不支持。
+ */
+internal enum class ProbeVerdict {
+    PLAYABLE,
+    CONTAINER_UNSUPPORTED,
+    VIDEO_CODEC_UNSUPPORTED,
+
+    /** 拿不准：Unknown、瞬态 I/O、读取/sniff 抛异常、设备查询异常 —— 一律不缓存。 */
+    NON_DETERMINISTIC,
+}
+
+/** 一次探测的结论 + 确定性分类（缓存的唯一入场券）。 */
+internal data class ProbeOutcome(
+    val result: FormatProbe.Result,
+    val verdict: ProbeVerdict,
+) {
+    val cacheable: Boolean get() = verdict != ProbeVerdict.NON_DETERMINISTIC
+
+    companion object {
+        /** 拿不准的结论：放行给引擎，但绝不进缓存。 */
+        fun transient(result: FormatProbe.Result): ProbeOutcome =
+            ProbeOutcome(result, ProbeVerdict.NON_DETERMINISTIC)
+    }
+}
+
+/** 缓存条目：确定性结论 + 它成立时所依据的文件指纹。 */
+internal data class ProbeCacheEntry(
+    val sizeBytes: Long,
+    val lastModifiedSec: Long,
+    val outcome: ProbeOutcome,
+)
+
+/**
+ * uri → 探测结论的 LRU 缓存（纯 Kotlin，可在 JVM 单测里验证；不依赖 android.util.LruCache）。
+ *
+ * 只收 [ProbeOutcome.cacheable] 的条目：`put` 对瞬态结论直接拒绝并返回 false。
+ * 同一条目并发读写走 `@Synchronized`；缓存本身只是省一次 0.5–1.5s 的探测，不值得无锁化。
+ */
+internal class ProbeResultCache(private val capacity: Int = DEFAULT_CAPACITY) {
+
+    private val entries = object : LinkedHashMap<String, ProbeCacheEntry>(capacity, 0.75f, true) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<String, ProbeCacheEntry>,
+        ): Boolean = size > capacity
+    }
+
+    @Synchronized
+    fun get(uri: String): ProbeCacheEntry? = entries[uri]
+
+    /** 返回是否真的写入（瞬态结论会被门拒绝）。 */
+    @Synchronized
+    fun put(uri: String, entry: ProbeCacheEntry): Boolean {
+        if (!entry.outcome.cacheable) return false
+        entries[uri] = entry
+        return true
+    }
+
+    @Synchronized
+    fun invalidate(uri: String) {
+        entries.remove(uri)
+    }
+
+    @Synchronized
+    fun clear() {
+        entries.clear()
+    }
+
+    @Synchronized
+    fun size(): Int = entries.size
+
+    companion object {
+        /** 上限按"一个文件夹一季"量级给 64 条；结论本身是几个字符串，不心疼。 */
+        const val DEFAULT_CAPACITY = 64
+    }
 }

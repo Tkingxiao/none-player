@@ -16,7 +16,6 @@ import androidx.media3.extractor.TrackOutput
 import com.noneplayer.core.media.MediaNames
 import com.noneplayer.core.media.legacy.LegacyDecoderLibrary
 import com.noneplayer.core.media.probe.Mp4vAspGate
-import java.io.ByteArrayOutputStream
 import java.io.EOFException
 
 /**
@@ -83,7 +82,16 @@ class Mp4vAspRewritingExtractor(private val inner: Extractor) : Extractor {
             private set
         private var pendingFormat: Format? = null
         private var decided = false
-        private val hold = ByteArrayOutputStream()
+
+        /**
+         * 决策头有界缓冲：只保留前 [HEAD_CAP] 字节（REV-05：禁止累积整样本）。
+         * 旧实现用 ByteArrayOutputStream 装整样本，大样本会直接 OOM。
+         */
+        private val head = ByteArray(HEAD_CAP)
+        private var headSize = 0
+
+        /** 决策后剩余字节的固定转发 scratch（不随样本 length 增长） */
+        private val scratch = ByteArray(SAMPLE_FORWARD_SCRATCH_BYTES)
 
         override fun format(format: Format) {
             if (decided || format.sampleMimeType != MIME_MP4V) {
@@ -109,20 +117,30 @@ class Mp4vAspRewritingExtractor(private val inner: Extractor) : Extractor {
             sampleDataPart: Int,
         ): Int {
             if (decided) return downstream.sampleData(input, length, allowEndOfInput, sampleDataPart)
-            val tmp = ByteArray(length)
             var read = 0
-            while (read < length) {
-                val n = input.read(tmp, read, length - read)
+            // 先有界地读满决策头（最多 HEAD_CAP，绝不为整样本分配）；头满即决策并转发。
+            while (read < length && headSize < HEAD_CAP) {
+                val n = input.read(head, headSize, minOf(HEAD_CAP - headSize, length - read))
                 if (n == C.RESULT_END_OF_INPUT) {
                     if (allowEndOfInput) break
                     throw EOFException("mp4v sample")
                 }
+                headSize += n
                 read += n
             }
-            if (read > 0) hold.write(tmp, 0, read)
-            if (hold.size() >= HEAD_CAP) {
+            if (headSize >= HEAD_CAP) {
                 decide()
-                flushHold(sampleDataPart)
+                flushHead(sampleDataPart)
+            }
+            // 决策后剩余字节：固定 scratch 分块边读边转发（保持字节顺序，不累积整样本）。
+            while (read < length) {
+                val n = input.read(scratch, 0, minOf(scratch.size, length - read))
+                if (n == C.RESULT_END_OF_INPUT) {
+                    if (allowEndOfInput) break
+                    throw EOFException("mp4v sample")
+                }
+                downstream.sampleData(ParsableByteArray(scratch, n), n, sampleDataPart)
+                read += n
             }
             return read
         }
@@ -133,13 +151,24 @@ class Mp4vAspRewritingExtractor(private val inner: Extractor) : Extractor {
                 return
             }
             val start = data.position
-            val take = minOf(length, data.bytesLeft())
-            if (take > 0) hold.write(data.data, start, take)
-            data.skipBytes(length)
-            if (hold.size() >= HEAD_CAP) {
-                decide()
-                flushHold(sampleDataPart)
+            val available = minOf(length, data.bytesLeft())
+            val headTake = minOf(available, HEAD_CAP - headSize)
+            if (headTake > 0) {
+                System.arraycopy(data.data, start, head, headSize, headTake)
+                headSize += headTake
             }
+            if (headSize >= HEAD_CAP) {
+                decide()
+                flushHead(sampleDataPart)
+                // 头部已转发，剩余可用字节零拷贝转发（超 HEAD_CAP 的部分同样不得丢弃）。
+                val rest = available - headTake
+                if (rest > 0) {
+                    val restView = ParsableByteArray(data.data, start + headTake + rest)
+                    restView.setPosition(start + headTake)
+                    downstream.sampleData(restView, rest, sampleDataPart)
+                }
+            }
+            data.skipBytes(length)
         }
 
         override fun sampleMetadata(
@@ -151,7 +180,7 @@ class Mp4vAspRewritingExtractor(private val inner: Extractor) : Extractor {
         ) {
             if (!decided) {
                 decide()
-                flushHold(TrackOutput.SAMPLE_DATA_PART_MAIN)
+                flushHead(TrackOutput.SAMPLE_DATA_PART_MAIN)
             }
             downstream.sampleMetadata(timeUs, flags, size, offset, cryptoData)
         }
@@ -159,9 +188,9 @@ class Mp4vAspRewritingExtractor(private val inner: Extractor) : Extractor {
         fun flushPending() {
             // AviExtractor 在读到 movi 样本之前就 endTracks。这时还没有 VOS/VOL，
             // 不能把 video/mp4v-es 先交出去，否则后面的样本来了也改不了 mime。
-            if (decided || pendingFormat == null || hold.size() == 0) return
+            if (decided || pendingFormat == null || headSize == 0) return
             decide()
-            flushHold(TrackOutput.SAMPLE_DATA_PART_MAIN)
+            flushHead(TrackOutput.SAMPLE_DATA_PART_MAIN)
         }
 
         private fun decide() {
@@ -171,7 +200,7 @@ class Mp4vAspRewritingExtractor(private val inner: Extractor) : Extractor {
                 decided = true
                 return
             }
-            val header = hold.toByteArray()
+            val header = if (headSize > 0) head.copyOf(headSize) else ByteArray(0)
             downstream.format(if (header.isEmpty()) format else rewrite(format, header))
             decided = true
             awaitingSample = false
@@ -179,15 +208,17 @@ class Mp4vAspRewritingExtractor(private val inner: Extractor) : Extractor {
             onFormatReady()
         }
 
-        private fun flushHold(sampleDataPart: Int) {
-            if (hold.size() == 0) return
-            val bytes = hold.toByteArray()
-            hold.reset()
+        private fun flushHead(sampleDataPart: Int) {
+            if (headSize == 0) return
+            val bytes = head.copyOf(headSize)
+            headSize = 0
             downstream.sampleData(ParsableByteArray(bytes), bytes.size, sampleDataPart)
         }
 
         private fun rewrite(format: Format, header: ByteArray): Format {
-            val legacy = Mp4vAspGate.requiresDedicatedDecoder(header) &&
+            // R3-14/A17：探测路径与改写路径必须同口径——把本次决定改写的视频格式一起带上，
+            // 让 gate 查「马上要被选中的那一个解码器」的 profileLevels，而不是全设备并集
+            val legacy = Mp4vAspGate.requiresDedicatedDecoder(header, format) &&
                 LegacyDecoderLibrary.supports(MediaNames.MIME_MPEG4_ASP)
             if (!legacy) return format
             Log.d(TAG, "mp4v-es -> ${MediaNames.MIME_MPEG4_ASP}")
@@ -199,5 +230,8 @@ class Mp4vAspRewritingExtractor(private val inner: Extractor) : Extractor {
         const val TAG = "Mp4vAsp"
         const val MIME_MP4V = "video/mp4v-es"
         const val HEAD_CAP = 4 * 1024
+
+        /** REV-05：决策后剩余字节的转发块大小（固定上限，不随样本 length 增长） */
+        const val SAMPLE_FORWARD_SCRATCH_BYTES = 64 * 1024
     }
 }

@@ -1,8 +1,13 @@
 package com.noneplayer.plugins.player.ui
 
 import android.annotation.SuppressLint
+import android.content.Context
+import com.noneplayer.core.data.AppSettings
+import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.ExtensionRegistry
 import com.noneplayer.kernel.api.ServiceLocator
+import com.noneplayer.kernel.api.VideoPlayerFactory
 import com.noneplayer.kernel.api.get
 
 /**
@@ -46,19 +51,52 @@ internal interface KernelServicesView {
     fun newSession(): PlaybackSession
 }
 
-/** ServiceLocator → 会话工厂的适配（把四个依赖一次性取齐） */
-internal fun sessionFactoryOf(services: ServiceLocator): KernelServicesView =
-    object : KernelServicesView {
-        override fun newSession(): PlaybackSession = PlaybackSession(
-            context = services.get(),
-            factory = services.get(),
-            registry = services.get<ExtensionRegistry>(),
-            settings = services.get(),
-            events = services.get(),
-            // 必须写显式类型：PlaybackSession.history 的参数类型是契约接口
-            // PlaybackHistoryStore，靠类型推断会按**接口键**查 ServiceLocator；
-            // 内核只注册 HistoryRepository 实现 → 引导期直接抛「内核服务未注册」。
-            // 2026-10-20 真机（Release/R8）冒烟发现的装配回归，勿改回省略写法。
-            history = services.get<com.noneplayer.core.database.HistoryRepository>(),
-        )
+/**
+ * 会话依赖的**显式**解析结果。
+ *
+ * 每个字段都写明类型（尤其 [history] 用实现类而不是契约接口）：`services.get()`
+ * 的 reified 类型推断会跟随目标参数类型——若此处省略类型，`PlaybackSession.history`
+ * 的参数类型是契约接口 `PlaybackHistoryStore`，推断就会按**接口键**查
+ * ServiceLocator；而内核只注册 `HistoryRepository` 实现 → 引导期直接抛
+ * 「内核服务未注册」。2026-10-20 真机（Release/R8）冒烟发现过该装配回归，
+ * 回归用例见 `SessionFactoryWiringTest`，依赖增删要同步更新那里的键清单。
+ */
+internal class SessionDependencies(
+    private val context: Context,
+    private val factory: VideoPlayerFactory,
+    private val registry: ExtensionRegistry,
+    private val settings: AppSettings,
+    private val events: EventBus,
+    private val history: HistoryRepository,
+) {
+    /** 每次调用新建一份会话（进程级单例由 [SessionHolder] 保证，这里只负责装配）。 */
+    fun newSession(): PlaybackSession = PlaybackSession(
+        context = context,
+        factory = factory,
+        registry = registry,
+        settings = settings,
+        events = events,
+        history = history,
+    )
+}
+
+/**
+ * ServiceLocator → 会话工厂的适配（把依赖一次性取齐且类型显式）。
+ *
+ * 依赖在**工厂创建时**解析而不是推迟到 [KernelServicesView.newSession]：这样装配
+ * 问题与真实调用点同时机暴露（`PlayerUiPlugin.onBind` 建会话前就会取齐），也让
+ * 回归测试只断言取用键、不必真的构造一个持有协程的 [PlaybackSession]。
+ */
+internal fun sessionFactoryOf(services: ServiceLocator): KernelServicesView {
+    val dependencies = SessionDependencies(
+        context = services.get(),
+        factory = services.get(),
+        registry = services.get(),
+        settings = services.get(),
+        events = services.get(),
+        history = services.get(),
+    )
+    return object : KernelServicesView {
+        override fun newSession(): PlaybackSession = dependencies.newSession()
     }
+}
