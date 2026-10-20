@@ -1,6 +1,6 @@
 # 解码链与扩展依赖记录
 
-核对：2026-10-12。修正旧稿“默认不内置FFmpeg”“无视频软解”的过时结论。
+源码核对：2026-10-20，`060f3f4` + 当前工作树。本文下方 2026-10-14 的设备/ABI/体积记录是历史结果，本轮没有重跑 native 或设备测试；最新测试范围见[审查附录 §2](../项目审查与优化路线-2026-10-20.md#2-本轮测试基线)。
 
 ## 当前实现
 
@@ -9,16 +9,29 @@
 1. Media3 `1.11.1` 平台MediaCodec。
 2. NextLib `1.11.1-0.16.0` 的NextRenderersFactory，包含FFmpeg音视频扩展，不只是查询。
 3. Media3Avi `2.7.1` AVI extractor与末端BitmapFactoryVideoRenderer（MJPEG）。
+4. 自有 `libnplegacy` / `LegacyVideoRenderer`，仅认领 `video/x-np-wmv2` 与 `video/x-np-mpeg4-asp` 等专用路径；不无条件接管普通 `video/mp4v-es`。
 
-硬件优先开启为ON，关闭为PREFER；影响新服务播放器构建，不是运行期热切换。
+**当前两档扩展模式均为 ON，不再是“开启 ON、关闭 PREFER”**。关闭硬件优先时，`NpRenderersFactory` 的视频选择器在 API 29+ 只保留硬件平台 codec；API 29 以下保留默认候选。该策略在新服务播放器构建时生效，不是运行期热切换。当前仍缺“只有平台软解且扩展不支持”时的保底，不能把这次源码改动解释成所有格式的兼容性已提高。
 setEnableDecoderFallback不保证平台认领但初始化失败时跨任意软解渲染器。
-探测与播放使用同源extractor并查平台/FFmpeg/MJPEG能力，声明支持不等于首帧实测。
+探测与播放使用同源 `NpExtractorsFactory`，查询平台/NextLib/MJPEG/legacy；“extractor 同源”不等于候选策略、profile 与运行期能力全部相同，声明支持不等于首帧实测。
+
+### 当前缺口与实现顺序
+
+| 问题 | 最小路径 | 验收 |
+| --- | --- | --- |
+| 探测包含平台软解，兼容档却可能全部过滤 | 统一能力快照；扩展确定支持才替代平台软解，保留最终保底（REV-08 / A10） | 硬解、仅平台软解、仅扩展、均不支持、查询异常五组，设备记录实际 decoder |
+| profile 信息与实际选中 codec 不一致 | A17 的 profile/level 求交及 A18 一次性运行期回退分开实施；不复活 DecoderManager | Simple 不误抢、ASP/QPel 走正确链；失败次数有界且错误不被 Idle 冲掉 |
+| 探测/ASP 改写首样本仍按 length 整段分配 | 分块读取、有界保留头、其余丢弃或原序转发（REV-05 / A20） | 大 length/短输入、EOF、分段样本，输出字节/元数据一致，缓冲有界 |
+| WMV2 的 PCM/WMA 映射已补但未证明输出 | 保留 `wmvAudioMimeForTag`、blockAlign 和 `audioUnsupported` 提示；补 WAVEFORMAT/extradata/位深夹具 | 本轮映射 5 项通过；PCM 含浮点、WMA 家族、静音提示与音画同步另测，不把映射当解码器 |
+| 仪器素材不随干净检出提供 | 先清点本机素材/校验和，复用既有依赖，编译与执行分开（REV-15） | JVM test 不代替 native-load、ImageReader 出帧、连续切换；缺样本明确 blocked |
+
+方案详见[审查附录](../项目审查与优化路线-2026-10-20.md)；以上均为后续路线，不是本轮修改了生产实现。
 
 ## 边界
 
 - 容器、编码、profile/level及设备输出分别验证，不能只按扩展名称“全支持”。
 - NextLib编解码表和ABI以实际AAR/native构建为准，不根据FFmpeg总体能力承诺。
-- WMV/VC1/ASP不能推断有软解兜底，需验证结构化失败及恢复。
+- WMV2 与专用 ASP 已有 legacy 路径，不再泛称“没有软解”；VC-1/ASF/其他 WMV 不能由名字推断支持。每种码流分别验证首帧、seek、同步及失败恢复。
 - bitmap字幕与ASS富文本分别检查解码出口/渲染契约，不泛称PGS/VobSub不支持。
 - 未依赖HLS/DASH/RTSP source模块，不声明网络协议支持。
 
