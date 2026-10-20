@@ -391,10 +391,16 @@ class LocalMediaSource(
             // 只清"可见类别"，被拒类别的历史/收藏键加入白名单，避免音频权限被拒
             // 就把整个音频库的断点清空。
             if (canPrune) {
+                // R2-1/REV-06：读失败（null）时**跳过本轮清理**——宁可不删，也不能把
+                // 读不出来的历史键当成孤儿键批量清空。
                 val protectedKeys = history.protectedKeysForMimePrefixes(deniedMimePrefixes)
-                val validKeys = items.map { HistoryEntry.keyOf(it) }.toSet() + protectedKeys
-                val pruned = history.pruneOrphans(validKeys, sourceId)
-                if (pruned > 0) Log.i(TAG, "孤儿清理（L16）：删除 $pruned 条失效播放历史")
+                if (protectedKeys == null) {
+                    Log.w(TAG, "孤儿清理跳过：受保护历史键读取失败（存储降级），本轮保留全部历史/收藏")
+                } else {
+                    val validKeys = items.map { HistoryEntry.keyOf(it) }.toSet() + protectedKeys
+                    val pruned = history.pruneOrphans(validKeys, sourceId)
+                    if (pruned > 0) Log.i(TAG, "孤儿清理（L16）：删除 $pruned 条失效播放历史")
+                }
             }
             if (!complete) {
                 Log.w(TAG, "本次扫描不完整，保留未覆盖范围的历史/收藏与旧快照：${incompleteReasons.joinToString("；")}")
@@ -582,7 +588,13 @@ class LocalMediaSource(
         if (settings.historyMigrated.first()) return
         val positions = settings.playbackPositions.first()
         val lastAt = settings.playbackLastAt.first()
+        // R2-1/REV-06：迁移失败（null）不置位、也不清 DataStore 旧键——下次扫描重试，
+        // 避免"标志位已置但数据没迁进来"造成断点永久丢失。
         val migrated = history.migrateFromDataStore(items, positions, lastAt)
+        if (migrated == null) {
+            Log.w(TAG, "历史迁移（E11）失败（存储降级），保留 DataStore 旧键，下次扫描重试")
+            return
+        }
         settings.clearPlaybackMemory()
         settings.setHistoryMigrated(true)
         Log.i(TAG, "历史迁移（E11）：$migrated 条断点迁入 Room，DataStore 旧键已清理")

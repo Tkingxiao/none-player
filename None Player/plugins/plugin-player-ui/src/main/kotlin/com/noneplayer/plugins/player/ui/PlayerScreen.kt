@@ -1279,8 +1279,12 @@ fun PlayerScreen(
     fun toggleFavorite() {
         val target = favoriteItem ?: return
         scope.launch {
-            val now = history.toggleFavorite(target)
-            toast.show(if (now) "已加入收藏" else "已取消收藏")
+            // R2-1/REV-06：写失败（null）显式提示，不再把失败当"已取消收藏"。
+            when (history.toggleFavorite(target)) {
+                true -> toast.show("已加入收藏")
+                false -> toast.show("已取消收藏")
+                null -> toast.show("收藏保存失败，请重试")
+            }
         }
     }
     // 长按 3× 快进（设计稿 .gest-hint）：进入时记住原速，松手恢复

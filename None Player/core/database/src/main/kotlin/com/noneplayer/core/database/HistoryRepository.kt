@@ -2,19 +2,25 @@ package com.noneplayer.core.database
 
 import android.content.Context
 import com.noneplayer.core.media.MediaItem
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.withContext
 
 /**
- * 播放历史 + 收藏的统一读写口（§8.3）。
+ * 播放历史 + 收藏的统一读写口（§8.3），实现 [PlaybackHistoryStore]。
  *
  * 放在 `:core:database` 而不是 `:core:data`：`core:data` 是 DataStore 设置层
  * （无 Android DB 依赖），Room 的 schema/DAO/迁移天然属于本模块；插件侧靠
@@ -24,17 +30,68 @@ import kotlinx.coroutines.withContext
  * **写入语义（§8.3/E12）**：播放中每 5s + 暂停/切集/退页 upsert；`<10s 且未完看`
  * 不写（切集瞬间的 0 附近位置会污染"继续观看"）；`watchedRatio ≥ 0.95` 视为看完，
  * 从「继续观看」里过滤掉。
+ *
+ * **R2-1/REV-06 失败可观察恢复**（本类的核心不变量）：
+ * - 读流（[recent]/[count]/[favoriteKeys]/[favorites]/[isFavorite]）遇到可重试错误会
+ *   按 [HistoryRetryPolicy] 有界退避重试，**绝不把失败 emit 成空表**——空表是"确实没有
+ *   记录"的语义，让孤儿清理/迁移据此删数据会造成真实数据丢失。重试耗尽或遇到结构性
+ *   错误时，流记录状态后结束，`stateIn` 保留**上一次可信值**。
+ * - 写操作（[record]/[markPlayed]/[toggleFavorite]/[clearHistory]/…）失败**不抛**
+ *   （[CancellationException] 除外，必须原样重抛），返回值让调用方决定提示/重试。
+ * - 每次成功都会把 [storageStatus] 恢复 `healthy`；每次失败都会带上操作名与消息，
+ *   UI（设置页副题）和验收测试据此观察。
  */
-class HistoryRepository(context: Context) {
-
-    private val dao: HistoryDao by lazy { NonePlayerDatabase.build(context.applicationContext).historyDao() }
+class HistoryRepository private constructor(
+    private val daoProvider: () -> HistoryDao,
+    private val scope: CoroutineScope,
+    private val retryPolicy: HistoryRetryPolicy,
+) : PlaybackHistoryStore {
 
     /**
-     * 共享作用域（A5/P1-6）：本仓库是进程级单例，作用域与它同寿、不取消。
+     * 生产构造：`Kernel.boot()` 同步注册用（E107）。
      *
-     * 存在的理由是 `stateIn` ——见下面 [recent]/[favoriteKeysFlow] 的说明。
+     * 这里只保存建库**动作**，不真正建库（P1-4）：`dao` 是 `by lazy`，首次使用（通常是
+     * [prime] 在启动画面期间的 IO 协程）才 `Room.databaseBuilder().build()`。
      */
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    constructor(context: Context) : this(
+        daoProvider = { NonePlayerDatabase.build(context.applicationContext).historyDao() },
+        scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+        retryPolicy = HistoryRetryPolicy(),
+    )
+
+    /**
+     * 契约注入构造（R2-1/REV-06）：保留 `context` 入参以贴合生产签名，便于上层按
+     * "同一个 Context 装配"的惯用法注入假 DAO。`context` 不参与 DAO 构建——
+     * 注入 DAO 时不再需要真实 Context。
+     */
+    @Suppress("UNUSED_PARAMETER")
+    internal constructor(
+        context: Context,
+        dao: HistoryDao,
+        scope: CoroutineScope,
+        retryPolicy: HistoryRetryPolicy = HistoryRetryPolicy(),
+    ) : this(daoProvider = { dao }, scope = scope, retryPolicy = retryPolicy)
+
+    /**
+     * 纯 JVM 单测便捷构造：不接收 `Context`。
+     *
+     * 为什么需要它：单测运行在 mockable android.jar 上，`Context` 的 stub 构造器会抛
+     * "Method <init> … not mocked"，而 `:core:database` 不引 Robolectric；契约构造器
+     * 的 `context` 在注入 DAO 时并不被使用，因此额外提供这条无 Context 入口。
+     */
+    internal constructor(
+        dao: HistoryDao,
+        scope: CoroutineScope,
+        retryPolicy: HistoryRetryPolicy = HistoryRetryPolicy(),
+    ) : this(daoProvider = { dao }, scope = scope, retryPolicy = retryPolicy)
+
+    private val dao: HistoryDao by lazy { daoProvider() }
+
+    /** REV-06：持久化健康的可观察状态（设置页副题 / 日志 / 验收测试用） */
+    private val _storageStatus = MutableStateFlow(HistoryStorageStatus())
+
+    /** 当前存储健康状态；失败时 [HistoryStorageStatus.failures] 为连续失败次数 */
+    val storageStatus: StateFlow<HistoryStorageStatus> = _storageStatus.asStateFlow()
 
     /**
      * 时间倒序的全部历史。
@@ -47,8 +104,7 @@ class HistoryRepository(context: Context) {
      * **`stateIn` 而不是把 DAO 流直接暴露**（P1-6）：库页与「我的」页各订一份时，
      * 一次写入会回灌两条全表查询。共享后 N 个收集者共用一条查询，
      * 无人收集 5s 后自动停订。
-     */
-    /**
+     *
      * **暴露 `StateFlow` 而不是 `Flow`**：`stateIn` 产出的本来就是 StateFlow，声明成
      * `Flow` 会逼调用方写 `collectAsStateWithLifecycle(initialValue = emptyList())`
      * ——那**第一帧的空列表**不是"确实没有记录"，而是"还没读到"，与 E126（scanFolderUris）
@@ -56,9 +112,11 @@ class HistoryRepository(context: Context) {
      * 消失，`LazyListState` 又按**下标**恢复，返回时正好落到下一节的边界上，
      * 用户看到的就是"进播放页再返回，首页莫名下滑、继续观看被挡住"。
      * 直接给 StateFlow，初值取现值，没有那一帧。
+     *
+     * REV-06：底层走 [resilientFlow]——可重试失败不 emit 空表，只保留上次可信值。
      */
     val recent: StateFlow<List<HistoryEntry>> by lazy {
-        dao.recent()
+        resilientFlow("recent") { dao.recent() }
             .map { rows -> rows.map { it.toEntry() } }
             .stateIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
     }
@@ -69,13 +127,16 @@ class HistoryRepository(context: Context) {
      * 「继续观看」的口径**不在这里**：它是库页基于 `recent` + 时长算出的 `fractionOf`，
      * 曾经这里另有一条 `continueWatching` 查询用 0.95 阈值，与 UI 的 0.99 各说各话
      * （且从未被消费）。同一份语义保留一处实现，避免调阈值时只改一边。
+     *
+     * REV-06：读流失败会退避重试；重试耗尽后结束，调用方保留旧计数。
      */
-    val count: Flow<Int> by lazy { dao.count() }
+    val count: Flow<Int> by lazy { resilientFlow("count") { dao.count() } }
 
     /** 收藏键的**唯一一条** DAO 订阅（P1-6）：下面两个视图都从它派生。
      *  StateFlow 的理由与 [recent] 同一条——见那里的说明。 */
     private val favoriteKeysFlow: StateFlow<List<String>> by lazy {
-        dao.favoriteKeys().stateIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
+        resilientFlow("favoriteKeys") { dao.favoriteKeys() }
+            .stateIn(scope, SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS), emptyList())
     }
 
     /** 收藏键集合（卡片红心 / 菜单文案 / 我的页联动都读它） */
@@ -84,117 +145,150 @@ class HistoryRepository(context: Context) {
     /** 收藏键（按收藏时间倒序）——聚合列表与我的页横排的排序依据 */
     val favorites: StateFlow<List<String>> by lazy { favoriteKeysFlow }
 
-    fun isFavorite(mediaKey: String): Flow<Boolean> = dao.isFavorite(mediaKey)
+    fun isFavorite(mediaKey: String): Flow<Boolean> =
+        resilientFlow("isFavorite") { dao.isFavorite(mediaKey) }
 
     /**
      * 预热（P1-4）：把"建库 + 第一次开库查询"放到启动画面期间的 IO 协程里做完，
-     * 不留给 UI 首帧的收集动作。失败不抛——首帧收集时还会再试一次。
+     * 不留给 UI 首帧的收集动作。失败不抛——首帧收集时还会再试一次；
+     * REV-06：失败会记入 [storageStatus]，便于诊断启动期存储问题。
      */
     suspend fun prime() {
         withContext(Dispatchers.IO) {
-            runCatching { dao.count().first() }
+            storageRead("prime") { dao.count().first() }
         }
     }
 
     /**
-     * 断点读取（装载链恢复用）。
+     * 断点读取（装载链恢复用），实现 [PlaybackHistoryStore.positionOfIfIntact]。
      *
      * A1-3：**先比对文件指纹再交位置**——库里那行记录的 size/mtime 与当前条目对不上，
      * 说明文件被替换或重录过，此时旧位置可能落在另一部片子的中间，
      * **静默从头播**（不弹提示：用户关心的是"接着看"，而不是"为什么没接着"）。
      * 任一指纹有一侧为 0（未知/旧行）时该轴不参与比对，所以升级不会清掉老用户的续播。
+     *
+     * REV-06：读失败返回 `null`（与"没有断点"同出口）并记入 [storageStatus]；
+     * 调用方（[SessionBootstrap]）据此从 0 起播，不崩不卡。
      */
-    suspend fun positionOfIfIntact(item: MediaItem): Long? {
-        val row = dao.breakpointOf(HistoryEntry.keyOf(item)) ?: return null
-        if (!breakpointIntact(row.sizeBytes, row.lastModifiedSec, item.sizeBytes, item.lastModifiedSec)) {
-            return null
+    override suspend fun positionOfIfIntact(item: MediaItem): Long? =
+        storageRead("positionOfIfIntact") {
+            val row = dao.breakpointOf(HistoryEntry.keyOf(item)) ?: return@storageRead null
+            if (!breakpointIntact(row.sizeBytes, row.lastModifiedSec, item.sizeBytes, item.lastModifiedSec)) {
+                return@storageRead null
+            }
+            row.positionMs
         }
-        return row.positionMs
-    }
 
     /** 断点读取（无指纹校验）：仅供展示与迁移用，恢复链一律走 [positionOfIfIntact] */
-    suspend fun positionOf(mediaKey: String): Long? = dao.positionOf(mediaKey)
+    override suspend fun positionOf(mediaKey: String): Long? =
+        storageRead("positionOf") { dao.positionOf(mediaKey) }
 
     /**
-     * 记一次播放进度。[countPlay] = true 时播放次数 +1（进入某项播放时调用一次；
-     * 周期/暂停落点传 false，避免播放次数被落点次数灌水）。
+     * 记一次播放进度，实现 [PlaybackHistoryStore.record]。
+     *
+     * [countPlay] = true 时播放次数 +1（进入某项播放时调用一次；周期/暂停落点传 false，
+     * 避免播放次数被落点次数灌水）。
+     *
+     * @return true = 已确认落库或按 E12 门槛本就不该落库；false = 写库失败（调用方不崩，
+     * 周期落点会自然重试）
      */
-    suspend fun record(
+    override suspend fun record(
         item: MediaItem,
         positionMs: Long,
-        durationMs: Long = item.durationMs,
-        countPlay: Boolean = false,
-    ) {
-        if (item.id.isEmpty() || item.uri.isEmpty()) return
-        if (!shouldPersist(positionMs, durationMs)) return
-        dao.upsert(
-            PlaybackHistoryEntity(
-                mediaKey = HistoryEntry.keyOf(item),
-                sourceId = item.sourceId,
-                title = item.title,
-                uri = item.uri,
-                mime = item.mimeType,
-                coverUri = item.coverUri,
-                folder = item.folder,
-                durationMs = durationMs,
-                positionMs = positionMs,
-                watchedRatio = watchedRatio(positionMs, durationMs),
-                playCount = 0,
-                lastPlayedAt = System.currentTimeMillis(),
-                width = item.width,
-                height = item.height,
-                sizeBytes = item.sizeBytes,
-                lastModifiedSec = item.lastModifiedSec,
-            ),
-            countPlay = countPlay,
-        )
+        durationMs: Long,
+        countPlay: Boolean,
+    ): Boolean {
+        if (item.id.isEmpty() || item.uri.isEmpty()) return true
+        if (!shouldPersist(positionMs, durationMs)) return true
+        val written = storageWrite("record") {
+            dao.upsert(
+                PlaybackHistoryEntity(
+                    mediaKey = HistoryEntry.keyOf(item),
+                    sourceId = item.sourceId,
+                    title = item.title,
+                    uri = item.uri,
+                    mime = item.mimeType,
+                    coverUri = item.coverUri,
+                    folder = item.folder,
+                    durationMs = durationMs,
+                    positionMs = positionMs,
+                    watchedRatio = watchedRatio(positionMs, durationMs),
+                    playCount = 0,
+                    lastPlayedAt = System.currentTimeMillis(),
+                    width = item.width,
+                    height = item.height,
+                    sizeBytes = item.sizeBytes,
+                    lastModifiedSec = item.lastModifiedSec,
+                ),
+                countPlay = countPlay,
+            )
+        }
+        return written != null
     }
 
     /**
-     * 记一次"开始播放"：`play_count + 1`、刷新 `last_played_at`。
-     * 与 [record] 分开是因为它不受落盘门槛约束——用户点开某项就算播过一次，
-     * 哪怕只看 3 秒；而这种"播过但没进度"的项也应出现在历史里。
+     * 记一次"开始播放"：`play_count + 1`、刷新 `last_played_at`，实现
+     * [PlaybackHistoryStore.markPlayed]。与 [record] 分开是因为它不受落盘门槛约束——
+     * 用户点开某项就算播过一次，哪怕只看 3 秒；而这种"播过但没进度"的项也应出现在历史里。
+     *
+     * @return true = 已确认落库；false = 写库失败
      */
-    suspend fun markPlayed(item: MediaItem) {
-        if (item.id.isEmpty() || item.uri.isEmpty()) return
+    override suspend fun markPlayed(item: MediaItem): Boolean {
+        if (item.id.isEmpty() || item.uri.isEmpty()) return true
         val key = HistoryEntry.keyOf(item)
         val now = System.currentTimeMillis()
-        dao.markPlayed(
-            PlaybackHistoryEntity(
-                mediaKey = key,
-                sourceId = item.sourceId,
-                title = item.title,
-                uri = item.uri,
-                mime = item.mimeType,
-                coverUri = item.coverUri,
-                folder = item.folder,
-                durationMs = item.durationMs,
-                positionMs = 0L,
-                watchedRatio = 0f,
-                playCount = 1,
-                lastPlayedAt = now,
-                width = item.width,
-                height = item.height,
-                sizeBytes = item.sizeBytes,
-                lastModifiedSec = item.lastModifiedSec,
-            ),
-            now = now,
-        )
+        val written = storageWrite("markPlayed") {
+            dao.markPlayed(
+                PlaybackHistoryEntity(
+                    mediaKey = key,
+                    sourceId = item.sourceId,
+                    title = item.title,
+                    uri = item.uri,
+                    mime = item.mimeType,
+                    coverUri = item.coverUri,
+                    folder = item.folder,
+                    durationMs = item.durationMs,
+                    positionMs = 0L,
+                    watchedRatio = 0f,
+                    playCount = 1,
+                    lastPlayedAt = now,
+                    width = item.width,
+                    height = item.height,
+                    sizeBytes = item.sizeBytes,
+                    lastModifiedSec = item.lastModifiedSec,
+                ),
+                now = now,
+            )
+        }
+        return written != null
     }
 
-    /** 收藏开关；返回切换后的状态 */
-    suspend fun toggleFavorite(item: MediaItem): Boolean {
+    /**
+     * 收藏开关；返回切换后的状态。
+     *
+     * REV-06：读当前收藏态或写收藏失败时返回 `null`——UI 必须把 `null` 与
+     * `true/false` 区分开（前者是"没保存成功"，不能提示"已加入/已取消收藏"）。
+     */
+    suspend fun toggleFavorite(item: MediaItem): Boolean? {
         val key = HistoryEntry.keyOf(item)
-        return if (dao.isFavoriteNow(key)) {
-            dao.removeFavorite(key)
-            false
+        val currentlyFavorite = storageRead("toggleFavorite") { dao.isFavoriteNow(key) } ?: return null
+        return if (currentlyFavorite) {
+            if (storageWrite("toggleFavorite") { dao.removeFavorite(key) } == null) null else false
         } else {
-            dao.addFavorite(FavoriteEntity(mediaKey = key, addedAt = System.currentTimeMillis()))
-            true
+            val added = storageWrite("toggleFavorite") {
+                dao.addFavorite(FavoriteEntity(mediaKey = key, addedAt = System.currentTimeMillis()))
+            }
+            if (added == null) null else true
         }
     }
 
-    suspend fun clearHistory() = dao.clear()
+    /**
+     * 清空播放历史；REV-06 起返回是否成功。
+     *
+     * @return true = 已清空；false = 写库失败（设置页不应提示"已清空"，也不应清
+     * DataStore 旧键——用户数据还在 Room 里）
+     */
+    suspend fun clearHistory(): Boolean = storageWrite("clearHistory") { dao.clear() } != null
 
     /**
      * L16：清孤儿记录（数据卫生）。
@@ -209,15 +303,19 @@ class HistoryRepository(context: Context) {
      *
      * `IN (:keys)` 受 SQLite 变量数上限约束（旧实现约 999），按 [DELETE_CHUNK] 批切分下发。
      *
-     * @return 删除的**历史**行数（不含收藏）
+     * REV-06：失败返回 0（本轮不清理、调用方不崩），状态记录到 [storageStatus]。
+     *
+     * @return 删除的**历史**行数（不含收藏）；失败为 0
      */
     suspend fun pruneOrphans(validKeys: Set<String>, sourceId: String): Int {
         require(sourceId.isNotBlank()) { "Orphan cleanup requires a source namespace" }
-        val historyOrphans = orphanKeys(dao.allHistoryKeys(), validKeys, sourceId)
-        historyOrphans.chunked(DELETE_CHUNK).forEach { dao.deleteHistoryKeys(it) }
-        val favoriteOrphans = orphanKeys(dao.allFavoriteKeys(), validKeys, sourceId)
-        favoriteOrphans.chunked(DELETE_CHUNK).forEach { dao.deleteFavoriteKeys(it) }
-        return historyOrphans.size
+        return storageWrite("pruneOrphans") {
+            val historyOrphans = orphanKeys(dao.allHistoryKeys(), validKeys, sourceId)
+            historyOrphans.chunked(DELETE_CHUNK).forEach { dao.deleteHistoryKeys(it) }
+            val favoriteOrphans = orphanKeys(dao.allFavoriteKeys(), validKeys, sourceId)
+            favoriteOrphans.chunked(DELETE_CHUNK).forEach { dao.deleteFavoriteKeys(it) }
+            historyOrphans.size
+        } ?: 0
     }
 
     /**
@@ -227,15 +325,20 @@ class HistoryRepository(context: Context) {
      * 权限缺口（只拒了音频）→ 可见类别仍应正常清理，但**被拒类别**的行必须原样保留。
      * 这里按 mime 前缀（`audio/`、`video/`）把被拒类别的键捞出来；收藏表没有 mime，
      * 靠 LEFT JOIN 历史行补，查不到历史的收藏保守保留（宁可多留一条，不可误删）。
+     *
+     * REV-06：失败返回 `null`——调用方必须**跳过本轮孤儿清理**（宁可留死记录，
+     * 不可把未覆盖类别的断点误删）。
      */
-    suspend fun protectedKeysForMimePrefixes(prefixes: List<String>): Set<String> =
+    suspend fun protectedKeysForMimePrefixes(prefixes: List<String>): Set<String>? =
         withContext(Dispatchers.IO) {
-            if (prefixes.isEmpty()) return@withContext emptySet()
-            buildSet {
-                prefixes.forEach { prefix ->
-                    val pattern = "$prefix%"
-                    addAll(dao.historyKeysWithMimePattern(pattern))
-                    addAll(dao.favoriteKeysWithMimePattern(pattern))
+            storageRead("protectedKeys") {
+                if (prefixes.isEmpty()) return@storageRead emptySet()
+                buildSet {
+                    prefixes.forEach { prefix ->
+                        val pattern = "$prefix%"
+                        addAll(dao.historyKeysWithMimePattern(pattern))
+                        addAll(dao.favoriteKeysWithMimePattern(pattern))
+                    }
                 }
             }
         }
@@ -245,14 +348,18 @@ class HistoryRepository(context: Context) {
      *
      * 行数据（标题/封面/时长…）取自**当前媒体列表**——迁移需要一个"条目快照"的来源，
      * 而扫描完成的时刻正好两样都有。已存在的行不覆盖（迁移只补历史，不盖新进度）。
-     * @return 迁入条数
+     *
+     * REV-06：失败返回 `null`——调用方**不得**置 `history_migrated` 标记、也不得清理
+     * DataStore 旧键（下次扫描会重试，不能把用户断点弄丢）。
+     *
+     * @return 迁入条数；失败为 `null`
      */
     suspend fun migrateFromDataStore(
         items: List<MediaItem>,
         positions: Map<String, Long>,
         lastPlayedAt: Map<String, Long>,
-    ): Int {
-        if (positions.isEmpty()) return 0
+    ): Int? = storageRead("migrateFromDataStore") {
+        if (positions.isEmpty()) return@storageRead 0
         var migrated = 0
         items.forEach { item ->
             val position = positions[item.id] ?: return@forEach
@@ -281,7 +388,79 @@ class HistoryRepository(context: Context) {
             )
             migrated++
         }
-        return migrated
+        migrated
+    }
+
+    /**
+     * REV-06：读流统一包装。
+     *
+     * 每次**成功 emit** 视为"存储当前可用"→ 恢复 healthy 并正常下发；失败时：
+     * - [CancellationException]：原样重抛（取消是正常控制流，不是存储故障）；
+     * - 可重试错误且还有重试预算 → 记录失败、退避等待后**重新订阅源流**（Room 的
+     *   Flow 每次 `collect` 都会重新开查询，所以重订等价于重查）；
+     * - 可重试错误但预算耗尽，或结构性错误 → 记录失败后**结束流**。stateIn 会保留
+     *   上一次的值，读取方不会看到"空表"这种伪数据。
+     */
+    private fun <T> resilientFlow(operation: String, source: () -> Flow<T>): Flow<T> = flow {
+        var retries = 0
+        while (true) {
+            try {
+                source().collect { value ->
+                    retries = 0
+                    markStorageHealthy()
+                    emit(value)
+                }
+                return@flow
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (error: Throwable) {
+                markStorageFailure(operation, error)
+                if (!isRetryableStorageFailure(error) || retries >= retryPolicy.retryDelaysMs.size) {
+                    return@flow
+                }
+                delay(retryPolicy.retryDelaysMs[retries])
+                retries++
+            }
+        }
+    }
+
+    /** REV-06：写操作统一出口——成功返回结果并恢复 healthy，失败返回 `null`（不抛） */
+    private suspend fun <T> storageWrite(operation: String, block: suspend () -> T): T? =
+        try {
+            block().also { markStorageHealthy() }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Throwable) {
+            markStorageFailure(operation, error)
+            null
+        }
+
+    /** REV-06：单次读操作统一出口——失败返回 `null`（不抛），成功恢复 healthy */
+    private suspend fun <T> storageRead(operation: String, block: suspend () -> T?): T? =
+        try {
+            block().also { markStorageHealthy() }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Throwable) {
+            markStorageFailure(operation, error)
+            null
+        }
+
+    private fun markStorageHealthy() {
+        val current = _storageStatus.value
+        if (current.healthy && current.failures == 0) return
+        _storageStatus.value = HistoryStorageStatus()
+    }
+
+    private fun markStorageFailure(operation: String, error: Throwable) {
+        _storageStatus.update { current ->
+            HistoryStorageStatus(
+                healthy = false,
+                operation = operation,
+                message = error.message?.takeIf { it.isNotBlank() } ?: error.javaClass.simpleName,
+                failures = current.failures + 1,
+            )
+        }
     }
 
     companion object {

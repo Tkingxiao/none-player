@@ -3,6 +3,7 @@ package com.noneplayer.plugins.player.exo
 import android.app.PendingIntent
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.core.net.toUri
 import androidx.media3.common.C
@@ -22,6 +23,7 @@ import androidx.media3.exoplayer.source.preload.TargetPreloadStatusControl
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import androidx.media3.session.SessionCommand
+import androidx.media3.session.SessionError
 import androidx.media3.session.SessionResult
 import com.noneplayer.core.data.AppSettings
 import com.google.common.util.concurrent.Futures
@@ -31,26 +33,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** 擦洗命令：UI 拖动进度条时切换 seek 精度（会话侧 API 不在 MediaController 暴露） */
 /** 本文件的日志标签（服务基类自带一个私有的 `TAG`，不复用它以免撞名） */
 private const val SERVICE_LOG_TAG = "PlaybackService"
 
-internal const val SCRUB_COMMAND = "np.scrub"
-internal const val SCRUB_ARG_ACTIVE = "active"
-
-/** 画面裁剪命令：UI「画面」面板切换 cover/fit（同样只在会话侧暴露） */
-internal const val CROP_COMMAND = "np.crop"
-
-internal const val CROP_ARG_ACTIVE = "active"
-
-/**
- * 自动连播命令（设置页「播放 · 自动连播下一集」的引擎侧落点）。
- *
- * `setPauseAtEndOfMediaItems` 是 ExoPlayer 而非 `Player` 接口上的方法，MediaController
- * 调不到，与 np.scrub / np.crop 同路转发。关闭自动连播时置 true：每条播完停在末帧。
- */
-internal const val AUTOPLAY_COMMAND = "np.autoplay"
-internal const val AUTOPLAY_ARG_ENABLED = "enabled"
+// np.scrub / np.crop / np.autoplay 三条私有命令的常量与身份/参数校验统一放在
+// PrivateCommands.kt（REV-07：只有同 UID 控制器才被授予，且 onCustomCommand 复核）。
 
 /** 会话通知点击落点的 PendingIntent 请求码 */
 private const val REQUEST_LAUNCH = 100
@@ -122,12 +109,17 @@ class PlaybackService : MediaSessionService() {
         // "无法播放"，与设置行承诺的"兼容性更好"正好相反。
         // 优先取启动时预热好的进程内缓存——服务创建落在"点播放"的关键路径上，
         // 没有缓存才退回有界等待（首次读盘）。两条路都拿不到就用默认值。
-        val hardwareFirst = AppSettings.cachedHardwareDecodePreferred()
-            ?: runBlocking {
-                withTimeoutOrNull(HARDWARE_DECODE_READ_TIMEOUT_MS) {
-                    AppSettings(this@PlaybackService).hardwareDecodePreferred.first()
+        // A23 服务异常兜底（REV-07 同批）：首读可能抛任何异常（DataStore 文件损坏/IO、
+        // 协程取消等），这里统一 runCatching 兜住，读不到就用默认档（硬解优先），
+        // 绝不让"设置层首读"把整个播放服务拖死在 onCreate 里。
+        val hardwareFirst = runCatching {
+            AppSettings.cachedHardwareDecodePreferred()
+                ?: runBlocking {
+                    withTimeoutOrNull(HARDWARE_DECODE_READ_TIMEOUT_MS) {
+                        AppSettings(this@PlaybackService).hardwareDecodePreferred.first()
+                    }
                 }
-            } ?: true
+        }.getOrNull() ?: true
         val renderersFactory = NpRenderersFactory(
             context = this,
             preferSoftwareWhenNoHardware = !hardwareFirst,
@@ -366,12 +358,22 @@ class PlaybackService : MediaSessionService() {
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
         ): MediaSession.ConnectionResult {
-            val commands = MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
-                .buildUpon()
-                .add(SessionCommand(SCRUB_COMMAND, Bundle.EMPTY))
-                .add(SessionCommand(CROP_COMMAND, Bundle.EMPTY))
-                .add(SessionCommand(AUTOPLAY_COMMAND, Bundle.EMPTY))
-                .build()
+            // REV-07：私有命令（np.scrub / np.crop / np.autoplay）只授予与本应用同 UID 的
+            // 控制器。服务保持 exported（系统媒体通知/车机/蓝牙都要能连），不受信的第三方
+            // 仍拿默认命令集（标准播放控制可用），但拿不到三条私有命令。
+            val trusted = isSameUid(controller.uid)
+            Log.i(
+                SERVICE_LOG_TAG,
+                "controller connected uid=${controller.uid} pkg=${controller.packageName} private=$trusted",
+            )
+            val commands = if (trusted) {
+                val builder =
+                    MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS.buildUpon()
+                privateSessionCommands().forEach { command -> builder.add(command) }
+                builder.build()
+            } else {
+                MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+            }
             // 用 (session, controller) 重载：受信控制器拿默认命令集，不受信（第三方 App）
             // 拿收紧后的 UNTRUSTED 默认集。单参重载已弃用，且对第三方一律放全量命令。
             return MediaSession.ConnectionResult.AcceptedResultBuilder(session, controller)
@@ -385,30 +387,53 @@ class PlaybackService : MediaSessionService() {
             customCommand: SessionCommand,
             args: Bundle,
         ): ListenableFuture<SessionResult> {
-            if (customCommand.customAction == SCRUB_COMMAND) {
-                player.setScrubbingModeEnabled(args.getBoolean(SCRUB_ARG_ACTIVE))
-                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            val action = customCommand.customAction
+            // 非私有命令：交回 media3 默认处理（标准会话命令由框架实现）
+            if (!isPrivateCommand(action)) {
+                return super.onCustomCommand(session, controller, customCommand, args)
             }
-            if (customCommand.customAction == CROP_COMMAND) {
-                // 满窗裁剪（cover）/ 按比例适配（fit）——§2.4「画面」面板的引擎侧开关；
-                // 比例/镜像/旋转由 UI 层布局与 graphicsLayer 承担，不经会话
-                player.setVideoScalingMode(
-                    if (args.getBoolean(CROP_ARG_ACTIVE, false)) {
-                        C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
-                    } else {
-                        C.VIDEO_SCALING_MODE_SCALE_TO_FIT
-                    },
+            // REV-07：命令授予只是连接期快照，不能当授权凭据——这里按调用方 UID 再复核一次。
+            // 第三方控制器即便自己构造出 np.* 命令也执行不了（记录 uid/pkg 便于真机取证）。
+            if (!isSameUid(controller.uid)) {
+                Log.w(
+                    SERVICE_LOG_TAG,
+                    "private command rejected uid=${controller.uid}" +
+                        " pkg=${controller.packageName} action=$action reason=not-same-uid",
                 )
-                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+                return Futures.immediateFuture(
+                    SessionResult(SessionError.ERROR_PERMISSION_DENIED),
+                )
             }
-            if (customCommand.customAction == AUTOPLAY_COMMAND) {
-                // L1：「自动连播下一集」关闭 = 每条播完停在末帧。media3 的开关语义与
-                // 设置项相反，这里做唯一一次取反；缺省 true（与设置默认值一致），
-                // 免得漏发一次参数就把"不自动连播"当成"自动连播"。
-                player.setPauseAtEndOfMediaItems(!args.getBoolean(AUTOPLAY_ARG_ENABLED, true))
-                return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
+            // 参数缺失/类型不符一律拒绝：合法命令必然带布尔参数（见 PrivateCommands.kt）
+            if (!validatePrivateCommandArgs(action, args)) {
+                Log.w(
+                    SERVICE_LOG_TAG,
+                    "private command rejected uid=${controller.uid}" +
+                        " action=$action reason=bad-args keys=${args.keySet()}",
+                )
+                return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
             }
-            return super.onCustomCommand(session, controller, customCommand, args)
+            when (action) {
+                SCRUB_COMMAND -> player.setScrubbingModeEnabled(args.getBoolean(SCRUB_ARG_ACTIVE))
+                CROP_COMMAND -> {
+                    // 满窗裁剪（cover）/ 按比例适配（fit）——§2.4「画面」面板的引擎侧开关；
+                    // 比例/镜像/旋转由 UI 层布局与 graphicsLayer 承担，不经会话
+                    player.setVideoScalingMode(
+                        if (args.getBoolean(CROP_ARG_ACTIVE, false)) {
+                            C.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING
+                        } else {
+                            C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+                        },
+                    )
+                }
+                AUTOPLAY_COMMAND -> {
+                    // L1：「自动连播下一集」关闭 = 每条播完停在末帧。media3 的开关语义与
+                    // 设置项相反，这里做唯一一次取反；缺省 true（与设置默认值一致），
+                    // 免得漏发一次参数就把"不自动连播"当成"自动连播"。
+                    player.setPauseAtEndOfMediaItems(!args.getBoolean(AUTOPLAY_ARG_ENABLED, true))
+                }
+            }
+            return Futures.immediateFuture(SessionResult(SessionResult.RESULT_SUCCESS))
         }
     }
 

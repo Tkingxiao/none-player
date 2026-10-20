@@ -39,4 +39,6 @@ dependencies {
     ksp(libs.androidx.room.compiler)
 
     testImplementation(libs.junit)
+    // R2-1/REV-06：HistoryRepository 的失败注入/重试恢复用例需要 runTest + TestScope 虚拟时间
+    testImplementation(libs.kotlinx.coroutines.test)
 }

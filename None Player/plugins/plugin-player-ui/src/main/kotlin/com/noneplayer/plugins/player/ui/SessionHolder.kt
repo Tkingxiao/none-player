@@ -55,6 +55,10 @@ internal fun sessionFactoryOf(services: ServiceLocator): KernelServicesView =
             registry = services.get<ExtensionRegistry>(),
             settings = services.get(),
             events = services.get(),
-            history = services.get(),
+            // 必须写显式类型：PlaybackSession.history 的参数类型是契约接口
+            // PlaybackHistoryStore，靠类型推断会按**接口键**查 ServiceLocator；
+            // 内核只注册 HistoryRepository 实现 → 引导期直接抛「内核服务未注册」。
+            // 2026-10-20 真机（Release/R8）冒烟发现的装配回归，勿改回省略写法。
+            history = services.get<com.noneplayer.core.database.HistoryRepository>(),
         )
     }

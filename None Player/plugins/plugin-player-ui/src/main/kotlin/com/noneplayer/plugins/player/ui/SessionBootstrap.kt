@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.core.net.toUri
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.core.database.PlaybackHistoryStore
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.kind
@@ -59,7 +60,8 @@ internal suspend fun ensureSessionPlaying(
     context: Context,
     registry: ExtensionRegistry,
     settings: AppSettings,
-    history: HistoryRepository,
+    /** R2-1/REV-06：断点读取改依赖 [PlaybackHistoryStore]；读失败返回 null 时按从头播处理。 */
+    history: PlaybackHistoryStore,
     player: VideoPlayer,
     session: PlaybackSession,
     item: MediaItem,

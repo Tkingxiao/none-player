@@ -824,15 +824,25 @@ private fun ClearPlaybackCacheRow() {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val count by history.count.collectAsStateWithLifecycle(initialValue = 0)
+    // R2-1/REV-06：持久层降级状态可观察——失败过就在副题亮出来，恢复后自动回到常态文案。
+    val storageStatus by history.storageStatus.collectAsStateWithLifecycle()
     val ink = LocalNpInk.current
     NpSettingRow(
         title = "清除播放缓存",
-        subtitle = "断点续播进度与最近播放记录",
+        subtitle = if (storageStatus.healthy) {
+            "断点续播进度与最近播放记录"
+        } else {
+            "存储暂时不可用（${storageStatus.operation ?: "读写"}），稍后重试"
+        },
         icon = NpIcon.Trash,
         onClick = {
             val cleared = count
             scope.launch {
-                history.clearHistory()
+                // R2-1/REV-06：清除失败时**不清 DataStore 旧键**、也不报"已清除"。
+                if (!history.clearHistory()) {
+                    Toast.makeText(context, "清除失败，请重试", Toast.LENGTH_SHORT).show()
+                    return@launch
+                }
                 // 迁移前的旧键（以及只播过、没到落点门槛的那些）也清掉，避免两处口径残留
                 settings.clearPlaybackMemory()
                 Toast.makeText(

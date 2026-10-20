@@ -10,6 +10,7 @@ import androidx.lifecycle.ProcessLifecycleOwner
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.LOCAL_MEDIA_SOURCE_ID
 import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.core.database.PlaybackHistoryStore
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.kind
@@ -24,6 +25,7 @@ import com.noneplayer.kernel.api.PlayerConnection
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.VideoPlayerFactory
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async
@@ -94,11 +96,16 @@ class PlaybackSession(
     private val registry: ExtensionRegistry,
     private val settings: AppSettings,
     private val events: EventBus,
-    /** §8.3 持久层：断点/历史的唯一写入方（DataStore 只留设置项，E11） */
-    private val history: HistoryRepository,
+    /** §8.3 持久层：断点/历史的唯一写入方（DataStore 只留设置项，E11）。
+     *  R2-1/REV-06：只依赖 [PlaybackHistoryStore] 契约，写失败以降级返回值呈现，不抛进播放链路。 */
+    private val history: PlaybackHistoryStore,
 ) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+    private val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main +
+            // R2-1/REV-06：后台任务异常不再无人接——记录后隔离，避免整个播放会话被拖垮。
+            CoroutineExceptionHandler { _, error -> Log.e(TAG, "会话后台任务异常（已隔离）", error) },
+    )
     private var startJob: Deferred<SessionStart>? = null
 
     /** 在途装载的**完整意图**（A9）；与 [startJob] 同生共死，stop() 时一并清空。 */
@@ -641,7 +648,13 @@ class PlaybackSession(
         player.setQueue(list, index, startPositionMs.coerceAtLeast(0L), playOnLoad = startPlaying)
         events.publish(KernelEvent.PlaybackStarted(list[index].id))
         // play_count 在"进入某项播放"时 +1（周期/暂停落点不算，避免被落点次数灌水）
-        scope.launch { withContext(Dispatchers.IO) { history.markPlayed(list[index]) } }
+        // R2-1/REV-06：写失败只降级为可观察日志，绝不让持久层异常打断起播。
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                val persisted = history.markPlayed(list[index])
+                if (!persisted) Log.w(TAG, "markPlayed 落库失败（存储降级），本次播放计数丢失")
+            }
+        }
     }
 
     /** 切换播放/暂停（迷你条 ▶/⏸ 直接控制会话） */
@@ -785,11 +798,15 @@ class PlaybackSession(
         )
         scope.launch {
             withContext(Dispatchers.IO) {
-                history.record(
+                val persisted = history.record(
                     target,
                     positionMs = snapshot.positionMs,
                     durationMs = snapshot.durationMs,
                 )
+                // R2-1/REV-06：失败不抛，只记诊断；下一次周期落点（5s）会继续尝试自愈。
+                if (!persisted) {
+                    Log.w(TAG, "断点落盘失败（存储降级），下次周期落点将重试 ${snapshot.mediaKey}")
+                }
             }
         }
     }

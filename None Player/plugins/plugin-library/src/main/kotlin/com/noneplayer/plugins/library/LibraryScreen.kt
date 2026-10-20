@@ -884,7 +884,16 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                     },
                                     favorited = HistoryEntry.keyOf(detail) in favoriteKeys,
                                     onToggleFavorite = {
-                                        scope.launch { history.toggleFavorite(detail) }
+                                        scope.launch {
+                                            // R2-1/REV-06：写失败（null）不再静默——详情页也给一次提示。
+                                            if (history.toggleFavorite(detail) == null) {
+                                                android.widget.Toast.makeText(
+                                                    context,
+                                                    "收藏保存失败，请重试",
+                                                    android.widget.Toast.LENGTH_SHORT,
+                                                ).show()
+                                            }
+                                        }
                                     },
                                 )
                             }
@@ -1058,10 +1067,15 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                 onToggleFavorite = {
                     contextMenu = null
                     scope.launch {
-                        val now = history.toggleFavorite(menuItem)
+                        // R2-1/REV-06：写失败（null）显式提示，不再把失败当"已取消收藏"。
+                        val message = when (history.toggleFavorite(menuItem)) {
+                            true -> "已加入收藏"
+                            false -> "已取消收藏"
+                            null -> "收藏保存失败，请重试"
+                        }
                         android.widget.Toast.makeText(
                             context,
-                            if (now) "已加入收藏" else "已取消收藏",
+                            message,
                             android.widget.Toast.LENGTH_SHORT,
                         ).show()
                     }
