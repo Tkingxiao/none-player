@@ -67,6 +67,15 @@ val SUBTITLE_COLOR_OPTIONS = listOf(
 /** 字幕延时档位（毫秒；0 = 复位）。对齐参考示例的 −1.0s / −0.1s / 0 / +0.1s / +1.0s */
 val SUBTITLE_DELAY_STEPS_MS = listOf(-1_000L, -100L, 0L, 100L, 1_000L)
 
+// ---- A12 第一期：字幕摆放与可读性 ----
+
+/** 垂直位置：0 = 画面顶端，1 = 底端（默认 1，保留原底部留白） */
+const val SUBTITLE_VERTICAL_MIN = 0f
+const val SUBTITLE_VERTICAL_MAX = 1f
+const val DEFAULT_SUBTITLE_MAX_LINES = 3
+const val SUBTITLE_MAX_LINES_MIN = 1
+const val SUBTITLE_MAX_LINES_MAX = 5
+
 private val Context.dataStore: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> by preferencesDataStore(
     name = "none_player_settings",
     corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
@@ -121,6 +130,10 @@ class AppSettings(private val context: Context) {
         private val KEY_SUBTITLE_COLOR = stringPreferencesKey("subtitle_color")
         private val KEY_SUBTITLE_SCALE = stringPreferencesKey("subtitle_scale")
         private val KEY_SUBTITLE_ITALIC = booleanPreferencesKey("subtitle_italic")
+        private val KEY_SUBTITLE_VERTICAL = stringPreferencesKey("subtitle_vertical_position")
+        private val KEY_SUBTITLE_BACKGROUND = booleanPreferencesKey("subtitle_background")
+        private val KEY_SUBTITLE_OUTLINE = booleanPreferencesKey("subtitle_outline")
+        private val KEY_SUBTITLE_MAX_LINES = stringPreferencesKey("subtitle_max_lines")
 
         /**
          * 播放页禁止截屏/录屏（FLAG_SECURE，C18）。
@@ -553,6 +566,50 @@ class AppSettings(private val context: Context) {
 
     suspend fun setSubtitleItalic(italic: Boolean) {
         context.dataStore.edit { it[KEY_SUBTITLE_ITALIC] = italic }
+    }
+
+    /** 字幕垂直位置（0 顶端 – 1 底端，默认 1） */
+    val subtitleVerticalPosition: Flow<Float> = context.dataStore.data
+        .map {
+            (it[KEY_SUBTITLE_VERTICAL]?.toFloatOrNull() ?: SUBTITLE_VERTICAL_MAX)
+                .coerceIn(SUBTITLE_VERTICAL_MIN, SUBTITLE_VERTICAL_MAX)
+        }
+
+    suspend fun setSubtitleVerticalPosition(position: Float) {
+        context.dataStore.edit {
+            it[KEY_SUBTITLE_VERTICAL] =
+                position.coerceIn(SUBTITLE_VERTICAL_MIN, SUBTITLE_VERTICAL_MAX).toString()
+        }
+    }
+
+    /** 字幕文字底下垫半透明黑底 */
+    val subtitleBackground: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SUBTITLE_BACKGROUND] ?: false }
+
+    suspend fun setSubtitleBackground(enabled: Boolean) {
+        context.dataStore.edit { it[KEY_SUBTITLE_BACKGROUND] = enabled }
+    }
+
+    /** 字幕文字黑描边 */
+    val subtitleOutline: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SUBTITLE_OUTLINE] ?: false }
+
+    suspend fun setSubtitleOutline(enabled: Boolean) {
+        context.dataStore.edit { it[KEY_SUBTITLE_OUTLINE] = enabled }
+    }
+
+    /** 同屏每条字幕最大行数（1–5，默认 3） */
+    val subtitleMaxLines: Flow<Int> = context.dataStore.data
+        .map {
+            (it[KEY_SUBTITLE_MAX_LINES]?.toIntOrNull() ?: DEFAULT_SUBTITLE_MAX_LINES)
+                .coerceIn(SUBTITLE_MAX_LINES_MIN, SUBTITLE_MAX_LINES_MAX)
+        }
+
+    suspend fun setSubtitleMaxLines(lines: Int) {
+        context.dataStore.edit {
+            it[KEY_SUBTITLE_MAX_LINES] =
+                lines.coerceIn(SUBTITLE_MAX_LINES_MIN, SUBTITLE_MAX_LINES_MAX).toString()
+        }
     }
 
     /** 某媒体挂载的外挂字幕地址（跨会话记忆），未挂载为 null */

@@ -57,6 +57,7 @@ dependencies {
     // 否则 AV1 / MPEG-1/2 这类平台无解码器、FFmpeg 可解的编码会被误判为不可播
     implementation(libs.nextlib.media3ext)
 
+    testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
 }

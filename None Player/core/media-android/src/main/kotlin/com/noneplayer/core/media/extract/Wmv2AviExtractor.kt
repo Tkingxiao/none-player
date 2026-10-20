@@ -4,6 +4,7 @@ import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.Format
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.ParsableByteArray
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.extractor.Extractor
@@ -42,6 +43,10 @@ class Wmv2AviExtractor : Extractor {
         val extra: ByteArray,
         val sampleRate: Int,
         val channels: Int,
+        /** WAVEFORMATEX.nBlockAlign：PCM 一帧的字节数，也是 WMA 超帧的最大输入尺寸 */
+        val blockAlign: Int,
+        /** PCM 位深（WAVEFORMATEX.wBitsPerSample），非 PCM 为 0 */
+        val bitsPerSample: Int,
     )
 
     /**
@@ -394,13 +399,19 @@ class Wmv2AviExtractor : Extractor {
                     track.format(format)
                     tracks[stream.index] = track
                 } else if (stream.audioMime != null) {
-                    val maxIn = samples.filter { it.stream == stream.index }.maxOfOrNull { it.size } ?: 16 * 1024
+                    // PCM 一帧就是 blockAlign 字节；WMA 的 blockAlign 是超帧上限。
+                    // 旧实现只按样本最大值估，遇到空样本表会退 16KB，可能小于一帧。
+                    val sampleMax = samples.filter { it.stream == stream.index }.maxOfOrNull { it.size } ?: 0
+                    val maxIn = maxOf(sampleMax, stream.blockAlign, 1)
                     val format = Format.Builder()
                         .setSampleMimeType(stream.audioMime)
-                        .setMaxInputSize(maxIn.coerceAtLeast(1))
+                        .setMaxInputSize(maxIn)
                         .apply {
                             if (stream.sampleRate > 0) setSampleRate(stream.sampleRate)
                             if (stream.channels > 0) setChannelCount(stream.channels)
+                            if (stream.audioMime == MimeTypes.AUDIO_RAW) {
+                                setPcmEncoding(pcmEncodingForBits(stream.bitsPerSample))
+                            }
                         }
                         .build()
                     val track = sink.track(stream.index, C.TRACK_TYPE_AUDIO)
@@ -570,10 +581,12 @@ class Wmv2AviExtractor : Extractor {
             ByteArray(0)
         }
         val tag = if (!video && strf != null && strf.size >= 16) u16(strf, 0) else -1
-        val audioMime = when (tag) {
-            0x0055, 0x0050 -> "audio/mpeg"
-            else -> null
-        }
+        // A11：旧实现只认 MP3/MP2，PCM 与 WMA 整条轨被丢弃——用户只看到"有画无声"，
+        // 排障面板也没有原因。现在所有已知 tag 都建轨；本机解不了的 WMA 由探测侧
+        // 标记 audioUnsupported，UI 明确提示，不再静默消失。
+        val audioMime = wmvAudioMimeForTag(tag)
+        val blockAlign = if (!video && strf != null && strf.size >= 14) u16(strf, 12) else 0
+        val bitsPerSample = if (!video && strf != null && strf.size >= 16) u16(strf, 14) else 0
         return StreamInfo(
             index = index,
             isWmv2 = video && (compression == "WMV2" || fccHandler == "WMV2"),
@@ -586,6 +599,8 @@ class Wmv2AviExtractor : Extractor {
             extra = extra,
             sampleRate = if (strf != null && strf.size >= 8 && !video) u32(strf, 4).toInt() else 0,
             channels = if (strf != null && strf.size >= 4 && !video) u16(strf, 2) else 0,
+            blockAlign = blockAlign,
+            bitsPerSample = bitsPerSample,
         )
     }
 
@@ -629,5 +644,25 @@ class Wmv2AviExtractor : Extractor {
 
         /** 标准 BITMAPINFOHEADER 长度；extradata 从它之后开始（与 FFmpeg avidec 一致） */
         const val BITMAPINFOHEADER = 40
+
+        /** media3 没有 WMA 的 MimeTypes 常量；FFmpeg 的解码表按这个 mime 认 wmav1/2 */
+        const val AUDIO_WMA = "audio/x-ms-wma"
     }
+}
+
+/** WAVEFORMATEX 位深 → media3 的 PCM 编码；未知位深按 16-bit（AVI PCM 的绝对多数）。 */
+internal fun pcmEncodingForBits(bitsPerSample: Int): Int = when {
+    bitsPerSample <= 0 -> C.ENCODING_PCM_16BIT
+    bitsPerSample <= 8 -> C.ENCODING_PCM_8BIT
+    bitsPerSample <= 16 -> C.ENCODING_PCM_16BIT
+    bitsPerSample <= 24 -> C.ENCODING_PCM_24BIT
+    else -> C.ENCODING_PCM_32BIT
+}
+
+/** AVI WAVE tag → media3 mime（A11；纯函数便于 JVM 测试）。 */
+internal fun wmvAudioMimeForTag(tag: Int): String? = when (tag) {
+    0x0001, 0x0003 -> MimeTypes.AUDIO_RAW
+    0x0050, 0x0055 -> MimeTypes.AUDIO_MPEG
+    0x0160, 0x0161, 0x0162, 0x0163 -> "audio/x-ms-wma"
+    else -> null
 }

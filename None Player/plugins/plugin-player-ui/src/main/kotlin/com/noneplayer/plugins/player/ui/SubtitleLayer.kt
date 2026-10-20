@@ -2,16 +2,17 @@ package com.noneplayer.plugins.player.ui
 
 import android.graphics.Bitmap
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -19,18 +20,28 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.layout
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
+import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.kernel.api.CuePlacement
+import com.noneplayer.kernel.api.NpTrackType
+import com.noneplayer.kernel.api.SubtitleAlignment
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.VideoPlayer
-import androidx.compose.material3.Text
+import com.noneplayer.kernel.ui.api.PlaybackTextCueArbiter
 import kotlin.math.roundToInt
 
 /**
@@ -48,6 +59,14 @@ data class SubtitleStyle(
     val scale: Float = 1f,
     /** 文字字幕用斜体 */
     val italic: Boolean = false,
+    /** A12：垂直位置（0 = 画面顶端，1 = 底端）；Cue 自带 lineFraction 时以 Cue 为准 */
+    val verticalPosition: Float = 1f,
+    /** A12：给文字垫一条半透明黑底，亮画面可读 */
+    val background: Boolean = false,
+    /** A12：文字描边（黑），与软阴影二选一叠加 */
+    val outline: Boolean = false,
+    /** A12：同屏每条字幕最多显示几行；超出省略 */
+    val maxLines: Int = 3,
 )
 
 /**
@@ -74,9 +93,23 @@ fun PlayerSubtitleLayer(
     player: VideoPlayer,
     modifier: Modifier = Modifier,
     style: SubtitleStyle = SubtitleStyle(),
+    /** 当前媒体 uri：内嵌弹幕认领同一批 Cue 时，字幕层据此让位（A12） */
+    mediaUri: String = "",
 ) {
     val cues by player.cues.collectAsStateWithLifecycle()
-    SubtitleLayer(cues = cues, modifier = modifier, style = style)
+    // A12：文本轨被弹幕层认领（内嵌弹幕源）时不再重复画文本；位图字幕不受影响。
+    val claim by PlaybackTextCueArbiter.claim.collectAsStateWithLifecycle()
+    val tracks by player.tracks.collectAsStateWithLifecycle()
+    val selectedTextId = tracks.firstOrNull { it.type == NpTrackType.TEXT && it.selected }?.id
+    val suppressText = claim != null &&
+        claim?.mediaUri == mediaUri &&
+        selectedTextId != null &&
+        claim?.trackId == selectedTextId
+    SubtitleLayer(
+        cues = if (suppressText) cues.filter { it.bitmap != null } else cues,
+        modifier = modifier,
+        style = style,
+    )
 }
 
 @Composable
@@ -88,31 +121,21 @@ fun SubtitleLayer(
     if (cues.isEmpty() || !style.enabled) return
     val textCues = cues.filter { it.text != null }
     val bitmapCues = cues.filter { it.bitmap is Bitmap }
-    val textStyle = SubtitleTextStyle(
-        color = Color(style.colorArgb.toInt()),
-        scale = style.scale,
-        italic = style.italic,
-    )
 
     Box(modifier = modifier.fillMaxSize()) {
-        // 文本字幕：多行合并为一个列，底部居中，给控制层留出空间
-        if (textCues.isNotEmpty()) {
-            Column(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(horizontal = 24.dp, vertical = SUBTITLE_BOTTOM_PADDING),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                textCues.forEach { cue ->
-                    Text(
-                        text = cue.text.orEmpty(),
-                        style = textStyle,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(top = 2.dp),
-                    )
-                }
+        // 文本字幕（A12 第一期）：按 Cue 自己的对齐 / 垂直位置摆放，缺省才是底部居中。
+        // 用户显式改过颜色时优先用户值；否则吃容器给的主色（ASS ForegroundColorSpan）。
+        textCues.forEach { cue ->
+            val cueColor = if (style.colorArgb != DEFAULT_SUBTITLE_COLOR_ARGB) {
+                Color(style.colorArgb.toInt())
+            } else {
+                cue.textColorArgb?.let { Color(it.toInt()) } ?: Color(style.colorArgb.toInt())
             }
+            TextCue(
+                cue = cue,
+                style = style,
+                color = cueColor,
+            )
         }
 
         // 位图字幕（PGS/VobSub）：按归一化摆放绘制。
@@ -147,6 +170,100 @@ fun SubtitleLayer(
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * 一条文本 Cue 的摆放（A12 第一期）。
+ *
+ * - 水平：Cue 的 [SubtitleCue.positionFraction] 优先（按中心点），否则按
+ *   [SubtitleCue.alignment] 左/中/右；
+ * - 垂直：Cue 的 [SubtitleCue.lineFraction] 优先（≤0.5 当顶边锚、>0.5 当底边锚），
+ *   否则按用户设置的 [SubtitleStyle.verticalPosition]（0 顶、1 底，默认 1 + 底部留白）；
+ * - 样式：颜色 / 字号 / 斜体 / 背景条 / 黑描边 / 最大行数。
+ *
+ * 摆放用 `layout` 相位完成（文字更新本来低频；不额外套 `BoxWithConstraints`）。
+ */
+@Composable
+private fun TextCue(
+    cue: SubtitleCue,
+    style: SubtitleStyle,
+    color: Color,
+) {
+    val density = LocalDensity.current
+    val textStyle = SubtitleTextStyle(color = color, scale = style.scale, italic = style.italic)
+    val strokeStyle = textStyle.copy(
+        color = Color.Black,
+        drawStyle = Stroke(width = with(density) { 3.dp.toPx() }),
+    )
+    val textAlign = when (cue.alignment) {
+        SubtitleAlignment.LEFT -> TextAlign.Start
+        SubtitleAlignment.CENTER -> TextAlign.Center
+        SubtitleAlignment.RIGHT -> TextAlign.End
+    }
+    val maxLines = style.maxLines.coerceAtLeast(1)
+    val text = cue.text.orEmpty()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .layout { measurable, constraints ->
+                val stageW = constraints.maxWidth
+                val stageH = constraints.maxHeight
+                if (stageW <= 0 || stageH <= 0) {
+                    return@layout layout(stageW, stageH) { }
+                }
+                val hPad = (stageW * 0.04f).roundToInt()
+                val maxTextWidth = (stageW - hPad * 2).coerceAtLeast(1)
+                val placeable = measurable.measure(Constraints(maxWidth = maxTextWidth))
+                val position = cue.positionFraction
+                val x = when {
+                    position != null ->
+                        (stageW * position - placeable.width / 2f).roundToInt()
+                    cue.alignment == SubtitleAlignment.LEFT -> hPad
+                    cue.alignment == SubtitleAlignment.RIGHT -> stageW - placeable.width - hPad
+                    else -> (stageW - placeable.width) / 2
+                }.coerceIn(0, (stageW - placeable.width).coerceAtLeast(0))
+                val line = cue.lineFraction
+                val y = (if (line != null) {
+                    if (line <= 0.5f) {
+                        (stageH * line).roundToInt()
+                    } else {
+                        (stageH * line).roundToInt() - placeable.height
+                    }
+                } else {
+                    val bottomPad = SUBTITLE_BOTTOM_PADDING.roundToPx()
+                    ((stageH - placeable.height - bottomPad) * style.verticalPosition).roundToInt()
+                }).coerceIn(0, (stageH - placeable.height).coerceAtLeast(0))
+                layout(stageW, stageH) { placeable.place(x, y) }
+            },
+        contentAlignment = Alignment.TopStart,
+    ) {
+        Column(
+            modifier = if (style.background) {
+                Modifier
+                    .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(NpRadius.chip))
+                    .padding(horizontal = 8.dp, vertical = 2.dp)
+            } else {
+                Modifier
+            },
+        ) {
+            if (style.outline) {
+                Text(
+                    text = text,
+                    style = strokeStyle,
+                    textAlign = textAlign,
+                    maxLines = maxLines,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            Text(
+                text = text,
+                style = textStyle,
+                textAlign = textAlign,
+                maxLines = maxLines,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }

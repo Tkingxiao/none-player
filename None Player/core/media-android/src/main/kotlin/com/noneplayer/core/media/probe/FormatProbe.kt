@@ -75,6 +75,11 @@ object FormatProbe {
              * UI 据此在起播前给一条 warn 胶囊，而不是让用户自己发现"为什么卡"。
              */
             val softwareVideoOnly: Boolean = false,
+            /**
+             * 视频可解、但音轨本机不可解（A11）：平台与内置 FFmpeg 都不认这个音频编码。
+             * 播放继续（静音），UI 必须明确提示，不能像旧实现那样静默丢轨。
+             */
+            val audioUnsupported: Boolean = false,
         ) : Result
 
         /** 无法给出结论——照常交给播放引擎 */
@@ -526,6 +531,11 @@ object FormatProbe {
             val ffmpegVideo = ffmpegSupports(video.sampleMimeType)
             val bitmapVideo = bitmapRendererSupports(video.sampleMimeType)
             val legacyVideo = legacySupports(video.sampleMimeType)
+            // A11：有视频轨时也要查音频解码器。H.264 + WMA/DTS/TrueHD 这类组合
+            // 以前一律判 Playable，起播后无声或音频渲染器报错，用户拿不到原因。
+            val audioUnsupported = audio != null &&
+                !hasPlatformAudioDecoder(audio) &&
+                !ffmpegSupports(audio.sampleMimeType)
             if (!platformVideo && !ffmpegVideo && !bitmapVideo && !legacyVideo) {
                 return Result.Unplayable(
                     PlaybackFailure.videoCodecUnsupported(containerName, videoName, audioName),
@@ -544,6 +554,7 @@ object FormatProbe {
                 // 不用再判 `ffmpegVideo || bitmapVideo`：上面 unsupported 的早退已保证三者至少
                 // 其一成立，走到这里 `!platformVideo` 就必然是两条软解之一出画。
                 softwareVideoOnly = onlySoftwareDecoder(video) || !platformVideo,
+                audioUnsupported = audioUnsupported,
             )
         }
 
@@ -592,41 +603,19 @@ object FormatProbe {
     }
 
     /**
-     * 是否**只有软件解码器**可用（C21）：默认解码器被系统标记为非硬件加速时为真。
+     * 是否**只有软件解码器**可用（C21）。
      *
-     * 保守取"默认解码器"的判断而不是枚举全部：`findDecoderForFormat` 返回的就是
-     * 播放器实际会用的那一个；枚举全表再取"有没有硬解"会与真实选择脱节
-     * （有硬解但默认选了软解的设备确实存在）。
-     * `isHardwareAccelerated` 需要 API 29；更低版本返回 false（不给提示）。
+     * A10：判定下沉到 [PlatformDecoderSupport.hasHardwareDecoder]——与播放侧兼容档的
+     * MediaCodecSelector 用同一规则（按 `isHardwareAccelerated` 过滤），避免
+     * 「探测说硬解可用、兼容档却把平台解码器摘掉」的分叉。API 29 以下保持旧语义
+     * （有平台解码器就不提示"仅软解"）。
      */
-    private fun onlySoftwareDecoder(format: Format): Boolean {
-        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return false
-        val mime = format.sampleMimeType ?: return false
-        return runCatching {
-            val platform = PlatformMediaFormat.createVideoFormat(
-                mime,
-                max(format.width, 1),
-                max(format.height, 1),
-            )
-            val list = MediaCodecList(MediaCodecList.REGULAR_CODECS)
-            val decoderName = list.findDecoderForFormat(platform) ?: return@runCatching false
-            val info = list.codecInfos.firstOrNull { it.name == decoderName } ?: return@runCatching false
-            !info.isHardwareAccelerated
-        }.getOrDefault(false)
-    }
+    private fun onlySoftwareDecoder(format: Format): Boolean =
+        !PlatformDecoderSupport.hasHardwareDecoder(format)
 
     /** 平台解码器查询：与系统同源（MediaCodecList），尺寸缺失时按常见档位查询 */
-    private fun hasPlatformDecoder(format: Format): Boolean {
-        val mime = format.sampleMimeType ?: return true
-        return runCatching {
-            val platform = PlatformMediaFormat.createVideoFormat(
-                mime,
-                max(format.width, 1),
-                max(format.height, 1),
-            )
-            MediaCodecList(MediaCodecList.REGULAR_CODECS).findDecoderForFormat(platform) != null
-        }.getOrDefault(true)
-    }
+    private fun hasPlatformDecoder(format: Format): Boolean =
+        PlatformDecoderSupport.hasPlatformDecoder(format)
 
     /**
      * 内置 FFmpeg（NextLib）能否软解该编码。

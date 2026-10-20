@@ -5,6 +5,9 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.text.Layout
+import android.text.Spanned
+import android.text.style.ForegroundColorSpan
 import android.view.SurfaceView
 import android.view.TextureView
 import androidx.annotation.OptIn
@@ -37,6 +40,7 @@ import com.noneplayer.kernel.api.NpChapter
 import com.noneplayer.kernel.api.NpTrack
 import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
+import com.noneplayer.kernel.api.SubtitleAlignment
 import com.noneplayer.kernel.api.SubtitleCue
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.NpMediaButtonAction
@@ -533,12 +537,12 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     probedVideoCodec = probe.videoCodec
                     probedAudioCodec = probe.audioCodec
                     _hdrLabel.value = probe.hdr
-                    // C21：仅软解可用时给前置提示（能播，但可能发热/掉帧）
-                    _decodeNotice.value = if (probe.softwareVideoOnly) {
-                        "该视频仅有软件解码器可用，高码率下可能掉帧或发热"
-                    } else {
-                        null
-                    }
+                    // C21：仅软解可用时给前置提示（能播，但可能发热/掉帧）。
+                    // A11：音轨不可解时也必须说清——播放继续，但用户会以为是设备坏了。
+                    _decodeNotice.value = buildList {
+                        if (probe.audioUnsupported) add("音轨编码本机不可解，将静音播放")
+                        if (probe.softwareVideoOnly) add("该视频仅有软件解码器可用，高码率下可能掉帧或发热")
+                    }.takeIf { it.isNotEmpty() }?.joinToString("；")
                     apply()
                 }
                 FormatProbe.Result.Unknown -> {
@@ -880,6 +884,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 NpMediaButtonAction.PLAY -> c.play()
                 NpMediaButtonAction.PAUSE -> c.pause()
                 NpMediaButtonAction.NEXT -> c.seekToNext()
+                NpMediaButtonAction.PREVIOUS -> c.seekToPrevious()
             }
         }
     }
@@ -1573,7 +1578,36 @@ private fun Cue.toKernelCue(): SubtitleCue {
             placement = CuePlacement(left, top, widthFraction, heightFraction),
         )
     }
-    return SubtitleCue(text = text?.toString())
+    // A12 第一期：容器已有的对齐、垂直/水平位置与主色带出去。文本仍是纯文本
+    // （富文本 span 第二阶段再做），但顶部对齐/双语分置不再被一律压到底部。
+    val alignment = when (textAlignment) {
+        Layout.Alignment.ALIGN_NORMAL -> SubtitleAlignment.LEFT
+        Layout.Alignment.ALIGN_OPPOSITE -> SubtitleAlignment.RIGHT
+        else -> SubtitleAlignment.CENTER
+    }
+    val lineFraction = line
+        .takeIf { it != Cue.DIMEN_UNSET && lineType == Cue.LINE_TYPE_FRACTION }
+        ?.coerceIn(0f, 1f)
+    val positionFraction = position
+        .takeIf { it != Cue.DIMEN_UNSET }
+        ?.coerceIn(0f, 1f)
+    // media3 的 SSA 解码器把 ASS 主色放进 ForegroundColorSpan；只取首个前景色当
+    // "主色"。用户显式改过颜色时渲染层优先用户值（见 SubtitleLayer）。
+    val textColorArgb = (text as? Spanned)
+        ?.let { spanned ->
+            spanned.getSpans(0, spanned.length, ForegroundColorSpan::class.java)
+                ?.firstOrNull()
+                ?.foregroundColor
+        }
+        ?.toLong()
+        ?.and(0xFFFFFFFFL)
+    return SubtitleCue(
+        text = text?.toString(),
+        alignment = alignment,
+        lineFraction = lineFraction,
+        positionFraction = positionFraction,
+        textColorArgb = textColorArgb,
+    )
 }
 
 /**

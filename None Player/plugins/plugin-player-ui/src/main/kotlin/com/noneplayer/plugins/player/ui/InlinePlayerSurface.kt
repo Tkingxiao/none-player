@@ -41,6 +41,10 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
+import com.noneplayer.core.data.DEFAULT_SUBTITLE_MAX_LINES
+import com.noneplayer.core.data.SUBTITLE_MAX_LINES_MAX
+import com.noneplayer.core.data.SUBTITLE_MAX_LINES_MIN
+import com.noneplayer.core.data.SUBTITLE_VERTICAL_MAX
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.cardTitle
@@ -256,11 +260,23 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
             .collectAsStateWithLifecycle(initialValue = DEFAULT_SUBTITLE_COLOR_ARGB)
         val subtitleScale by settings.subtitleScale.collectAsStateWithLifecycle(initialValue = 1f)
         val subtitleItalic by settings.subtitleItalic.collectAsStateWithLifecycle(initialValue = false)
+        val subtitleVertical by settings.subtitleVerticalPosition
+            .collectAsStateWithLifecycle(initialValue = SUBTITLE_VERTICAL_MAX)
+        val subtitleBackground by settings.subtitleBackground
+            .collectAsStateWithLifecycle(initialValue = false)
+        val subtitleOutline by settings.subtitleOutline
+            .collectAsStateWithLifecycle(initialValue = false)
+        val subtitleMaxLines by settings.subtitleMaxLines
+            .collectAsStateWithLifecycle(initialValue = DEFAULT_SUBTITLE_MAX_LINES)
         val subtitleStyle = SubtitleStyle(
             enabled = subtitleEnabled,
             colorArgb = subtitleColorArgb,
             scale = subtitleScale,
             italic = subtitleItalic,
+            verticalPosition = subtitleVertical,
+            background = subtitleBackground,
+            outline = subtitleOutline,
+            maxLines = subtitleMaxLines,
         )
         LaunchedEffect(player, subtitleEnabled) { player.setTextTracksEnabled(subtitleEnabled) }
 
@@ -302,10 +318,11 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         // 都会走 onDispose→写回旧值，表现为"亮度突然跳回"。
         DisposableEffect(activity, screenshotBlocked) {
             val window = activity?.window
-            if (screenshotBlocked) window?.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-            else window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+            // 同 PlayerScreen：捕获本次副作用的值，避免 onDispose 读到开关的新值。
+            val blocked = screenshotBlocked
+            if (window != null && blocked) WindowSecureFlag.acquire(window)
             onDispose {
-                window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                if (window != null && blocked) WindowSecureFlag.release(window)
             }
         }
         val mediaKey = mediaMemoryKey(media.sourceId, media.id)
@@ -632,6 +649,16 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             onScale = { scope.launch { settings.setSubtitleScale(it) } },
                             italic = subtitleItalic,
                             onItalic = { scope.launch { settings.setSubtitleItalic(it) } },
+                            verticalPosition = subtitleVertical,
+                            onVerticalPosition = {
+                                scope.launch { settings.setSubtitleVerticalPosition(it) }
+                            },
+                            background = subtitleBackground,
+                            onBackground = { scope.launch { settings.setSubtitleBackground(it) } },
+                            outline = subtitleOutline,
+                            onOutline = { scope.launch { settings.setSubtitleOutline(it) } },
+                            maxLines = subtitleMaxLines,
+                            onMaxLines = { scope.launch { settings.setSubtitleMaxLines(it) } },
                             onSetEnabled = { enabled ->
                                 player.setTextTracksEnabled(enabled)
                                 scope.launch { settings.setSubtitleEnabled(enabled) }

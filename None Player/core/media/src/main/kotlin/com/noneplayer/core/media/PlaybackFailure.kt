@@ -190,6 +190,7 @@ object MediaNames {
         "audio/vorbis" to "Vorbis",
         "audio/flac" to "FLAC",
         "audio/raw" to "PCM",
+        "audio/x-ms-wma" to "WMA",
         "audio/amr" to "AMR",
         "audio/alac" to "ALAC",
         "audio/midi" to "MIDI",

@@ -327,7 +327,7 @@ enum class NpTrackType { AUDIO, TEXT }
  *
  * 只列引擎需要对外发的那几颗；UI 侧的图标与文案不归这里。
  */
-enum class NpMediaButtonAction { PLAY, PAUSE, NEXT }
+enum class NpMediaButtonAction { PLAY, PAUSE, NEXT, PREVIOUS }
 
 /**
  * 外挂字幕的容器格式（A3）。

@@ -1,8 +1,11 @@
 package com.noneplayer.core.ui
 
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.Bitmap
 import android.graphics.Rect
+import androidx.core.graphics.drawable.toDrawable
 import android.os.Handler
 import android.os.Looper
 import android.view.PixelCopy
@@ -21,6 +24,7 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -32,7 +36,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.core.graphics.createBitmap
+import androidx.core.view.WindowCompat
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
 
@@ -79,6 +85,12 @@ private val LightColors: ColorScheme = lightColorScheme().applyInk(NpInkLight)
 
 private val DarkColors: ColorScheme = darkColorScheme().applyInk(NpInkDark)
 
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
 /**
  * None Player 主题。
  *
@@ -122,6 +134,20 @@ fun NonePlayerTheme(
         val auto = autoMotionQuality(context, isDesktopLike, decodingVideo)
         val base = motionQuality?.let { NpMotionQuality.lowerOf(it, auto) } ?: auto
         if (decodingVideo) base.forPlayback() else base
+    }
+
+    // A13：系统栏图标明暗跟**应用主题**，不是只跟系统深色；windowBackground 同理。
+    // 放在每次 appliedDark 落定之后，主题切换与冷启首帧后的状态都由同一处收口。
+    val view = LocalView.current
+    SideEffect {
+        val activity = context.findActivity() ?: return@SideEffect
+        WindowCompat.getInsetsController(activity.window, view).apply {
+            isAppearanceLightStatusBars = !appliedDark
+            isAppearanceLightNavigationBars = !appliedDark
+        }
+        activity.window.setBackgroundDrawable(
+            (if (appliedDark) android.graphics.Color.BLACK else android.graphics.Color.WHITE).toDrawable(),
+        )
     }
 
     LaunchedEffect(darkTheme) {

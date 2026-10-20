@@ -29,4 +29,25 @@ class PipPolicyTest {
             assertEquals(16f / 9f, pipAspectRatio(it), 0f)
         }
     }
+
+    @Test
+    fun `pip source size letterboxes landscape into a square view`() {
+        val (w, h) = pipContentSize(viewWidth = 1000, viewHeight = 1000, aspectRatio = 16f / 9f, fit = true)
+        assertEquals(1000, w)
+        assertEquals(563, h)
+    }
+
+    @Test
+    fun `pip source size pillarboxes portrait into a square view`() {
+        val (w, h) = pipContentSize(viewWidth = 1000, viewHeight = 1000, aspectRatio = 9f / 16f, fit = true)
+        assertEquals(563, w)
+        assertEquals(1000, h)
+    }
+
+    @Test
+    fun `pip source size fills the view for crop or invalid input`() {
+        assertEquals(1000 to 1000, pipContentSize(1000, 1000, 16f / 9f, fit = false))
+        assertEquals(1000 to 1000, pipContentSize(1000, 1000, 0f, fit = true))
+        assertEquals(0 to 0, pipContentSize(0, 1000, 16f / 9f, fit = true))
+    }
 }

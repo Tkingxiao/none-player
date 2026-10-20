@@ -8,6 +8,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -28,6 +29,7 @@ import com.noneplayer.kernel.api.get
 import com.noneplayer.kernel.ui.api.LocalKernel
 import com.noneplayer.kernel.ui.api.PlaybackContext
 import com.noneplayer.kernel.ui.api.PlaybackOverlay
+import com.noneplayer.kernel.ui.api.PlaybackTextCueArbiter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -152,6 +154,18 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
             withContext(Dispatchers.Main) { source = loaded }
         }
     }
+    // A12：内嵌轨被选为弹幕来源时，向字幕层认领这批文本 Cue，避免同一句出现两次。
+    // 只在弹幕开启时认领；关闭/切回文件/离开页面都要释放（onDispose 兜底）。
+    DisposableEffect(context.media.uri, embeddedPicked, enabled) {
+        val track = embeddedPicked
+        if (enabled && track != null) {
+            PlaybackTextCueArbiter.claim(context.media.uri, track, "danmaku.core")
+        }
+        onDispose {
+            if (track != null) PlaybackTextCueArbiter.release(context.media.uri, track)
+        }
+    }
+
     // 内嵌轨选择优先于文件来源
     LaunchedEffect(embeddedPicked) {
         val trackId = embeddedPicked ?: return@LaunchedEffect

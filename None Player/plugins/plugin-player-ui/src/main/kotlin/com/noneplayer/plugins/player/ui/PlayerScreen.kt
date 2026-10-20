@@ -147,16 +147,22 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.data.DEFAULT_DOUBLE_TAP_STEP_MS
 import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
+import com.noneplayer.core.data.DEFAULT_SUBTITLE_MAX_LINES
 import com.noneplayer.core.data.SUBTITLE_COLOR_OPTIONS
 import com.noneplayer.core.data.SUBTITLE_DELAY_STEPS_MS
+import com.noneplayer.core.data.SUBTITLE_MAX_LINES_MAX
+import com.noneplayer.core.data.SUBTITLE_MAX_LINES_MIN
 import com.noneplayer.core.data.SUBTITLE_SCALE_MAX
 import com.noneplayer.core.data.SUBTITLE_SCALE_MIN
+import com.noneplayer.core.data.SUBTITLE_VERTICAL_MAX
+import com.noneplayer.core.data.SUBTITLE_VERTICAL_MIN
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
@@ -732,6 +738,10 @@ fun PlayerScreen(
         ?.let { mediaMemoryKey(it.sourceId, it.id) }
         ?: mediaId.takeIf { it.isNotEmpty() }?.let { mediaMemoryKey("", it) }
             .orEmpty()
+    // A14：小窗源矩形的内接矩形要读缩放模式，声明提前到 PiP 辅助函数之前。
+    var scaleMode by remember(mediaId) { mutableStateOf(VideoScaleMode.FIT) }
+    var mirrored by remember(mediaId) { mutableStateOf(false) }
+    var rotation by remember(mediaId) { mutableIntStateOf(0) }
     // 转横屏（进入类 PC 档）时画面归右栏，外壳在**第一帧横屏画出来之前**调 `retire`
     // 退本页。不这么做，那一帧就是"播放内容被全屏放大成横屏版式"（用户实报"生硬且奇怪"）。
     // 以前这里还要先抓一帧交给幽灵层飞，现在不用：画面是同一个 TextureView，
@@ -771,6 +781,8 @@ fun PlayerScreen(
     // 旧写法（比例驱动自动全屏 + autoFullscreenSuppressed 竞态闩）正是
     // "点视频直接横屏、返回时先转竖屏再退出界面"的根因。
     val activity = context as? ComponentActivity
+    // A14：小窗态要早于方向/版式判定声明——方向 effect 与小窗分支都读它。
+    var inPipMode by remember(activity) { mutableStateOf(activity?.isInPictureInPictureMode == true) }
     val configuration = LocalConfiguration.current
     val windowIsPortrait = configuration.screenHeightDp >= configuration.screenWidthDp
     // E48 余项 / §13.4：形态分派走 LocalNpWindowInfo（全局唯一判定层）。
@@ -796,7 +808,8 @@ fun PlayerScreen(
     // 前者尊重系统"自动旋转"开关，用户关掉它就不该替他转。
     // 进入播放页不预设方向（E48）：orientationLock 的初值就是 FollowSensor，
     // 这里只会落地"点全屏 / 退全屏"这类用户意图，不会因为"视频是横的"自动转屏。
-    LaunchedEffect(orientationLock) {
+    LaunchedEffect(orientationLock, inPipMode) {
+        if (inPipMode) return@LaunchedEffect // A14：小窗内冻结方向锁
         val act = activity ?: return@LaunchedEffect
         act.requestedOrientation = orientationLock.requestedOrientation
         // 请求发出去不等于屏幕真的转了：不转就收回，否则用户拿到一条信箱化的窄带
@@ -810,7 +823,8 @@ fun PlayerScreen(
     }
     // 手动退出全屏：锁竖屏把窗口转过去，到位后立刻交还传感器——
     // 锁不留存量，否则"退出全屏后再把设备横过来"不会再进全屏
-    LaunchedEffect(orientationLock, windowIsPortrait) {
+    LaunchedEffect(orientationLock, windowIsPortrait, inPipMode) {
+        if (inPipMode) return@LaunchedEffect // A14：小窗的 9:16 不是"竖屏版式"
         if (orientationLock == OrientationLock.Portrait && windowIsPortrait) {
             orientationLock = OrientationLock.FollowSensor
         }
@@ -850,13 +864,14 @@ fun PlayerScreen(
     //     这次返回直接离开播放页。
     // 两条路都必然推进：即使竖向请求被系统拒绝，`orientationLock` 也已被改成 `Portrait`，
     // 下一次返回落到"其余"分支 ⇒ 最多两下必定出得去，不存在空转死循环。
-    LaunchedEffect(isFullscreen) {
+    LaunchedEffect(isFullscreen, inPipMode) {
+        if (inPipMode) return@LaunchedEffect // A14：小窗窗口是竖的，别把横屏锁清掉
         if (!isFullscreen) orientationLock = OrientationLock.FollowSensor
     }
     // fs=1（详情「全屏观看」/ 右栏 ⛶）：落地即全屏——竖窗先请求横向，
     // 横窗（平板自然方向）本来就是全屏，无需请求。
-    LaunchedEffect(immersiveEntry) {
-        if (immersiveEntry && windowIsPortrait) setFullscreen(true)
+    LaunchedEffect(immersiveEntry, inPipMode) {
+        if (!inPipMode && immersiveEntry && windowIsPortrait) setFullscreen(true)
     }
 
     /**
@@ -1242,12 +1257,14 @@ fun PlayerScreen(
         toast.show(if (blocked) "已禁止屏幕截图" else "已允许屏幕截图")
     }
     DisposableEffect(activityWindow, screenshotBlocked) {
-        if (screenshotBlocked) {
-            activityWindow?.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
-        } else {
-            activityWindow?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+        val window = activityWindow
+        // 必须捕获本次副作用的值：直接读委托属性会在 onDispose 时取到最新值，
+        // 开关从「禁止」恢复「允许」时释放分支读到 false，FLAG_SECURE 永久残留。
+        val blocked = screenshotBlocked
+        if (window != null && blocked) WindowSecureFlag.acquire(window)
+        onDispose {
+            if (window != null && blocked) WindowSecureFlag.release(window)
         }
-        onDispose { activityWindow?.clearFlags(WindowManager.LayoutParams.FLAG_SECURE) }
     }
     // 收藏：与库页长按菜单、我的页横排**同一个仓库**（Room favorites）——此前这里是
     // rememberSaveable 占位 + 「已加入收藏」toast，而「我的」页早已是真实列表：
@@ -1517,41 +1534,96 @@ fun PlayerScreen(
         verticalGesture = null
     }
 
-    fun enterPip() {
+    /**
+     * A14：小窗参数的唯一写入点。
+     *
+     * 每次发布都带当前比例 / 动作 / 源矩形 / 无缝开关；键相同就不打 binder
+     * （`PictureInPictureParams` 没有 equals，用比例+播放态+矩形自己拼键）。
+     */
+    var lastPipParamsKey by remember { mutableStateOf<String?>(null) }
+    fun publishPipParams(
+        act: ComponentActivity,
+        sourceRect: android.graphics.Rect?,
+    ): PictureInPictureParams {
+        val playing = state == PlaybackState.Playing
+        val ratio = pipAspectRatio(videoAspectRatio)
+        val key = "$ratio|$playing|${sourceRect ?: "none"}"
+        val params = manualPipParams(
+            context,
+            videoAspectRatio,
+            playing,
+            player::mediaButtonIntent,
+            sourceRect,
+        )
+        if (key != lastPipParamsKey) {
+            lastPipParamsKey = key
+            runCatching { act.setPictureInPictureParams(params) }
+        }
+        return params
+    }
+
+    /**
+     * A14：源矩形取**画面内容区**，再与窗口安全区/刘海求交。
+     *
+     * TextureView 在 FIT 下本身已被比例约束，但裁剪/拉伸档会铺满容器；这里按
+     * 当前缩放模式算一次内接矩形，避免把黑边收进小窗。旋转 180° 不改宽高比，
+     * 这里也不做 90° 式的交换。
+     */
+    fun contentRectForPip(): android.graphics.Rect? {
+        val surface = surfaceViewRef.value ?: return null
+        if (!surface.isAttachedToWindow || surface.width <= 0 || surface.height <= 0) return null
+        val loc = IntArray(2)
+        surface.getLocationInWindow(loc)
+        val viewW = surface.width
+        val viewH = surface.height
+        val ratio = videoAspectRatio.takeIf { it.isFinite() && it > 0f } ?: (viewW.toFloat() / viewH)
+        val (contentW, contentH) = pipContentSize(
+            viewWidth = viewW,
+            viewHeight = viewH,
+            aspectRatio = ratio,
+            fit = scaleMode == VideoScaleMode.FIT,
+        )
+        if (contentW <= 0 || contentH <= 0) return null
+        val left = loc[0] + (viewW - contentW) / 2
+        val top = loc[1] + (viewH - contentH) / 2
+        val rect = android.graphics.Rect(left, top, left + contentW, top + contentH)
+        val root = surface.rootView ?: return rect
+        val insets = ViewCompat.getRootWindowInsets(root)
+        if (insets != null) {
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            val safe = android.graphics.Rect(
+                bars.left,
+                bars.top,
+                root.width - bars.right,
+                root.height - bars.bottom,
+            )
+            if (!rect.intersect(safe)) return null
+        }
+        return rect.takeIf { !it.isEmpty }
+    }
+
+    fun enterPip(): Boolean {
         // §5.1：仅听音频与 PiP 互斥——小窗里没有画面，进入只是个小黑框
         if (session.audioOnly.value) {
             toast.show("仅听音频模式下没有画面可显示")
-            return
+            return false
         }
-        val a = context as? ComponentActivity ?: return
+        val a = context as? ComponentActivity ?: return false
+        // A14：FLAG_SECURE 与部分系统的 PiP 互斥；不要偷偷清用户的隐私开关，
+        // 直接说清为什么进不去。
+        if (screenshotBlocked) {
+            toast.show("已开启禁止截屏，无法进入画中画")
+            return false
+        }
         // L10①：反馈诚实性——`enterPictureInPictureMode` 失败会返回 false（设备/系统
         // 不允许时也可能抛异常），此前无条件 toast「已进入画中画」，用户看不到小窗却被
-        // 告知成功。比例改用真实视频宽高比（与参数跟随同一口径），竖视频不再塞进 16:9。
-        // 源矩形取视频内容区（TextureView 按比例布局，即画面所在区域）：Android 12+
-        // 的手动进小窗从该区域收拢过渡（与 setAutoEnterEnabled 一起构成 lint 要求的
-        // 新式 PiP 用法，见 manualPipParams）。
-        val surface = surfaceViewRef.value
-        val sourceRect = if (surface != null && surface.isAttachedToWindow &&
-            surface.width > 0 && surface.height > 0
-        ) {
-            val loc = IntArray(2)
-            surface.getLocationInWindow(loc)
-            android.graphics.Rect(loc[0], loc[1], loc[0] + surface.width, loc[1] + surface.height)
-        } else {
-            null
-        }
-        val entered = runCatching {
-            a.enterPictureInPictureMode(
-                manualPipParams(
-                    context,
-                    videoAspectRatio,
-                    state == PlaybackState.Playing,
-                    player::mediaButtonIntent,
-                    sourceRect,
-                ),
-            )
-        }.getOrDefault(false)
+        // 告知成功。比例用真实视频宽高比；源矩形取画面内容区（见 contentRectForPip）。
+        val params = publishPipParams(a, contentRectForPip())
+        val entered = runCatching { a.enterPictureInPictureMode(params) }.getOrDefault(false)
         toast.show(if (entered) "已进入画中画" else "画中画不可用")
+        return entered
     }
 
     /**
@@ -1667,9 +1739,6 @@ fun PlayerScreen(
     val subtitleOn = subtitleText != "关闭"
 
     // 画面显示记忆（§2.4 比例 / 镜像 / 旋转，per-media 落盘）
-    var scaleMode by remember(mediaId) { mutableStateOf(VideoScaleMode.FIT) }
-    var mirrored by remember(mediaId) { mutableStateOf(false) }
-    var rotation by remember(mediaId) { mutableIntStateOf(0) }
     LaunchedEffect(mediaKey) {
         val (mode, mirror, rot) = parseDisplaySettings(settings.displaySettings(mediaKey).first())
         scaleMode = mode
@@ -1705,11 +1774,22 @@ fun PlayerScreen(
         .collectAsStateWithLifecycle(initialValue = DEFAULT_SUBTITLE_COLOR_ARGB)
     val subtitleScale by settings.subtitleScale.collectAsStateWithLifecycle(initialValue = 1f)
     val subtitleItalic by settings.subtitleItalic.collectAsStateWithLifecycle(initialValue = false)
+    val subtitleVertical by settings.subtitleVerticalPosition
+        .collectAsStateWithLifecycle(initialValue = SUBTITLE_VERTICAL_MAX)
+    val subtitleBackground by settings.subtitleBackground
+        .collectAsStateWithLifecycle(initialValue = false)
+    val subtitleOutline by settings.subtitleOutline.collectAsStateWithLifecycle(initialValue = false)
+    val subtitleMaxLines by settings.subtitleMaxLines
+        .collectAsStateWithLifecycle(initialValue = DEFAULT_SUBTITLE_MAX_LINES)
     val subtitleStyle = SubtitleStyle(
         enabled = subtitleEnabled,
         colorArgb = subtitleColorArgb,
         scale = subtitleScale,
         italic = subtitleItalic,
+        verticalPosition = subtitleVertical,
+        background = subtitleBackground,
+        outline = subtitleOutline,
+        maxLines = subtitleMaxLines,
     )
     LaunchedEffect(player, subtitleEnabled) { player.setTextTracksEnabled(subtitleEnabled) }
 
@@ -1733,7 +1813,6 @@ fun PlayerScreen(
     }
 
     // PiP is a manual playback action, never a side effect of background playback or Home.
-    var inPipMode by remember(activity) { mutableStateOf(activity?.isInPictureInPictureMode == true) }
     DisposableEffect(activity) {
         val act = activity ?: return@DisposableEffect onDispose { }
         val listener = androidx.core.util.Consumer<androidx.core.app.PictureInPictureModeChangedInfo> { info ->
@@ -1743,47 +1822,59 @@ fun PlayerScreen(
         onDispose {
             act.removeOnPictureInPictureModeChangedListener(listener)
             // Parameters belong to the Activity, which outlives this playback screen.
-            runCatching {
-                val builder = PictureInPictureParams.Builder().setActions(emptyList())
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) builder.setAutoEnterEnabled(false)
-                act.setPictureInPictureParams(builder.build())
-            }
+            // A14：离开播放页做一次显式 disarm；播放页存活期间不再有别的写入点
+            // （MainActivity 的 onResume/onUserLeaveHint 已不再重发空参数）。
+            disarmPipParams(act)
         }
     }
-    // PiP 中控制层与悬浮元素全部收起（§5.3「控制层在 PiP 中自动隐藏」）
+    // A14：小窗期间冻结方向锁；退出后恢复进入前的用户意图，并把控制层拉回来。
+    // 旧 effect 只有进入分支——点系统「展开」后 controlsVisible 永远停在 false，
+    // 自动隐藏只能 true→false，没有路径把它拉回 true。
+    var orientationLockBeforePip by remember { mutableStateOf<OrientationLock?>(null) }
+    var wasInPip by remember { mutableStateOf(inPipMode) }
     LaunchedEffect(inPipMode) {
         if (inPipMode) {
+            wasInPip = true
+            orientationLockBeforePip = orientationLock
+            // 小窗里不让方向请求和比例请求打架；冻结的是"用户意图"，不是当前窗口方向。
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             controlsVisible = false
             // 审查批次 B1：改走统一收口——旧清单漏了更多操作与文件信息卡，
             // 小窗里它们会盖住本就只有巴掌大的画面
             dismissAllOverlays()
+        } else if (wasInPip) {
+            wasInPip = false
+            controlsVisible = true
+            orientationLockBeforePip?.let {
+                orientationLock = it
+                orientationLockBeforePip = null
+            }
+            // A14：从右栏菜单进小窗时，退出小窗回到三栏浏览态，而不是停在整屏播放页。
+            if (manualPipEntry && isDesktopLike && !session.audioOnly.value) {
+                returnToBrowsePane()
+            }
         }
     }
     // Keep aspect and transport actions current only after the user is actually in PiP.
     // Publishing an aspect ratio while merely watching arms OEM "小窗 on Home" (MIUI/HyperOS),
     // and that Activity is the whole app — library and settings would enter PiP too.
-    var pipEntryConsumed by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(manualPipEntry, mediaOpened) {
-        if (manualPipEntry && mediaOpened && !pipEntryConsumed) {
-            pipEntryConsumed = true
+    // A14：标志不再 rememberSaveable——旋转/路由复用后第二次点会完全无反应；
+    // 只有真正进入成功才置位，失败清掉（toast 保持）。
+    var pipEntryConsumed by remember { mutableStateOf(false) }
+    LaunchedEffect(manualPipEntry, mediaOpened, videoAspectRatio) {
+        if (manualPipEntry && mediaOpened && videoAspectRatio > 0f && !pipEntryConsumed) {
             // Only an explicit inline menu action sets this flag; Home never does.
+            // A14：比例还是 0 时先等真实值，别按 16:9 先成形再硬跳。
             withFrameMillis { }
-            enterPip()
+            pipEntryConsumed = enterPip()
         }
     }
-    LaunchedEffect(videoAspectRatio, state, inPipMode) {
+    // A14：小窗期间的参数更新走同一个写入点（publishPipParams），带上源矩形；
+    // 旧实现这里重发时 sourceRect 默认 null，把进入时的 hint 清掉了。
+    LaunchedEffect(videoAspectRatio, state, inPipMode, scaleMode) {
         if (!inPipMode) return@LaunchedEffect
         val act = activity ?: return@LaunchedEffect
-        runCatching {
-            act.setPictureInPictureParams(
-                manualPipParams(
-                    context,
-                    videoAspectRatio,
-                    state == PlaybackState.Playing,
-                    player::mediaButtonIntent,
-                ),
-            )
-        }
+        publishPipParams(act, contentRectForPip())
     }
 
     // ---- 转屏收口（2026-10-14 真机实报）----
@@ -1955,6 +2046,31 @@ fun PlayerScreen(
     ) {
         if (!mediaOpened && rejectedUriError == null) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+            return@Box
+        }
+        // A14：小窗优先于横/竖版式。9:16 的 PiP 窗口是"竖向"，旧代码因此落进竖屏版式，
+        // 画面只占 55% 高、上下是主题色；这里直接给一层黑底 + 铺满的舞台，
+        // 不挂手势、字幕、弹幕、控制层与结束层。
+        if (inPipMode) {
+            Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
+                VideoStage(
+                    player = player,
+                    videoAspectRatio = videoAspectRatio,
+                    overlays = emptyList(),
+                    overlayMedia = overlayMedia,
+                    navigator = navigator,
+                    state = state,
+                    userDragging = false,
+                    controlsVisible = false,
+                    subtitleStyle = subtitleStyle,
+                    inPip = true,
+                    scaleMode = scaleMode,
+                    mirrored = mirrored,
+                    rotation = rotation,
+                    onSurfaceView = { surfaceViewRef.value = it },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
             return@Box
         }
         // M23：音频页 ↔ 视频页整页切换原先是 `if` 硬切——点「仅听音频」整屏啪地换成黑胶，
@@ -2306,6 +2422,22 @@ fun PlayerScreen(
                                         onScale = { scope.launch { settings.setSubtitleScale(it) } },
                                         italic = subtitleItalic,
                                         onItalic = { scope.launch { settings.setSubtitleItalic(it) } },
+                                        verticalPosition = subtitleVertical,
+                                        onVerticalPosition = {
+                                            scope.launch { settings.setSubtitleVerticalPosition(it) }
+                                        },
+                                        background = subtitleBackground,
+                                        onBackground = {
+                                            scope.launch { settings.setSubtitleBackground(it) }
+                                        },
+                                        outline = subtitleOutline,
+                                        onOutline = {
+                                            scope.launch { settings.setSubtitleOutline(it) }
+                                        },
+                                        maxLines = subtitleMaxLines,
+                                        onMaxLines = {
+                                            scope.launch { settings.setSubtitleMaxLines(it) }
+                                        },
                                         // 开关（2026-10-12）：与竖屏「字幕设置」面板同一语义——
                                         // 关 = 渲染总开关 + 引擎卸载；开 = 恢复渲染 + 重挂记忆字幕
                                         onSetEnabled = { on ->
@@ -2908,6 +3040,14 @@ fun PlayerScreen(
                     onScale = { scope.launch { settings.setSubtitleScale(it) } },
                     italic = subtitleItalic,
                     onItalic = { scope.launch { settings.setSubtitleItalic(it) } },
+                    verticalPosition = subtitleVertical,
+                    onVerticalPosition = { scope.launch { settings.setSubtitleVerticalPosition(it) } },
+                    background = subtitleBackground,
+                    onBackground = { scope.launch { settings.setSubtitleBackground(it) } },
+                    outline = subtitleOutline,
+                    onOutline = { scope.launch { settings.setSubtitleOutline(it) } },
+                    maxLines = subtitleMaxLines,
+                    onMaxLines = { scope.launch { settings.setSubtitleMaxLines(it) } },
                     offsetMs = subtitleOffsetMs,
                     onOffset = ::setSubtitleOffset,
                     statusText = subtitleStatusText(
@@ -3176,7 +3316,7 @@ fun PlayerScreen(
                             color = ink0.fg,
                         )
                         Text(
-                            text = "持久生效 · 限播放页",
+                            text = "持久生效 · 限播放页；禁止时画中画不可用",
                             style = NpTypography.bodySmall,
                             color = ink0.muted,
                         )
@@ -3274,6 +3414,14 @@ private fun SubtitleSettingsPanel(
     onScale: (Float) -> Unit,
     italic: Boolean,
     onItalic: (Boolean) -> Unit,
+    verticalPosition: Float,
+    onVerticalPosition: (Float) -> Unit,
+    background: Boolean,
+    onBackground: (Boolean) -> Unit,
+    outline: Boolean,
+    onOutline: (Boolean) -> Unit,
+    maxLines: Int,
+    onMaxLines: (Int) -> Unit,
     offsetMs: Long,
     onOffset: (Long) -> Unit,
     statusText: String,
@@ -3348,6 +3496,74 @@ private fun SubtitleSettingsPanel(
 
     SubtitleSettingRow(label = "文字字幕用斜体") {
         NpSwitch(checked = italic, onCheckedChange = onItalic)
+    }
+
+    // A12：竖直位置 / 背景条 / 描边 / 最大行数
+    SubtitleSettingRow(label = "字幕垂直位置") {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Slider(
+                value = verticalPosition,
+                onValueChange = onVerticalPosition,
+                valueRange = SUBTITLE_VERTICAL_MIN..SUBTITLE_VERTICAL_MAX,
+                thumb = { NpMenuSliderThumb() },
+                track = { state ->
+                    NpMenuSliderTrack(
+                        state = state,
+                        activeColor = MaterialTheme.colorScheme.primary,
+                        inactiveColor = ink.border,
+                    )
+                },
+                modifier = Modifier.weight(1f),
+            )
+            Text(
+                text = when {
+                    verticalPosition <= 0.01f -> "顶部"
+                    verticalPosition >= 0.99f -> "底部"
+                    else -> "${(verticalPosition * 100).roundToInt()}%"
+                },
+                style = NpMono,
+                color = ink.muted,
+                modifier = Modifier.padding(start = 12.dp),
+            )
+        }
+    }
+
+    SubtitleSettingRow(label = "字幕背景条") {
+        NpSwitch(checked = background, onCheckedChange = onBackground)
+    }
+
+    SubtitleSettingRow(label = "字幕描边") {
+        NpSwitch(checked = outline, onCheckedChange = onOutline)
+    }
+
+    SubtitleSettingRow(label = "字幕最大行数") {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            (SUBTITLE_MAX_LINES_MIN..SUBTITLE_MAX_LINES_MAX).forEach { lines ->
+                val selected = lines == maxLines
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = NpDimens.touchTarget)
+                        .clip(RoundedCornerShape(NpRadius.chip))
+                        .background(if (selected) ink.accentSoft else ink.fgSoft)
+                        .clickable { onMaxLines(lines) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = "$lines",
+                        style = NpMonoSmall,
+                        color = if (selected) ink.accent else ink.fg,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
     }
 
     SubtitleSettingRow(label = "字幕延时") {
@@ -5037,6 +5253,11 @@ internal fun VideoStage(
     controlsVisible: Boolean = true,
     /** E131：字幕样式（颜色/大小/斜体/总开关），来自「字幕设置」面板 */
     subtitleStyle: SubtitleStyle = SubtitleStyle(),
+    /**
+     * A14：小窗模式。只留画面——字幕、弹幕/覆盖层、缓冲圈都不画；
+     * 手势层由调用方不挂（见 PiP 分支），这里管舞台内部的叠层。
+     */
+    inPip: Boolean = false,
     scaleMode: VideoScaleMode = VideoScaleMode.FIT,
     mirrored: Boolean = false,
     rotation: Int = 0,
@@ -5099,27 +5320,30 @@ internal fun VideoStage(
                 },
                 modifier = Modifier.fillMaxSize(),
             )
-            // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
-            // E131：样式由「字幕设置」面板驱动（颜色/大小/斜体/总开关）
-            // A6：Cue 的订阅点在它自己这一层（PlayerSubtitleLayer），舞台不参与重组
-            PlayerSubtitleLayer(
-                player = player,
-                modifier = Modifier.fillMaxSize(),
-                style = subtitleStyle,
-            )
-            // 覆盖层扩展点：弹幕等插件动态挂载（E23）。
-            // 必须挂在**视频画面内框**（与字幕层同界）：挂到外层容器时弹幕会铺满
-            // 整个窗格/整屏——类 PC 右栏里盖到顶栏与状态栏、宽片黑边上也飘字
-            // （平板实拍：弹幕文字越过视频上缘压到应用标题区）。
-            overlays.forEach { overlay ->
-                overlay.Render(
-                    PlaybackContext(
-                        media = overlayMedia,
-                        player = player,
-                        navigator = navigator,
-                        controlsVisible = controlsVisible,
-                    ),
+            if (!inPip) {
+                // E1：字幕浮层（外挂 + 内嵌轨道统一出口），在画面变换之外
+                // E131：样式由「字幕设置」面板驱动（颜色/大小/斜体/总开关）
+                // A6：Cue 的订阅点在它自己这一层（PlayerSubtitleLayer），舞台不参与重组
+                PlayerSubtitleLayer(
+                    player = player,
+                    modifier = Modifier.fillMaxSize(),
+                    style = subtitleStyle,
+                    mediaUri = overlayMedia.uri,
                 )
+                // 覆盖层扩展点：弹幕等插件动态挂载（E23）。
+                // 必须挂在**视频画面内框**（与字幕层同界）：挂到外层容器时弹幕会铺满
+                // 整个窗格/整屏——类 PC 右栏里盖到顶栏与状态栏、宽片黑边上也飘字
+                // （平板实拍：弹幕文字越过视频上缘压到应用标题区）。
+                overlays.forEach { overlay ->
+                    overlay.Render(
+                        PlaybackContext(
+                            media = overlayMedia,
+                            player = player,
+                            navigator = navigator,
+                            controlsVisible = controlsVisible,
+                        ),
+                    )
+                }
             }
         }
         // 缓冲指示（M22）：原先 `if` 挂载=硬切，网络一顿一停时圆环是"啪"地闪现，
@@ -5127,7 +5351,7 @@ internal fun VideoStage(
         // 曲线不按 M22 字面的 linear——§3.8 把线性例外限定在"缓冲环旋转"等四类连续量上，
         // 显隐是一次性状态变化，必须走 Silk；线性留给环自身的旋转。
         AnimatedVisibility(
-            visible = state == PlaybackState.Buffering && !userDragging,
+            visible = !inPip && state == PlaybackState.Buffering && !userDragging,
             enter = fadeIn(tween(npDuration(Motion.Field), easing = NpEasing.Silk)),
             exit = fadeOut(tween(npDuration(Motion.ReduceFade), easing = NpEasing.SilkExit)),
         ) {
@@ -5576,6 +5800,17 @@ private suspend fun MediaSourceProvider.awaitSelfList(
 
 // ---- PiP 动作（§5.3）：PendingIntent 归引擎（A2），UI 只贴图标与文案 ----
 
+/** A14：离开播放页时的生命周期 disarm；播放期间的参数发布只走 publishPipParams。 */
+private fun disarmPipParams(act: ComponentActivity) {
+    runCatching {
+        val builder = PictureInPictureParams.Builder().setActions(emptyList())
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            builder.setAutoEnterEnabled(false).setSeamlessResizeEnabled(true)
+        }
+        act.setPictureInPictureParams(builder.build())
+    }
+}
+
 private fun manualPipParams(
     context: Context,
     aspectRatio: Float,
@@ -5594,7 +5829,9 @@ private fun manualPipParams(
         builder.setSourceRectHint(sourceRect)
     }
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        builder.setAutoEnterEnabled(false).setSeamlessResizeEnabled(false)
+        // A14：无缝缩放打开——捏合/比例变化不再用一帧截图缩放（表现为顿一下）。
+        // 自动进入仍关闭：小窗只允许播放菜单手动入口。
+        builder.setAutoEnterEnabled(false).setSeamlessResizeEnabled(true)
     }
     return builder.build()
 }
@@ -5619,7 +5856,14 @@ private fun pipActions(
         return RemoteAction(icon(iconRes), label, desc, intent)
     }
 
+    // A14：补上一集，到此为止（3 颗，不再加快退）。图标只在已进入小窗后更新。
     return listOfNotNull(
+        action(
+            NpMediaButtonAction.PREVIOUS,
+            android.R.drawable.ic_media_previous,
+            "上一集",
+            "播放上一集",
+        ),
         action(
             if (playing) NpMediaButtonAction.PAUSE else NpMediaButtonAction.PLAY,
             if (playing) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play,

@@ -115,7 +115,9 @@ class PlaybackService : MediaSessionService() {
         // 所以切换开关在下一个播放器实例（下一次播放会话）上生效——设置行的副题如实标注。
         // 读取超时/失败退回默认（硬解优先），不让设置层的问题拖垮服务启动。
         //
-        // 映射：ON = 平台硬解优先、平台解不了才落 FFmpeg；PREFER = FFmpeg 软解优先（兼容档）。
+        // A10：兼容档不再把全局模式翻成 PREFER（那会让 H.264/HEVC 有硬解也先走软解）。
+        // 扩展渲染器模式恒为 ON，兼容档由工厂内的**逐轨选择器**表达：平台有硬解就硬解，
+        // 只有平台软解时才把位置让给 FFmpeg / MJPEG / legacy。
         // **不能映射成 OFF**——那会把扩展渲染器整条摘掉，AVI/MJPEG 之外的一票旧编码直接变
         // "无法播放"，与设置行承诺的"兼容性更好"正好相反。
         // 优先取启动时预热好的进程内缓存——服务创建落在"点播放"的关键路径上，
@@ -126,14 +128,11 @@ class PlaybackService : MediaSessionService() {
                     AppSettings(this@PlaybackService).hardwareDecodePreferred.first()
                 }
             } ?: true
-        val renderersFactory = NpRenderersFactory(this)
-            .setExtensionRendererMode(
-                if (hardwareFirst) {
-                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
-                } else {
-                    DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
-                },
-            )
+        val renderersFactory = NpRenderersFactory(
+            context = this,
+            preferSoftwareWhenNoHardware = !hardwareFirst,
+        )
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
             .setEnableDecoderFallback(true)
             // E147：不要用 AudioTrack 原生倍速（setEnableAudioOutputPlaybackParameters）。
             // 真机上 6 声道 48kHz 音轨调 AudioTrack.setPlaybackParams 直接抛

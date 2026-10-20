@@ -1,10 +1,12 @@
 package com.noneplayer.plugins.player.exo
 
 import android.content.Context
+import android.os.Build
 import android.os.Handler
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
@@ -30,9 +32,18 @@ import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
  * 再由 ExoPlayer 构建时调一次，同一实例必然被调两次 → 服务启动即崩。
  * 因此本项目只用 `EXTENSION_RENDERER_MODE_ON` 这一层"硬解优先 + 软解兜底"，
  * 不做运行期解码器切换。
+ *
+ * **兼容档（A10）**：设置关掉「硬件解码优先」时不再把全局模式翻成 `PREFER`——
+ * 那会让 H.264/HEVC 这些有硬解的编码也先走 FFmpeg。改为在视频选择器里**按轨过滤**：
+ * 只把平台**软件**解码器摘掉，平台有硬解就仍走硬解，没有硬解才自然落到后面的
+ * FFmpeg / MJPEG / legacy。音频选择器保持默认。
  */
 @OptIn(UnstableApi::class)
-open class NpRenderersFactory(context: Context) : NextRenderersFactory(context) {
+open class NpRenderersFactory(
+    context: Context,
+    /** true = 兼容档：平台只有软解时才让扩展渲染器接手（逐轨判定，不是全局反转） */
+    private val preferSoftwareWhenNoHardware: Boolean = false,
+) : NextRenderersFactory(context) {
 
     override fun buildVideoRenderers(
         context: Context,
@@ -47,7 +58,7 @@ open class NpRenderersFactory(context: Context) : NextRenderersFactory(context) 
         super.buildVideoRenderers(
             context,
             extensionRendererMode,
-            mediaCodecSelector,
+            if (preferSoftwareWhenNoHardware) HardwareOnlyVideoCodecSelector else mediaCodecSelector,
             enableDecoderFallback,
             eventHandler,
             eventListener,
@@ -80,5 +91,30 @@ open class NpRenderersFactory(context: Context) : NextRenderersFactory(context) 
     private companion object {
         /** 与 `MjpegRenderersFactory` 相同：掉帧计数通知阈值 */
         const val MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY = 50
+    }
+}
+
+/**
+ * 兼容档的视频解码器选择器（A10）：只留硬件加速的平台解码器。
+ *
+ * 逐 Format 生效：有硬解的编码照旧硬解优先；只有平台软解的编码返回空列表，
+ * 平台渲染器不认领，播放链条自然落到 FFmpeg / MJPEG / legacy。
+ * API 29 以下拿不到 `isHardwareAccelerated`，原样返回（保持旧行为）。
+ */
+@OptIn(UnstableApi::class)
+private object HardwareOnlyVideoCodecSelector : MediaCodecSelector {
+
+    override fun getDecoderInfos(
+        mimeType: String,
+        requiresSecureDecoder: Boolean,
+        requiresTunnelingDecoder: Boolean,
+    ): List<MediaCodecInfo> {
+        val infos = MediaCodecSelector.DEFAULT.getDecoderInfos(
+            mimeType,
+            requiresSecureDecoder,
+            requiresTunnelingDecoder,
+        )
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return infos
+        return infos.filter { it.hardwareAccelerated }
     }
 }

@@ -74,8 +74,12 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import com.noneplayer.core.data.SUBTITLE_COLOR_OPTIONS
 import com.noneplayer.core.data.SUBTITLE_DELAY_STEPS_MS
+import com.noneplayer.core.data.SUBTITLE_MAX_LINES_MAX
+import com.noneplayer.core.data.SUBTITLE_MAX_LINES_MIN
 import com.noneplayer.core.data.SUBTITLE_SCALE_MAX
 import com.noneplayer.core.data.SUBTITLE_SCALE_MIN
+import com.noneplayer.core.data.SUBTITLE_VERTICAL_MAX
+import com.noneplayer.core.data.SUBTITLE_VERTICAL_MIN
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
@@ -880,6 +884,14 @@ fun FsSubtitleMenuContent(
     onScale: (Float) -> Unit,
     italic: Boolean,
     onItalic: (Boolean) -> Unit,
+    verticalPosition: Float,
+    onVerticalPosition: (Float) -> Unit,
+    background: Boolean,
+    onBackground: (Boolean) -> Unit,
+    outline: Boolean,
+    onOutline: (Boolean) -> Unit,
+    maxLines: Int,
+    onMaxLines: (Int) -> Unit,
     onSetEnabled: (Boolean) -> Unit,
     onPickTrack: (NpTrack) -> Unit,
     onMountExternal: () -> Unit,
@@ -960,6 +972,84 @@ fun FsSubtitleMenuContent(
         checked = italic,
         onCheckedChange = onItalic,
     )
+    // A12：竖直位置 / 背景条 / 描边 / 最大行数
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "字幕垂直位置",
+            style = NpTypography.bodyMedium,
+            color = Color.White,
+        )
+        Slider(
+            value = verticalPosition,
+            onValueChange = onVerticalPosition,
+            valueRange = SUBTITLE_VERTICAL_MIN..SUBTITLE_VERTICAL_MAX,
+            thumb = { NpMenuSliderThumb() },
+            track = { state ->
+                NpMenuSliderTrack(
+                    state = state,
+                    activeColor = MaterialTheme.colorScheme.primary,
+                    inactiveColor = Color.White.copy(alpha = 0.24f),
+                )
+            },
+            modifier = Modifier
+                .weight(1f)
+                .padding(horizontal = 8.dp),
+        )
+        Text(
+            text = when {
+                verticalPosition <= 0.01f -> "顶部"
+                verticalPosition >= 0.99f -> "底部"
+                else -> "${(verticalPosition * 100).roundToInt()}%"
+            },
+            style = NpMonoSmall,
+            color = Color.White.copy(alpha = 0.7f),
+        )
+    }
+    FsMenuSwitchRow(
+        label = "字幕背景条",
+        checked = background,
+        onCheckedChange = onBackground,
+    )
+    FsMenuSwitchRow(
+        label = "字幕描边",
+        checked = outline,
+        onCheckedChange = onOutline,
+    )
+    FsMenuTitle("字幕最大行数")
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        (SUBTITLE_MAX_LINES_MIN..SUBTITLE_MAX_LINES_MAX).forEach { lines ->
+            val selected = lines == maxLines
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .heightIn(min = 40.dp)
+                    .clip(RoundedCornerShape(NpRadius.chip))
+                    .background(
+                        if (selected) MaterialTheme.colorScheme.primary
+                        else Color.White.copy(alpha = 0.10f),
+                    )
+                    .clickable { onMaxLines(lines) },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = "$lines",
+                    style = NpMonoSmall,
+                    color = if (selected) MaterialTheme.colorScheme.onPrimary else Color.White,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
     FsMenuRow(
         label = "挂载外挂字幕…",
         check = subtitleLoaded,

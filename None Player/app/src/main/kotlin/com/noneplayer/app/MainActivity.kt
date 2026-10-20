@@ -5,13 +5,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.app.Activity
-import android.app.PictureInPictureParams
+import android.graphics.Color
+import androidx.core.graphics.drawable.toDrawable
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
 import android.view.OrientationEventListener
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -102,13 +104,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // 回到前台时卸掉比例参数。只在播放选项里手动进小窗才重新发布。
-        if (!isInPictureInPictureMode) disarmPictureInPicture()
+        // A14：不再在这里重发空参数——播放页存活期间的参数由 PlayerScreen 单点发布，
+        // 离开播放页由它的 onDispose 做 disarm。这里重发会把比例/动作/源矩形清掉。
     }
 
     override fun onUserLeaveHint() {
         // 底部上滑回桌面不是进小窗。不调用 enterPictureInPictureMode。
-        disarmPictureInPicture()
+        // A14：同样不再重发空参数；自动进入由 PlayerScreen 的 setAutoEnterEnabled(false)
+        // 与本类的 onPictureInPictureRequested 双重关闭。
         super.onUserLeaveHint()
     }
 
@@ -117,15 +120,6 @@ class MainActivity : ComponentActivity() {
      * 返回 true 表示「已经处理」且我们不进入——小窗只允许播放菜单里的手动入口。
      */
     override fun onPictureInPictureRequested(): Boolean = true
-
-    private fun disarmPictureInPicture() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || isInPictureInPictureMode) return
-        runCatching {
-            setPictureInPictureParams(
-                PictureInPictureParams.Builder().setAutoEnterEnabled(false).build(),
-            )
-        }
-    }
 
     /**
      * E99：会话级快捷键的**窗口层兜底派发**。
@@ -261,13 +255,30 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        // A13：首帧的图标明暗与窗口底色必须跟**应用主题**，不是只跟系统深色。
+        // 主题在 `setContent` 里才订阅到，这里先用开机时预热的 `initialThemeMode`
+        // 落一次；运行中改主题由 NonePlayerTheme 的 SideEffect 再刷新。
+        val initialDark = when ((application as NonePlayerApplication).initialThemeMode) {
+            ThemeMode.DARK -> true
+            ThemeMode.LIGHT -> false
+            ThemeMode.SYSTEM ->
+                resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+                    Configuration.UI_MODE_NIGHT_YES
+        }
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT) { initialDark },
+            navigationBarStyle = SystemBarStyle.auto(Color.TRANSPARENT, Color.TRANSPARENT) { initialDark },
+        )
         // enableEdgeToEdge() 的默认导航栏样式是 auto(...)：它把栏色置 0，同时把对比度
         // 交回系统（EdgeToEdgeApi29 里 isNavigationBarContrastEnforced = true），
         // 于是系统在小白条背后自己垫一层灰。状态栏那侧它传的是 false，只有这里有遮罩。
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             window.isNavigationBarContrastEnforced = false
         }
+        // 冷启窗口/任务快照/转屏露出的底：按应用主题取深/浅，而不是只跟 values-night。
+        window.setBackgroundDrawable(
+            (if (initialDark) Color.BLACK else Color.WHITE).toDrawable(),
+        )
         // 系统默认的 3D 转屏会把转场中间帧（首页、封面、两层画面）一起旋进录屏。
         // 窗口硬切；画面与按钮的位移/缩放由整屏 morph 承担（NpMorph）——系统那套
         // 截图旋转只会把中间帧一起旋进来，我们要的是自己这一段连续的移动。
