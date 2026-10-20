@@ -221,6 +221,26 @@ class HistoryRepository(context: Context) {
     }
 
     /**
+     * R0/REV-01：取"本轮扫描未覆盖类别"的历史/收藏键，供孤儿清理做保护性白名单。
+     *
+     * 扫描不完整分两种：结构性失败（Provider 抛错/预算耗尽/目录撤权）→ 整轮不清；
+     * 权限缺口（只拒了音频）→ 可见类别仍应正常清理，但**被拒类别**的行必须原样保留。
+     * 这里按 mime 前缀（`audio/`、`video/`）把被拒类别的键捞出来；收藏表没有 mime，
+     * 靠 LEFT JOIN 历史行补，查不到历史的收藏保守保留（宁可多留一条，不可误删）。
+     */
+    suspend fun protectedKeysForMimePrefixes(prefixes: List<String>): Set<String> =
+        withContext(Dispatchers.IO) {
+            if (prefixes.isEmpty()) return@withContext emptySet()
+            buildSet {
+                prefixes.forEach { prefix ->
+                    val pattern = "$prefix%"
+                    addAll(dao.historyKeysWithMimePattern(pattern))
+                    addAll(dao.favoriteKeysWithMimePattern(pattern))
+                }
+            }
+        }
+
+    /**
      * 一次性迁移（E11）：把 DataStore 的 `playback_pos_*` / `playback_at_*` 读成历史行。
      *
      * 行数据（标题/封面/时长…）取自**当前媒体列表**——迁移需要一个"条目快照"的来源，

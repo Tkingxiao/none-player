@@ -1,5 +1,6 @@
 package com.noneplayer.plugins.scanner.local
 
+import android.annotation.SuppressLint
 import android.content.ContentUris
 import android.content.Context
 import android.content.Intent
@@ -69,6 +70,18 @@ data class LocalScanSummary(
 )
 
 /**
+ * 单条采集分支的产物 + 不完整原因（R0/REV-01）。
+ *
+ * `warnings` 非空表示该分支没有覆盖它本该覆盖的范围（Provider 抛错、SAF 遍历失败、
+ * 遍历预算耗尽…）。完整性沿聚合一路传到提交段：只要有一个 warning，本次扫描就
+ * **不允许**清理历史/收藏/缩略图、也不允许替换旧快照——宁可显示不完整的结果。
+ */
+private data class QuerySlice<T>(
+    val items: List<T>,
+    val warnings: List<String> = emptyList(),
+)
+
+/**
  * 本地媒体来源——基于 MediaStore 的设备媒体扫描（视频 + 音频）。
  *
  * 门控策略：仅在用户通过 SAF 授权了扫描目录后才扫描（未选择目录时
@@ -91,6 +104,10 @@ class LocalMediaSource(
     private val history: HistoryRepository,
     /** E25：进程前台/后台状态；null = 不跟随（测试/降级路径，保持旧行为） */
     private val processLifecycle: ProcessLifecycle? = null,
+    /** R0/REV-12 测试 seam：媒体库 SDK 版本（默认取运行时；注入以便离线测旧 Provider 行为） */
+    private val sdkInt: Int = Build.VERSION.SDK_INT,
+    /** R0/REV-01 测试 seam：隐藏目录遍历预算（默认 [HIDDEN_WALK_BUDGET]；注入以便测预算耗尽） */
+    private val hiddenWalkBudget: Int = HIDDEN_WALK_BUDGET,
 ) : MediaSourceProvider, CacheProvider, ScanFolderController {
 
     override val sourceId: String = LOCAL_MEDIA_SOURCE_ID
@@ -127,6 +144,12 @@ class LocalMediaSource(
      */
     private val snapshotFile get() = File(context.filesDir, "scan_index.json")
 
+    /** R0/A33：快照落盘存取（原子替换 + 字节限额 + 旧快照保留，提取自本类） */
+    private val snapshotStore = ScanSnapshotStore(snapshotFile, dispatchers.io)
+
+    /** R0/REV-03：扫描提交代际门（目录集变化使在途扫描的结果整体作废） */
+    private val commitGate = ScanCommitGate()
+
     /** 快照/本进程扫描是否已产出过一次数据——`mediaSnapshot()` 的判据（区分"还没扫"与"确实空"） */
     @Volatile
     private var hasSnapshot = false
@@ -161,7 +184,18 @@ class LocalMediaSource(
      */
     private val scanGate = java.util.concurrent.atomic.AtomicBoolean(false)
 
-    override suspend fun isAvailable(): Boolean = hasMediaPermission(context)
+    /**
+     * R0/REV-03 测试 seam：提交段（发布列表 / 清理历史 / 写快照）之前的挂起点。
+     *
+     * 生产为 null；回归测试用它暂停"旧扫描"，再让目录集变化（removeScanFolder）
+     * 使该次扫描作废，验证陈旧结果不会回灌列表、快照或历史。
+     */
+    @Volatile
+    internal var beforeCommitHook: (suspend () -> Unit)? = null
+
+    // R0/REV-13：可用性按"可见类别"判定——只拒了音频不应把已授权的视频一起封死；
+    // 已有 SAF 目录授权时即便没有媒体权限，来源依然可用（隐藏目录走 SAF 遍历）。
+    override suspend fun isAvailable(): Boolean = MediaAccessPolicy.current(context, sdkInt).isAvailable
 
     override suspend fun scan(): ScanResult = withContext(dispatchers.io) {
         if (!acquireScanGate()) {
@@ -176,7 +210,10 @@ class LocalMediaSource(
             // E59 修复：scan() 本体现在整体包一层 runCatching——任何异常（如 OEM
             // MediaStore 列缺失、Provider 查询失败）都不再向上冒泡崩溃插件 onStart()
             // 乃至拖垮整个内核启动，而是落成一条带原因的失败摘要。
-            runCatching { scanInternal(folderUriStrs) }
+            // R0/REV-03：记下本次扫描开始时的提交代际；目录集在扫描期间变化时
+            // 本次结果整体作废（提交段复核，见 scanInternal）
+            val generation = commitGate.currentGeneration()
+            runCatching { scanInternal(folderUriStrs, generation) }
                 .getOrElse { t ->
                     if (t is CancellationException) throw t
                     Log.w(TAG, "扫描异常，已降级为失败摘要而非崩溃", t)
@@ -216,7 +253,7 @@ class LocalMediaSource(
         return scanGate.compareAndSet(false, true)
     }
 
-    private suspend fun scanInternal(folderUriStrs: List<String>): ScanResult {
+    private suspend fun scanInternal(folderUriStrs: List<String>, generation: Long): ScanResult {
         val startedAt = System.currentTimeMillis()
         // E24：无法解析的目录绝不回退"全量扫描整机"；全部无法解析时拒绝扫描
         // E68 修复：先剔除已被系统撤销持久化授权的目录，摘要里与"docId 畸形"区分开
@@ -245,23 +282,35 @@ class LocalMediaSource(
         // 文件头读取都跳过（那是逐文件 I/O，大库上是最贵的一段）。
         val baseline = previousList.associateBy { it.id }
         val previousIds = baseline.keys
-        val rawStore = queryMediaStore(validScopes)
+
+        // R0/REV-01：完整性沿聚合传递。任一采集分支没覆盖它本该覆盖的范围
+        // （Provider 抛错、SAF 遍历失败、遍历预算耗尽、目录被跳过/撤权）时，
+        // 本次扫描只能"发布部分结果"，不得清理历史/收藏/缩略图，也不得替换快照。
+        // R0/REV-13：媒体权限按类别分别判定（视频/音频/仅选中/所有文件访问/SAF）。
+        // 只查询当前可见的类别；未授权的类别按"本次未覆盖"处理（见 incompleteReasons）。
+        val access = MediaAccessPolicy.current(context, sdkInt)
+        val warnings = mutableListOf<String>()
+        val rawStore = queryMediaStore(validScopes, access)
+        warnings += rawStore.warnings
+        val storeItems = rawStore.items
             // 垃圾文件过滤（§10 批次 4）：下载中的 .part/.tmp 等半成品不进库
             .filterNot { isJunkFile(it.title, it.sizeBytes) }
-        val storeItems = rawStore.map { fresh ->
-            // 富化（E34 的消费端）：插件按注册顺序串行富化，失败不拖垮扫描。
-            // 未变项直接沿用基线实例（带上它的富化结果与封面地址）。
-            val prev = baseline[fresh.id]
-            if (prev != null && prev.unchangedFrom(fresh)) {
-                prev
-            } else {
-                // 容器嗅探（§12.4，批次 8）：无扩展名/错扩展名按文件头判容器，
-                // mime 改对才会被引擎的 Extractor 链正确认领
-                sniffMimeCorrection(enrichAll(fresh))
+            .map { fresh ->
+                // 富化（E34 的消费端）：插件按注册顺序串行富化，失败不拖垮扫描。
+                // 未变项直接沿用基线实例（带上它的富化结果与封面地址）。
+                val prev = baseline[fresh.id]
+                if (prev != null && prev.unchangedFrom(fresh)) {
+                    prev
+                } else {
+                    // 容器嗅探（§12.4，批次 8）：无扩展名/错扩展名按文件头判容器，
+                    // mime 改对才会被引擎的 Extractor 链正确认领
+                    sniffMimeCorrection(enrichAll(fresh))
+                }
             }
-        }
         // 无扩展名文件拾取（Files 集合查询 + 文件头嗅探）——同样支持基线复用
-        val unknownItems = sniffUnknownFiles(validScopes, baseline)
+        val unknownSlice = sniffUnknownFiles(validScopes, baseline)
+        warnings += unknownSlice.warnings
+        val unknownItems = unknownSlice.items
         // L14：MediaStore 跳过隐藏目录（`.` 前缀），这里用 SAF 遍历把其中的媒体补齐。
         // 只补 MediaStore 看不到的那部分——按「相对路径 + 文件名」与已收项去重，
         // 非隐藏文件仍以 MediaStore 为唯一来源，不重复采集。
@@ -273,7 +322,9 @@ class LocalMediaSource(
         val storePaths = (storeItems + unknownItems).asSequence()
             .mapNotNull(::dedupKey)
             .toHashSet()
-        val hiddenItems = queryHiddenDocuments(liveFolders, baseline)
+        val hiddenSlice = queryHiddenDocuments(liveFolders, baseline)
+        warnings += hiddenSlice.warnings
+        val hiddenItems = hiddenSlice.items
             .filterNot { item ->
                 val path = dedupKey(item)
                 path != null && path in storePaths
@@ -295,46 +346,90 @@ class LocalMediaSource(
         }
         // §8.3/E11：首次扫描把 DataStore 的断点迁入 Room，随后清旧键
         migrateHistoryOnce(items)
-        // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存）。
-        // L14：SAF 拾取的隐藏项也有缩略图，键一并纳入白名单，否则每轮扫描都会被删掉重建
-        val validThumbKeys = items.mapNotNull { thumbKeyOf(it.id) }.toSet()
-        File(context.cacheDir, "video_thumbs")
-            .listFiles()
-            ?.forEach { f -> if (f.nameWithoutExtension !in validThumbKeys) f.delete() }
-        _media.value = items
         // E30（B7 收尾）：按 id 集合差集统计，而非净值——
         // 同时增删时净值会互相抵消（新增 3 删 2 显示为 +1/0）
         val newIds = items.map { it.id }.toSet()
         val skippedCount = scopes.size - validScopes.size
-        val notes = buildList {
+        // R0/REV-01：两类"不完整"必须分开处理——
+        // ①结构性失败（Provider 抛错/返回 null、SAF 遍历失败或超预算、目录跳过/撤权）：
+        //    本轮结果不可信，整轮禁止清理历史/收藏/缩略图，也不替换快照；
+        // ②权限缺口（只拒了某一类）：可见类别仍是可信的完整结果，照常清理孤儿，
+        //    但被拒类别（如音频）的历史与收藏必须原样保留（白名单见 protectedKeys）。
+        val structuralReasons = buildList {
             if (skippedCount > 0) add("$skippedCount 个目录无法解析，已跳过")
             if (revoked.isNotEmpty()) add("${revoked.size} 个目录授权已被系统撤销，请重新选择或移除")
+            warnings.distinct().forEach { add(it) }
         }
-        // L16：孤儿清理——只有本次扫描**覆盖了全部授权目录**（notes 为空）时才做。
-        // 任一目录被跳过/撤销时结果集不完整，此刻删记录会把整个目录的断点误清；
-        // 这批死记录留到下一次完整扫描再清即可，不会误导计数太久。
-        if (notes.isEmpty()) {
-            val pruned = history.pruneOrphans(items.map { HistoryEntry.keyOf(it) }.toSet(), sourceId)
-            if (pruned > 0) Log.i(TAG, "孤儿清理（L16）：删除 $pruned 条失效播放历史")
+        val permissionReasons = access.deniedCategories().map { "未授予${it}权限，本次扫描未覆盖$it" }
+        val incompleteReasons = structuralReasons + permissionReasons
+        // 只有"所有类别都被覆盖且无任何故障"才算完整：快照替换与缩略图清理走这道门。
+        val complete = incompleteReasons.isEmpty()
+        // 孤儿清理的硬门禁只看结构性失败（权限缺口由白名单兜住）。
+        val canPrune = structuralReasons.isEmpty()
+        val deniedMimePrefixes = buildList {
+            if (!access.canQueryVideo) add("video/")
+            if (!access.canQueryAudio) add("audio/")
         }
-        val summary = LocalScanSummary(
-            added = (newIds - previousIds).size,
-            removed = (previousIds - newIds).size,
-            total = items.size,
-            durationMs = System.currentTimeMillis() - startedAt,
-            note = notes.joinToString("；").ifEmpty { null },
-        )
-        _lastScan.value = summary
-        eventBus.publish(KernelEvent.MediaScanned(sourceId = sourceId, count = items.size))
-        // 落盘基线：内容有变化才写（列表相等是 O(n) 比较，比一次几 MB 的 JSON 写便宜得多）。
-        // 放在发布之后——UI 的刷新不被磁盘 I/O 拖住。
-        if (items != previousList) saveSnapshot(items)
+
+        // R0/REV-03 测试 seam：提交段之前的挂起点（生产为 null）
+        beforeCommitHook?.invoke()
+
+        // ——提交段（REV-03）：在同一串行段内复核代际，再一次性完成
+        // 发布列表 / 清理历史与缩略图 / 写快照。目录集在扫描期间变化（add/remove）
+        // 时代际已自增，这里返回 null——陈旧结果绝不回灌 UI、快照或历史。——
+        val committed = commitGate.commitIfCurrent(generation) {
+            _media.value = items
+            if (complete) {
+                // B7：清理已删除视频对应的缩略图缓存（音频走相册封面、不落缓存）。
+                // L14：SAF 拾取的隐藏项也有缩略图，键一并纳入白名单，否则每轮扫描都会被删掉重建
+                val validThumbKeys = items.mapNotNull { thumbKeyOf(it.id) }.toSet()
+                File(context.cacheDir, "video_thumbs")
+                    .listFiles()
+                    ?.forEach { f -> if (f.nameWithoutExtension !in validThumbKeys) f.delete() }
+            }
+            // L16/R0/REV-01：孤儿清理——结构性失败时整轮不清（结果不可信）；权限缺口时
+            // 只清"可见类别"，被拒类别的历史/收藏键加入白名单，避免音频权限被拒
+            // 就把整个音频库的断点清空。
+            if (canPrune) {
+                val protectedKeys = history.protectedKeysForMimePrefixes(deniedMimePrefixes)
+                val validKeys = items.map { HistoryEntry.keyOf(it) }.toSet() + protectedKeys
+                val pruned = history.pruneOrphans(validKeys, sourceId)
+                if (pruned > 0) Log.i(TAG, "孤儿清理（L16）：删除 $pruned 条失效播放历史")
+            }
+            if (!complete) {
+                Log.w(TAG, "本次扫描不完整，保留未覆盖范围的历史/收藏与旧快照：${incompleteReasons.joinToString("；")}")
+            }
+            val summary = LocalScanSummary(
+                added = (newIds - previousIds).size,
+                removed = (previousIds - newIds).size,
+                total = items.size,
+                durationMs = System.currentTimeMillis() - startedAt,
+                note = buildList {
+                    addAll(incompleteReasons)
+                    if (!complete) add("本次扫描不完整")
+                }.joinToString("；").ifEmpty { null },
+            )
+            _lastScan.value = summary
+            eventBus.publish(KernelEvent.MediaScanned(sourceId = sourceId, count = items.size))
+            // 落盘基线：只在完整扫描时写（内容有变化才写——列表相等是 O(n) 比较，
+            // 比一次几 MB 的 JSON 写便宜得多）；不完整时保留旧快照，绝不半量覆盖。
+            if (complete && items != previousList) saveSnapshot(items)
+            ScanResult(
+                sourceId = sourceId,
+                added = summary.added,
+                updated = 0,
+                removed = summary.removed,
+                durationMs = summary.durationMs,
+            )
+        }
+        if (committed != null) return committed
+        Log.i(TAG, "扫描结果已过期（扫描期间目录集发生变化），丢弃本次结果")
         return ScanResult(
             sourceId = sourceId,
-            added = summary.added,
+            added = 0,
             updated = 0,
-            removed = summary.removed,
-            durationMs = summary.durationMs,
+            removed = 0,
+            durationMs = System.currentTimeMillis() - startedAt,
         )
     }
 
@@ -385,7 +480,7 @@ class LocalMediaSource(
     /** 恢复上次扫描的落盘快照。只在本进程还没扫过、内存还没有列表时生效（防与并发扫描打架）。 */
     suspend fun restoreSnapshot() = withContext(dispatchers.io) {
         if (hasSnapshot || _lastScan.value != null || _media.value.isNotEmpty()) return@withContext
-        val items = runCatching { readSnapshot() }.getOrNull() ?: return@withContext
+        val items = readSnapshot() ?: return@withContext
         if (_lastScan.value != null || _media.value.isNotEmpty()) return@withContext
         // [诊断] 快照自检（同"发布前自检"）：正常应为零输出
         run {
@@ -400,86 +495,14 @@ class LocalMediaSource(
     }
 
     /** 把当前列表写为下次启动的基线；失败静默——快照是加速增益，不是真相来源 */
-    private fun saveSnapshot(items: List<MediaItem>) {
-        runCatching {
-            val arr = org.json.JSONArray()
-            items.forEach { item ->
-                arr.put(
-                    org.json.JSONObject().apply {
-                        put("id", item.id)
-                        put("sourceId", item.sourceId)
-                        put("title", item.title)
-                        put("uri", item.uri)
-                        put("mimeType", item.mimeType)
-                        put("durationMs", item.durationMs)
-                        put("sizeBytes", item.sizeBytes)
-                        put("lastModifiedSec", item.lastModifiedSec)
-                        put("addedAtMs", item.addedAtMs)
-                        item.coverUri?.let { put("coverUri", it) }
-                        item.folder?.let { put("folder", it) }
-                        put("width", item.width)
-                        put("height", item.height)
-                        item.displayTitle?.let { put("displayTitle", it) }
-                        put("seasonNumber", item.seasonNumber)
-                        put("episodeNumber", item.episodeNumber)
-                        item.videoCodec?.let { put("videoCodec", it) }
-                        put("clipStartUs", item.clipStartUs)
-                        put("clipEndUs", item.clipEndUs)
-                    },
-                )
-            }
-            val payload = org.json.JSONObject()
-                .put("version", SNAPSHOT_VERSION)
-                .put("items", arr)
-                .toString()
-            // 先写临时文件再替换：写一半被进程杀死时旧快照仍完整
-            val tmp = File(snapshotFile.absolutePath + ".tmp")
-            tmp.writeText(payload)
-            if (!tmp.renameTo(snapshotFile)) {
-                snapshotFile.delete()
-                tmp.renameTo(snapshotFile)
-            }
-        }.onFailure { Log.w(TAG, "扫描索引快照写入失败（忽略，不影响本次结果）", it) }
+    private suspend fun saveSnapshot(items: List<MediaItem>) {
+        // R0/A33：提取到 ScanSnapshotStore。旧实现在 rename 失败支先 delete 旧快照再重试，
+        // 重试再失败就连旧快照一起丢；新实现任何失败都只清临时文件、旧快照原封不动。
+        snapshotStore.write(items)
     }
 
-    /** 读快照；文件缺失/损坏/版本不符返回 null（按"确实还没扫过"处理）。封面指向已删除的缓存文件时置空。 */
-    private fun readSnapshot(): List<MediaItem>? {
-        val file = snapshotFile
-        if (!file.isFile) return null
-        val root = org.json.JSONObject(file.readText())
-        if (root.optInt("version") != SNAPSHOT_VERSION) return null
-        val arr = root.optJSONArray("items") ?: return null
-        val out = ArrayList<MediaItem>(arr.length())
-        for (i in 0 until arr.length()) {
-            val o = arr.optJSONObject(i) ?: continue
-            val id = o.optString("id")
-            val uri = o.optString("uri")
-            if (id.isEmpty() || uri.isEmpty()) continue
-            out += MediaItem(
-                id = id,
-                sourceId = o.optString("sourceId").ifEmpty { sourceId },
-                title = o.optString("title"),
-                uri = uri,
-                mimeType = o.optString("mimeType").ifEmpty { "video/mp4" },
-                durationMs = o.optLong("durationMs"),
-                sizeBytes = o.optLong("sizeBytes"),
-                lastModifiedSec = o.optLong("lastModifiedSec"),
-                addedAtMs = o.optLong("addedAtMs"),
-                coverUri = o.optString("coverUri")
-                    .takeIf { it.isNotEmpty() && File(it).isFile },
-                folder = o.optString("folder").takeIf { it.isNotEmpty() },
-                width = o.optInt("width"),
-                height = o.optInt("height"),
-                displayTitle = o.optString("displayTitle").takeIf { it.isNotEmpty() },
-                seasonNumber = o.optInt("seasonNumber"),
-                episodeNumber = o.optInt("episodeNumber"),
-                videoCodec = o.optString("videoCodec").takeIf { it.isNotEmpty() },
-                clipStartUs = o.optLong("clipStartUs"),
-                clipEndUs = o.optLong("clipEndUs"),
-            )
-        }
-        return out
-    }
+    /** 读快照；文件缺失/损坏/版本不符/超限返回 null（按"确实还没扫过"处理）。 */
+    private suspend fun readSnapshot(): List<MediaItem>? = snapshotStore.read()
 
     /**
      * 富化链（E34 的消费端）：按注册顺序**串行**执行 `MetadataEnricher`，
@@ -580,7 +603,11 @@ class LocalMediaSource(
     /** 添加扫描目录：已存在则直接重扫，否则持久化后立即扫描（[ScanFolderController] 契约） */
     override suspend fun addScanFolder(uri: String) {
         val current = settings.scanFolderUris.first()
-        if (uri !in current) settings.setScanFolders(current + uri)
+        if (uri !in current) {
+            // R0/REV-03：目录集变化先作废在途扫描，再落盘新目录集
+            commitGate.invalidate()
+            settings.setScanFolders(current + uri)
+        }
         scan()
     }
 
@@ -593,6 +620,8 @@ class LocalMediaSource(
         val current = settings.scanFolderUris.first()
         if (uri !in current) return
         val remaining = current - uri
+        // R0/REV-03：目录集变化先作废在途扫描——被移除目录的在途结果不得回灌
+        commitGate.invalidate()
         settings.setScanFolders(remaining)
         runCatching {
             context.contentResolver.releasePersistableUriPermission(
@@ -609,7 +638,13 @@ class LocalMediaSource(
             hasSnapshot = false
             snapshotFile.delete()
         } else {
-            scan()
+            // R0/REV-03：不能在这里 await scan()——在途扫描可能还持着 scanGate，
+            // 阻塞式等待会把"移除目录"这个用户操作卡住最多 SCAN_WAIT_TIMEOUT_MS。
+            // 代际已自增，后台重扫（拿到闸门后）才读新目录集，旧结果不会回灌。
+            observerScope.launch {
+                runCatching { scan() }
+                    .onFailure { t -> Log.w(TAG, "移除目录后的重扫失败", t) }
+            }
         }
     }
 
@@ -683,16 +718,20 @@ class LocalMediaSource(
     }
 
     /** MediaStore 视频集合（API 26–28 用常量 URI，29+ 用带卷名的getContentUri） */
+    // VOLUME_EXTERNAL 是 API 29 常量，但它是 String 常量会被内联；调用点都在
+    // sdkInt >= Q 分支里（旧系统走 EXTERNAL_CONTENT_URI），运行时安全。
+    @SuppressLint("InlinedApi")
     private fun videoCollection(): Uri =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (sdkInt >= Build.VERSION_CODES.Q) {
             MediaStore.Video.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI
         }
 
     /** MediaStore 音频集合（与 [videoCollection] 同规则，id 前缀 "msa-" 与其区分） */
+    @SuppressLint("InlinedApi")
     private fun audioCollection(): Uri =
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        if (sdkInt >= Build.VERSION_CODES.Q) {
             MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
         } else {
             MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
@@ -702,119 +741,99 @@ class LocalMediaSource(
      * 多目录查询：逐目录按授权范围过滤后按 id 去重合并（父/子目录重叠安全）。
      * 视频与音频合入同一个列表、统一按加入时间倒序——UI 自己按 `MediaItem.kind`
      * 分流，数据层不做分组，免得两处排序口径各说各话。
+     *
+     * R0/REV-01：视频、音频两类查询各自兜异常——任一失败只让本次结果"不完整"
+     * （调用方据此禁止清理历史/收藏/快照），而不是整轮扫描失败或静默返回空集。
+     * R0/REV-13：只查询当前可见的类别——音频被拒时不再白查一遍音频集合，
+     * 已授权的视频照常入库。
      */
-    private fun queryMediaStore(scopes: List<ScanScope>): List<MediaItem> {
+    private fun queryMediaStore(scopes: List<ScanScope>, access: MediaAccess): QuerySlice<MediaItem> {
         val merged = LinkedHashMap<String, MediaItem>()
+        val warnings = mutableListOf<String>()
         scopes.forEach { scope ->
-            queryScope(scope).forEach { merged[it.id] = it }
-            queryAudioScope(scope).forEach { merged[it.id] = it }
+            if (scope is ScanScope.Unresolvable) return@forEach
+            if (access.canQueryVideo) {
+                runCatching { queryScope(scope) }
+                    .onSuccess { slice ->
+                        slice.items.forEach { merged[it.id] = it }
+                        warnings += slice.warnings
+                    }
+                    .onFailure { t ->
+                        if (t is CancellationException) throw t
+                        Log.w(TAG, "视频查询失败（本次扫描不完整）", t)
+                        warnings += "视频查询失败，本次扫描不完整"
+                    }
+            }
+            if (access.canQueryAudio) {
+                runCatching { queryAudioScope(scope) }
+                    .onSuccess { slice ->
+                        slice.items.forEach { merged[it.id] = it }
+                        warnings += slice.warnings
+                    }
+                    .onFailure { t ->
+                        if (t is CancellationException) throw t
+                        Log.w(TAG, "音频查询失败（本次扫描不完整）", t)
+                        warnings += "音频查询失败，本次扫描不完整"
+                    }
+            }
         }
-        return merged.values.sortedByDescending { it.addedAtMs }
+        return QuerySlice(merged.values.sortedByDescending { it.addedAtMs }, warnings.distinct())
     }
 
     /**
-     * 授权范围 → MediaStore 过滤条件（E24/E66）。视频与音频共用同一套范围语义：
-     * 两者都在同一个 `MediaStore.MediaColumns` 表结构下，只有集合 URI 与
-     * `Video.*`/`Audio.*` 常量不同，逻辑抽一份可避免两个查询各写一遍、
-     * 日后再改动时只改了一边（"任何分支都不得回退全量扫描"的不变量被悄悄破坏）。
+     * 授权范围 → MediaStore 过滤条件（R0/REV-02，实现已提取到 [ScanScopeQuery]）。
      *
-     * E24：按授权范围构建过滤；Unresolvable 不应到达此处，防御性返回空
-     * E66 修复：relativePath/scope.name 来自 SAF tree docId 拆分，Android
-     * 文件夹名允许包含 '%'/'_'——不转义会被 SQLite LIKE 解释成通配符，使匹配范围
-     * 超出用户实际选择的目录，削弱"任何分支都不得回退全量扫描"的不变量。
-     * 下面所有 LIKE 子句统一转义 + 追加 ESCAPE '\'。
+     * Q+ 同时限定卷（主卷 [MediaStore.VOLUME_EXTERNAL_PRIMARY] / 可移动卷）与目录子树，
+     * 目录前缀一律带 "/" 分隔符（`Movies/` 不再命中 `MoviesBackup/`）；pre-Q 没有
+     * VOLUME_NAME/RELATIVE_PATH，改用完整存储根路径的 DATA 前缀。`%`/`_`/`\` 统一转义。
+     * Unresolvable 返回恒假谓词 `1 = 0`（不是 null——null 会退化成全量查询）。
      */
-    private fun scopeSelection(scope: ScanScope, relativePathColumn: String, dataColumn: String): Pair<String?, Array<String>?> {
-        val selection: String?
-        val selectionArgs: Array<String>?
-        when (scope) {
-            is ScanScope.Unresolvable -> return null to null
-            is ScanScope.Primary -> {
-                val relativePath = scope.relativePath
-                if (relativePath != null) {
-                    val escaped = escapeLike(relativePath)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                        selection = "$relativePathColumn LIKE ? ESCAPE '\\'"
-                        selectionArgs = arrayOf("$escaped%")
-                    } else {
-                        selection = "$dataColumn LIKE ? ESCAPE '\\'"
-                        selectionArgs = arrayOf("%/$escaped/%")
-                    }
-                } else {
-                    // 用户选的主存储根目录——全量扫描是明确意图
-                    selection = null
-                    selectionArgs = null
-                }
-            }
-            is ScanScope.Volume -> {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    // 按卷精确过滤（SAF 卷名 == MediaStore VOLUME_NAME），绝不回退全量
-                    val relativePath = scope.relativePath
-                    selection = if (relativePath != null) {
-                        "${MediaStore.MediaColumns.VOLUME_NAME} = ? AND " +
-                            "$relativePathColumn LIKE ? ESCAPE '\\'"
-                    } else {
-                        "${MediaStore.MediaColumns.VOLUME_NAME} = ?"
-                    }
-                    // VOLUME_NAME 走等值比较（=），不是 LIKE，本身不需要转义；
-                    // 只有 RELATIVE_PATH 的 LIKE 参数需要转义
-                    selectionArgs = if (relativePath != null) {
-                        arrayOf(scope.name, "${escapeLike(relativePath)}%")
-                    } else {
-                        arrayOf(scope.name)
-                    }
-                } else {
-                    val root = "/storage/${escapeLike(scope.name)}"
-                    selection = "$dataColumn LIKE ? ESCAPE '\\'"
-                    selectionArgs = arrayOf(
-                        if (scope.relativePath != null) {
-                            "$root/${escapeLike(scope.relativePath)}/%"
-                        } else {
-                            "$root/%"
-                        },
-                    )
-                }
-            }
-        }
-        return selection to selectionArgs
+    // VOLUME_EXTERNAL_PRIMARY 是 API 29 常量（String，会被内联）；调用点在 sdkInt >= Q
+    // 分支里才用到它，pre-Q 分支不会执行到这行，运行时安全。
+    @SuppressLint("InlinedApi")
+    private fun scopeSelection(
+        scope: ScanScope,
+        relativePathColumn: String,
+        dataColumn: String,
+    ): Pair<String?, Array<String>?> {
+        val spec = ScanScopeQuery.spec(
+            scope = scope,
+            sdkInt = sdkInt,
+            relativePathColumn = relativePathColumn,
+            dataColumn = dataColumn,
+            volumeNameColumn = MediaStore.MediaColumns.VOLUME_NAME,
+            primaryVolumeName = MediaStore.VOLUME_EXTERNAL_PRIMARY,
+            legacyPrimaryRoot = Environment.getExternalStorageDirectory().absolutePath,
+        )
+        return spec.selection to spec.selectionArgs.toTypedArray()
     }
 
-    private fun queryScope(scope: ScanScope): List<MediaItem> {
+    private fun queryScope(scope: ScanScope): QuerySlice<MediaItem> {
         val (selection, selectionArgs) = scopeSelection(
             scope,
             relativePathColumn = MediaStore.Video.Media.RELATIVE_PATH,
             dataColumn = MediaStore.Video.Media.DATA,
         )
-        if (scope is ScanScope.Unresolvable) return emptyList()
+        if (scope is ScanScope.Unresolvable) return QuerySlice(emptyList())
 
-        val projection = arrayOf(
-            MediaStore.Video.Media._ID,
-            MediaStore.Video.Media.DISPLAY_NAME,
-            MediaStore.Video.Media.DURATION,
-            MediaStore.Video.Media.SIZE,
-            MediaStore.Video.Media.DATE_MODIFIED,
-            MediaStore.Video.Media.DATE_ADDED,
-            MediaStore.Video.Media.MIME_TYPE,
-            MediaStore.Video.Media.DATA,
-            // E79：分组（以及同文件夹连播队列）依赖"视频在哪个目录"。
-            // 此前只读 DATA，而 DATA 在 Android 10+ 受分区存储限制、**经常返回 null**
-            // ——整个媒体的 folder 于是全为 null，"按文件夹分组"与"同目录连播"双双静默失效
-            // （播放本身正常，所以很难被发现）。RELATIVE_PATH 是 Q 起官方提供且始终可用的
-            // 相对路径，优先用它；DATA 仅作旧版本兜底。
-            MediaStore.Video.Media.RELATIVE_PATH,
-            // 分辨率：卡片 meta 的「1080P / 4K」档位（设计稿 `v.res`）由此得出
-            MediaStore.Video.Media.WIDTH,
-            MediaStore.Video.Media.HEIGHT,
-        )
-        val hasRelativePath = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q
+        // R0/REV-12：投影按 SDK 裁剪——旧 Provider（API 26–28）不认识 RELATIVE_PATH 时
+        // 可能直接拒绝整条查询，视频/音频会在旧机上整体消失。Q+ 才带该列。
+        val projection = MediaStoreProjection.video(sdkInt)
+        val hasRelativePath = MediaStoreProjection.hasRelativePath(sdkInt)
         val items = mutableListOf<MediaItem>()
-        context.contentResolver.query(
+        // R0/REV-01：null 游标 ≠ 空结果。Provider 返回 null 表示"这次查询没给出答案"，
+        // 按空结果处理会把整个视频类别当成"已删除"进而误清历史——必须记为不完整。
+        val cursor = context.contentResolver.query(
             videoCollection(),
             projection,
             selection,
             selectionArgs,
             "${MediaStore.Video.Media.DATE_ADDED} DESC",
-        )?.use { cursor ->
+        ) ?: return QuerySlice(
+            items = emptyList(),
+            warnings = listOf("视频查询返回空结果，本次扫描不完整"),
+        )
+        cursor.use { cursor ->
             // E59 修复配套：7 个投影列此前 6 个用 getColumnIndexOrThrow，任何一个列在
             // 异常 OEM MediaStore 实现下缺失都会直接抛异常、中止整次扫描。统一改为
             // getColumnIndex + 安全默认值；只有 _ID 缺失时该行确实无法构造合法 MediaItem，
@@ -866,7 +885,7 @@ class LocalMediaSource(
                 items += item
             }
         }
-        return items
+        return QuerySlice(items)
     }
 
     /**
@@ -878,42 +897,32 @@ class LocalMediaSource(
      * mimeType 必须是真实的音频 MIME（audio/ 开头）——[com.noneplayer.core.media.MediaItem.kind]
      * 正是按它分流音频/视频，这里若回退成视频 MIME，UI 会把歌当视频排进播放列表。
      */
-    private fun queryAudioScope(scope: ScanScope): List<MediaItem> {
+    private fun queryAudioScope(scope: ScanScope): QuerySlice<MediaItem> {
         val (selection, selectionArgs) = scopeSelection(
             scope,
             relativePathColumn = MediaStore.Audio.Media.RELATIVE_PATH,
             dataColumn = MediaStore.Audio.Media.DATA,
         )
-        if (scope is ScanScope.Unresolvable) return emptyList()
+        if (scope is ScanScope.Unresolvable) return QuerySlice(emptyList())
 
-        val projection = arrayOf(
-            MediaStore.Audio.Media._ID,
-            MediaStore.Audio.Media.DISPLAY_NAME,
-            MediaStore.Audio.Media.DURATION,
-            MediaStore.Audio.Media.SIZE,
-            MediaStore.Audio.Media.DATE_MODIFIED,
-            MediaStore.Audio.Media.DATE_ADDED,
-            MediaStore.Audio.Media.MIME_TYPE,
-            MediaStore.Audio.Media.DATA,
-            MediaStore.Audio.Media.RELATIVE_PATH,
-            // 相册封面取 albumId（见 audioCoverUri）
-            MediaStore.Audio.Media.ALBUM_ID,
-            // ARTIST / IS_MUSIC 一并取出备查，但 MediaItem 本批不扩字段，且不按 IS_MUSIC
-            // 过滤：铃声、闹钟、录音、语音备忘录同样落在音频集合里，按 IS_MUSIC=1 过滤会让
-            // 它们从媒体库静默消失；"授权了哪些目录"已是用户的意图表达，不替他二次取舍。
-            MediaStore.Audio.Media.ARTIST,
-            MediaStore.Audio.Media.TITLE,
-            MediaStore.Audio.Media.IS_MUSIC,
-        )
-        val hasRelativePath = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
+        // R0/REV-12：与视频同规则，按 SDK 裁剪投影（Q+ 才带 RELATIVE_PATH）。
+        // ALBUM_ID 用于相册封面；ARTIST / TITLE / IS_MUSIC 一并取出备查，
+        // 不按 IS_MUSIC 过滤：铃声、录音同样落在音频集合里。
+        val projection = MediaStoreProjection.audio(sdkInt)
+        val hasRelativePath = MediaStoreProjection.hasRelativePath(sdkInt)
         val items = mutableListOf<MediaItem>()
-        context.contentResolver.query(
+        // R0/REV-01：null 游标按"本次未覆盖"处理，不能当成"音频已全部删除"。
+        val cursor = context.contentResolver.query(
             audioCollection(),
             projection,
             selection,
             selectionArgs,
             "${MediaStore.Audio.Media.DATE_ADDED} DESC",
-        )?.use { cursor ->
+        ) ?: return QuerySlice(
+            items = emptyList(),
+            warnings = listOf("音频查询返回空结果，本次扫描不完整"),
+        )
+        cursor.use { cursor ->
             // 与视频一致：异常 OEM 实现下缺失的列不中止整次扫描，
             // 统一 getColumnIndex + 安全默认值；只有 _ID 缺失时该行跳过。
             val idCol = cursor.getColumnIndex(MediaStore.Audio.Media._ID)
@@ -965,12 +974,8 @@ class LocalMediaSource(
                 items += cueTracksFor(item, dataPath)
             }
         }
-        return items
+        return QuerySlice(items)
     }
-
-    /** E66：转义 SQLite LIKE 模式中的通配符，使文件夹名里的 '%'/'_' 不被误当通配符 */
-    private fun escapeLike(value: String): String =
-        value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     /**
      * 从媒体记录提取展示用文件夹（如 "Movies"、"DCIM/Camera"）。
@@ -1010,18 +1015,30 @@ class LocalMediaSource(
      * 遍历有 [HIDDEN_WALK_BUDGET] 硬预算：目录树里混进 `node_modules`/`.git` 这类巨型结构
      * 时，不把一次扫描拖成分钟级；超预算即停（fail-open，宁可少收也不卡死）。
      */
-    private fun queryHiddenDocuments(treeUriStrs: List<String>, baseline: Map<String, MediaItem>): List<MediaItem> {
+    private fun queryHiddenDocuments(
+        treeUriStrs: List<String>,
+        baseline: Map<String, MediaItem>,
+    ): QuerySlice<MediaItem> {
         val out = mutableListOf<MediaItem>()
-        var budget = HIDDEN_WALK_BUDGET
+        // R0/REV-01：遍历预算可注入（测试用）；耗尽 = 结果不完整，禁止后续清理
+        var budget = hiddenWalkBudget
+        var exhausted = false
+        val warnings = mutableListOf<String>()
         // 去重：tree 根重叠（父/子目录各自授权）时同一文档会被走到两次——
         // 此前无判重，同一文件以同一 `saf-` id 进列表两次（双份文件的来源之一）
         val seen = HashSet<String>()
 
         fun walk(treeUri: Uri, docId: String, inheritedHidden: Boolean) {
-            if (budget <= 0) return
+            if (budget <= 0) {
+                exhausted = true
+                return
+            }
             val childrenUri = runCatching {
                 DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
-            }.getOrNull() ?: return
+            }.getOrNull() ?: run {
+                warnings += "隐藏目录遍历失败，本次扫描不完整"
+                return
+            }
             runCatching {
                 context.contentResolver.query(
                     childrenUri,
@@ -1042,7 +1059,10 @@ class LocalMediaSource(
                     val sizeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
                     val lmCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
                     while (cursor.moveToNext()) {
-                        if (budget-- <= 0) return
+                        if (budget-- <= 0) {
+                            exhausted = true
+                            return
+                        }
                         if (idCol < 0) continue
                         val childDocId = cursor.getString(idCol) ?: continue
                         val name = if (nameCol >= 0) cursor.getString(nameCol).orEmpty() else ""
@@ -1092,19 +1112,33 @@ class LocalMediaSource(
                         }
                     }
                 }
-            }.onFailure { Log.w(TAG, "隐藏目录遍历失败（fail-open 跳过）", it) }
+            }.onFailure { t ->
+                if (t is CancellationException) throw t
+                Log.w(TAG, "隐藏目录遍历失败（本次扫描不完整）", t)
+                warnings += "隐藏目录遍历失败，本次扫描不完整"
+            }
         }
 
-        treeUriStrs.forEach { treeStr ->
-            if (budget <= 0) return@forEach
-            val treeUri = runCatching { treeStr.toUri() }.getOrNull() ?: return@forEach
+        treeUriStrs.forEachIndexed { index, treeStr ->
+            if (budget <= 0) {
+                if (index < treeUriStrs.lastIndex) exhausted = true
+                return@forEachIndexed
+            }
+            val treeUri = runCatching { treeStr.toUri() }.getOrNull() ?: run {
+                warnings += "隐藏目录遍历失败，本次扫描不完整"
+                return@forEachIndexed
+            }
             val treeDocId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
-                ?: return@forEach
+                ?: run {
+                    warnings += "隐藏目录遍历失败，本次扫描不完整"
+                    return@forEachIndexed
+                }
             // tree 根自身就是隐藏目录（用户直接选了 `.foo`）时，其子项整支都算隐藏
             val rootName = treeDocId.substringAfter(':', treeDocId).substringAfterLast('/')
             walk(treeUri, treeDocId, rootName.startsWith("."))
         }
-        return out
+        if (exhausted) warnings += "隐藏目录遍历预算耗尽，本次扫描不完整"
+        return QuerySlice(out, warnings.distinct())
     }
 
     /** 缩略图缓存：扫描时落盘为 JPEG，之后封面直接读文件 */
@@ -1223,6 +1257,19 @@ private fun sameContainerFamily(a: String, b: String): Boolean {
 }
 
 /**
+ * 「所有文件访问」是否已授予：API 30 以下没有这个能力。
+ *
+ * 单独抽出来用 [Build.VERSION.SDK_INT] 守卫，是因为能力门控本身走可注入的 [sdkInt]
+ * （测试要模拟旧系统），而 lint 的 NewApi 数据流只认 `Build.VERSION.SDK_INT`。
+ */
+private fun allFilesAccessGranted(): Boolean =
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)
+    } else {
+        false
+    }
+
+/**
  * 拾取 MediaStore 不索引的无扩展名/未知类型文件（§12.4「扩展名缺失」）。
  *
  * 范围仍是授权目录（`MediaStore.Files` 集合 + `media_type = 0`，即非媒体行）；
@@ -1230,11 +1277,18 @@ private fun sameContainerFamily(a: String, b: String): Boolean {
  * 根本不可见）——没授予就跳过，整条路径 fail-open。嗅探认不出容器的行不进库：
  * 没有任何 Extractor 认领的文件，塞进库只会变成"点开必失败"的垃圾条目。
  */
-private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, MediaItem>): List<MediaItem> {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return emptyList()
-    if (!runCatching { Environment.isExternalStorageManager() }.getOrDefault(false)) return emptyList()
+// VOLUME_EXTERNAL 是 API 29 常量（String，会被内联）；本函数先过 sdkInt < R 门控，
+// 旧系统不会执行到用它的那行，运行时安全。
+@SuppressLint("InlinedApi")
+private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, MediaItem>): QuerySlice<MediaItem> {
+    // 能力门控（不是失败）：旧系统 / 无「所有文件访问」时这条分支本就不该覆盖任何范围
+    if (sdkInt < Build.VERSION_CODES.R) return QuerySlice(emptyList())
+    if (!allFilesAccessGranted()) {
+        return QuerySlice(emptyList())
+    }
     val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
     val out = mutableListOf<MediaItem>()
+    val warnings = mutableListOf<String>()
     // 去重：目录范围父子重叠（同时授权父目录与子目录）时，同一行会被逐 scope 查两次——
     // 此前 `out +=` 无判重，同一文件以同一 id 进列表两次（用户实报"扫描会出现双份文件"）
     val seen = HashSet<String>()
@@ -1305,9 +1359,13 @@ private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, Med
                     )
                 }
             }
-        }.onFailure { Log.w(TAG, "无扩展名文件拾取失败（fail-open 跳过）", it) }
+        }.onFailure { t ->
+            if (t is CancellationException) throw t
+            Log.w(TAG, "无扩展名文件拾取失败（本次扫描不完整）", t)
+            warnings += "无扩展名文件扫描不完整"
+        }
     }
-    return out
+    return QuerySlice(out, warnings.distinct())
 }
 
 /**
@@ -1425,9 +1483,6 @@ private const val SCAN_WAIT_POLL_MS = 100L
 
 /** A5/P2-2：回前台补扫的最小间隔——比它更短的往返不值得再跑一次全量 MediaStore 查询 */
 private const val MIN_RESCAN_INTERVAL_MS = 30_000L
-
-/** 扫描索引快照的格式版本：字段增删时递增，旧快照按"没有"处理（下轮扫描重建） */
-private const val SNAPSHOT_VERSION = 1
 
 /**
  * 用户授权目录（SAF tree）解析出的扫描范围（E24）。

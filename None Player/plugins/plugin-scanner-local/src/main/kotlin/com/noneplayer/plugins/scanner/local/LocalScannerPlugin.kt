@@ -83,10 +83,10 @@ class LocalScannerPlugin : StartupTaskPlugin {
     }
 
     override suspend fun onStart() {
-        if (source.isAvailable()) {
-            val result = source.scan()
-            eventBus.publish(KernelEvent.MediaScanned(sourceId = result.sourceId, count = result.added))
-        }
+        // A25：MediaScanned 只由 scanInternal 的提交段发一次（count=本次列表总数）。
+        // 旧实现在这里再发一条 count=result.added，一次扫描广播两条、数字含义还不同，
+        // 订阅方（媒体库页/插件管理页）会白刷一遍。
+        if (source.isAvailable()) source.scan()
     }
 
     override suspend fun onStop() {

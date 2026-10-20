@@ -116,6 +116,7 @@ import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpOptRow
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import com.noneplayer.core.ui.NpPageScaffold
+import com.noneplayer.core.ui.NpPrimaryButton
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSectionHead
 import com.noneplayer.core.ui.NpSettingRow
@@ -419,6 +420,16 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { grants ->
         if (grants.values.any { it }) permissionTick++
+    }
+    // REV-13：部分授权（只给视频或只给音频）不再是"整页不可用"，但要明确缺哪一类。
+    // 授权状态按 permissionTick 重读（权限回调驱动），避免每次重组都走一遍 binder。
+    val grantedPermissionStrings = remember(permissionStrings, permissionTick) {
+        permissionStrings.filterTo(mutableSetOf()) {
+            context.checkSelfPermission(it) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        }
+    }
+    val partialPermission = remember(permissionStrings, grantedPermissionStrings) {
+        partialPermissionHint(permissionStrings, grantedPermissionStrings)
     }
     val folderPicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocumentTree(),
@@ -792,10 +803,30 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                             items.isEmpty() -> LibraryStage.Empty
                             else -> contentStage
                         }
+                        // REV-13：部分授权（只给视频或只给音频）时媒体库仍可用，但要明说缺哪一类，
+                        // 并给一个补授权入口。整页空态/详情页已有自己的文案，不叠这条横幅。
+                        val showPartialPermission = partialPermission != null &&
+                            stage != LibraryStage.Loading &&
+                            stage != LibraryStage.NoSource &&
+                            stage != LibraryStage.NoPermission &&
+                            stage !is LibraryStage.Detail
+                        if (showPartialPermission) {
+                            PartialPermissionBanner(
+                                text = partialPermission!!,
+                                onGrant = { permissionLauncher.launch(permissionStrings.toTypedArray()) },
+                                compact = compact,
+                                topInset = topBarInset,
+                            )
+                        }
+                        // 横幅自己消费了顶栏避让：把子树里的顶栏 inset 下调为 0，否则
+                        // Home/Folder/Aggregate 列表的 contentPadding 会再避让一次，
+                        // 横幅与首行之间空出一整条顶栏高度。
+                        val contentTopInset = if (showPartialPermission) 0.dp else topBarInset
                         val stageFadeMs = npDuration(Motion.NavFade)
                         val stageExitMs = npDuration(Motion.NavExit)
                         val stageShiftPx = with(LocalDensity.current) { 8.dp.roundToPx() }
                         val stageShiftAllowed = npDisplacementAllowed()
+                        CompositionLocalProvider(LocalNpTopBarInset provides contentTopInset) {
                         AnimatedContent(
                             targetState = stage,
                             contentKey = { if (it is LibraryStage.Detail) "detail" else it },
@@ -974,6 +1005,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                         }
                             }
                         }
+                        }
                 }
                 }
             }
@@ -1134,6 +1166,49 @@ private fun EmptyStage(content: @Composable () -> Unit) {
             ),
         contentAlignment = Alignment.Center,
     ) { content() }
+}
+
+/**
+ * 「部分媒体权限」横幅（REV-13）：只拿到视频或音频中的一类时，媒体库仍可用，
+ * 但要让用户知道缺的是哪一类，并给一个直接的补授权入口。
+ *
+ * 横幅自己消费顶栏避让（[topInset]），调用点因此把子树内的 [LocalNpTopBarInset]
+ * 下调为 0——否则 Home/Folder/Aggregate 列表的 contentPadding 会再避让一次，
+ * 横幅与首行之间空出一整条顶栏高度。
+ */
+@Composable
+private fun PartialPermissionBanner(
+    text: String,
+    onGrant: () -> Unit,
+    compact: Boolean,
+    topInset: Dp,
+) {
+    val ink = LocalNpInk.current
+    val gutter = if (compact) 14.dp else 20.dp
+    val top = if (topInset == Dp.Unspecified) 8.dp else topInset + 8.dp
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = top, start = gutter, end = gutter, bottom = 6.dp)
+            .clip(RoundedCornerShape(NpRadius.card))
+            .background(ink.surface)
+            .border(1.dp, ink.border, RoundedCornerShape(NpRadius.card))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = text,
+            style = NpTypography.bodySmall,
+            color = ink.muted,
+            modifier = Modifier.weight(1f),
+        )
+        NpPrimaryButton(
+            text = "补授权",
+            onClick = onGrant,
+            primary = false,
+        )
+    }
 }
 
 /**

@@ -99,6 +99,13 @@ internal interface HistoryDao {
     @Query("SELECT media_key FROM playback_history")
     suspend fun allHistoryKeys(): List<String>
 
+    /**
+     * R0/REV-01：按 mime 前缀取历史键。扫描未覆盖某类媒体（如音频权限被拒）时，
+     * 用它把该类别的历史行排除在孤儿清理之外；返回的是完整 media_key。
+     */
+    @Query("SELECT media_key FROM playback_history WHERE mime LIKE :pattern")
+    suspend fun historyKeysWithMimePattern(pattern: String): List<String>
+
     @Query("DELETE FROM playback_history WHERE media_key IN (:keys)")
     suspend fun deleteHistoryKeys(keys: List<String>)
 
@@ -158,6 +165,16 @@ internal interface HistoryDao {
     /** L16：全量收藏键（孤儿清理用） */
     @Query("SELECT media_key FROM favorites")
     suspend fun allFavoriteKeys(): List<String>
+
+    /**
+     * R0/REV-01：按 mime 前缀取收藏键——收藏表本身没有 mime，靠历史行补；
+     * 没有历史行的收藏（mime 未知）保守地一并返回，宁可多留不可误删。
+     */
+    @Query(
+        "SELECT f.media_key FROM favorites f LEFT JOIN playback_history h " +
+            "ON f.media_key = h.media_key WHERE h.mime IS NULL OR h.mime LIKE :pattern",
+    )
+    suspend fun favoriteKeysWithMimePattern(pattern: String): List<String>
 
     @Query("DELETE FROM favorites WHERE media_key IN (:keys)")
     suspend fun deleteFavoriteKeys(keys: List<String>)
