@@ -134,6 +134,9 @@ fun AudioOnlyScreen(
     // 但比一根细线更像"这里有一段内容"。视频页仍用 §5.4 的实线条，
     // 波形放在画面上会误导"这是音频文件"。
     val quality = npQuality()
+    // A26：仅听页是唯一画波形的页面，解码视频为 false，走不到 forPlayback() 的自适应；
+    // 这里单独用播放档的柱数（轻量 28），避免 High 档 56 柱×2 在仅听页逐帧重绘。
+    val waveformBars = quality.forPlayback().waveformBars
 
     BoxWithConstraints(
         modifier = modifier
@@ -252,7 +255,7 @@ fun AudioOnlyScreen(
                                 player = player,
                                 mediaKey = HistoryEntry.keyOf(snapshot.item),
                                 durationMs = snapshot.durationMs,
-                                barCount = quality.waveformBars,
+                                barCount = waveformBars,
                                 modifier = Modifier.fillMaxWidth(),
                             )
                             AudioTransportRow(
@@ -335,7 +338,7 @@ fun AudioOnlyScreen(
                     player = player,
                     mediaKey = HistoryEntry.keyOf(snapshot.item),
                     durationMs = snapshot.durationMs,
-                    barCount = quality.waveformBars,
+                    barCount = waveformBars,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = contentInset),
                 )
                 AudioTransportRow(

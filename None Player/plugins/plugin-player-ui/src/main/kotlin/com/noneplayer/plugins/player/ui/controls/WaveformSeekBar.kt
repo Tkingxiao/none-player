@@ -3,7 +3,6 @@ package com.noneplayer.plugins.player.ui.controls
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.snap
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -16,12 +15,14 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.contentDescription
@@ -38,6 +39,7 @@ import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.rememberNpHaptics
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.firstOrNull
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.sin
@@ -70,19 +72,24 @@ internal fun WaveformSeekBar(
     // 位置是 250ms 一跳的轮询值，直接用它播放头会一格一格地蹦。补一段线性推进
     // （§3.8 线性例外之一：波形的连续推进），让它按节拍滑过去——时长与迷你条
     // 进度线同档，正好接住轮询间隔。
-    val progress by animateFloatAsState(
+    // A26：动画值只给 Canvas 读；组合期不读它，effect 也不以它为 key。
+    // 250ms 的位置更新只触发绘制失效，不会每帧重组整根波形。
+    val progressState = animateFloatAsState(
         targetValue = (scrub?.fraction ?: pending?.fraction ?: (positionMs / maxPosition)).coerceIn(0.0, 1.0).toFloat(),
         animationSpec = if (scrub != null) snap() else npMotion(Motion.MiniProgress, easing = LinearEasing),
         label = "waveformProgress",
     )
-    val displayedFraction = scrub?.fraction ?: pending?.fraction ?: progress.toDouble()
-    val currentFraction by rememberUpdatedState(displayedFraction)
-    LaunchedEffect(positionMs, pending, progress) {
+    // 语义/拖动种子用“非动画”位置：4Hz 更新，不把 60fps 动画值带进组合。
+    val staticFraction = (scrub?.fraction ?: pending?.fraction ?: (positionMs / maxPosition))
+        .coerceIn(0.0, 1.0)
+    LaunchedEffect(positionMs, pending) {
         val requested = pending ?: return@LaunchedEffect
-        // Keep the released preview until both the engine and playback animation catch up.
-        if (abs(positionMs - requested.positionMs(durationMs)) < 1_000L &&
-            abs(progress - requested.fraction) * maxPosition < 50.0
-        ) pending = null
+        // 松手后等引擎位置与动画都追上，再清 preview；动画值用 snapshotFlow 采样。
+        snapshotFlow { progressState.value }.firstOrNull { animated ->
+            abs(positionMs - requested.positionMs(durationMs)) < 1_000L &&
+                abs(animated - requested.fraction) * maxPosition < 50.0
+        }
+        if (pending == requested) pending = null
     }
     LaunchedEffect(pending) {
         if (pending != null) {
@@ -103,99 +110,99 @@ internal fun WaveformSeekBar(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(NpDimens.touchTarget),
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(
-            modifier = Modifier
-                .fillMaxSize()
-                .clipToBounds()
-                // E129（审查 #11）：自绘波形此前**完全没有语义**——仅听音频页的主进度
-                // 在读屏里等于不存在。这里补齐与 [NpSeekBar] 同一套：范围读数 +
-                // 时间读数 + `setProgress` 可调节动作，让无障碍路径复用同一条
-                // `onSeek`，不另开一份只改 UI 的假 seek。
-                .semantics {
-                    contentDescription = "播放进度"
-                    progressBarRangeInfo = ProgressBarRangeInfo(
-                        displayedFraction.toFloat(),
-                        0f..1f,
-                    )
-                    stateDescription = if (durationMs > 0L) {
-                        "${formatTimestamp((scrub ?: pending)?.positionMs(durationMs) ?: positionMs)} / ${formatTimestamp(durationMs)}"
+            .height(NpDimens.touchTarget)
+            // E129（审查 #11）：自绘波形此前**完全没有语义**——仅听音频页的主进度
+            // 在读屏里等于不存在。这里补齐与 [NpSeekBar] 同一套：范围读数 +
+            // 时间读数 + `setProgress` 可调节动作，让无障碍路径复用同一条
+            // `onSeek`，不另开一份只改 UI 的假 seek。
+            .semantics {
+                contentDescription = "播放进度"
+                progressBarRangeInfo = ProgressBarRangeInfo(staticFraction.toFloat(), 0f..1f)
+                stateDescription = if (durationMs > 0L) {
+                    "${formatTimestamp((scrub ?: pending)?.positionMs(durationMs) ?: positionMs)} / ${formatTimestamp(durationMs)}"
+                } else {
+                    formatTimestamp(positionMs)
+                }
+                setProgress { target ->
+                    if (durationMs <= 0L || !target.isFinite()) {
+                        false
                     } else {
-                        formatTimestamp(positionMs)
+                        val requested = WaveformScrub(target.toDouble().coerceIn(0.0, 1.0))
+                        pending = requested
+                        seek(requested.positionMs(durationMs))
+                        true
                     }
-                    setProgress { target ->
-                        if (durationMs <= 0L || !target.isFinite()) {
-                            false
-                        } else {
-                            val requested = WaveformScrub(target.toDouble().coerceIn(0.0, 1.0))
+                }
+            }
+            .pointerInput(mediaKey, durationMs) {
+                if (durationMs <= 0L) return@pointerInput
+                detectHorizontalDragGestures(
+                    onDragStart = {
+                        // 动画值只在手势/绘制里读，不把 60fps 状态带进组合。
+                        scrub = WaveformScrub(progressState.value.toDouble())
+                        pending = null
+                        haptics.performHaptic(NpHaptic.Long)
+                    },
+                    onDragEnd = {
+                        scrub?.let { requested ->
                             pending = requested
                             seek(requested.positionMs(durationMs))
-                            true
                         }
-                    }
+                        scrub = null
+                        haptics.performHaptic(NpHaptic.Tick)
+                    },
+                    onDragCancel = { scrub = null },
+                ) { change, dragAmount ->
+                    change.consume()
+                    scrub = scrub?.dragBy(dragAmount, size.width * 2f)
                 }
-                .pointerInput(mediaKey, durationMs) {
-                    if (durationMs <= 0L) return@pointerInput
-                    detectHorizontalDragGestures(
-                        onDragStart = {
-                            scrub = WaveformScrub(currentFraction)
-                            pending = null
-                            haptics.performHaptic(NpHaptic.Long)
-                        },
-                        onDragEnd = {
-                            scrub?.let { requested ->
-                                pending = requested
-                                seek(requested.positionMs(durationMs))
-                            }
-                            scrub = null
-                            haptics.performHaptic(NpHaptic.Tick)
-                        },
-                        onDragCancel = { scrub = null },
-                    ) { change, dragAmount ->
-                        change.consume()
-                        scrub = scrub?.dragBy(dragAmount, size.width * 2f)
-                    }
-                },
-        ) {
-            val n = amplitudes.size
-            if (n == 0) return@Canvas
-            // Drawing and dragging share the same timeline scale; the reference never moves.
-            val trackWidth = size.width * 2f
-            val pitch = trackWidth / (n - 1).coerceAtLeast(1)
-            val drawnBarW = minOf(NpDimens.waveBarWidth.toPx(), pitch * 0.6f)
-            val startX = waveformOriginPx(size.width, trackWidth, displayedFraction)
-            val radius = CornerRadius(drawnBarW / 2f, drawnBarW / 2f)
-            val centerY = size.height / 2f
-            val maxBarH = size.height * 0.82f
-            val playheadX = size.width / 2f
-
-            for (i in 0 until n) {
-                val left = startX + i * pitch - drawnBarW / 2f
-                if (left + drawnBarW < 0f || left > size.width) continue
-                val h = (amplitudes[i] * maxBarH).coerceAtLeast(drawnBarW)
-                val topLeft = Offset(left, centerY - h / 2f)
-                val color = when {
-                    left + drawnBarW <= playheadX -> playedColor
-                    i.toFloat() / (n - 1).coerceAtLeast(1) <= buffered -> bufferedColor
-                    else -> idleColor
-                }
-                drawRoundRect(
-                    color = color,
-                    topLeft = topLeft,
-                    size = Size(drawnBarW, h),
-                    cornerRadius = radius,
-                )
             }
-            drawLine(
-                color = ink.fg,
-                start = Offset(playheadX, 0f),
-                end = Offset(playheadX, size.height),
-                strokeWidth = 2.dp.toPx(),
-            )
-        }
-    }
+            .clipToBounds()
+            .drawWithCache {
+                // A26：柱高/纵向位置/基础横坐标只在这里算一次，绘制阶段只做平移与上色。
+                val n = amplitudes.size
+                val trackWidth = size.width * 2f
+                val pitch = trackWidth / (n - 1).coerceAtLeast(1)
+                val drawnBarW = minOf(NpDimens.waveBarWidth.toPx(), pitch * 0.6f)
+                val radius = CornerRadius(drawnBarW / 2f, drawnBarW / 2f)
+                val centerY = size.height / 2f
+                val maxBarH = size.height * 0.82f
+                val heights = FloatArray(n) { (amplitudes[it] * maxBarH).coerceAtLeast(drawnBarW) }
+                val tops = FloatArray(n) { centerY - heights[it] / 2f }
+                val baseLefts = FloatArray(n) { it * pitch - drawnBarW / 2f }
+                onDrawBehind {
+                    if (n == 0) return@onDrawBehind
+                    val fraction = if (scrub == null && pending == null) {
+                        progressState.value.toDouble()
+                    } else {
+                        staticFraction
+                    }
+                    val startX = waveformOriginPx(size.width, trackWidth, fraction)
+                    val playheadX = size.width / 2f
+                    for (i in 0 until n) {
+                        val left = baseLefts[i] + startX
+                        if (left + drawnBarW < 0f || left > size.width) continue
+                        val color = when {
+                            left + drawnBarW <= playheadX -> playedColor
+                            i.toFloat() / (n - 1).coerceAtLeast(1) <= buffered -> bufferedColor
+                            else -> idleColor
+                        }
+                        drawRoundRect(
+                            color = color,
+                            topLeft = Offset(left, tops[i]),
+                            size = Size(drawnBarW, heights[i]),
+                            cornerRadius = radius,
+                        )
+                    }
+                    drawLine(
+                        color = ink.fg,
+                        start = Offset(playheadX, 0f),
+                        end = Offset(playheadX, size.height),
+                        strokeWidth = 2.dp.toPx(),
+                    )
+                }
+            },
+    )
 }
 
 /**
