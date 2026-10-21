@@ -2,6 +2,7 @@ package com.noneplayer.core.data
 
 import android.content.Context
 import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.emptyPreferences
@@ -9,11 +10,17 @@ import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.stateIn
 
 /**
  * E65 修复：此前未配置 corruptionHandler——偏好文件一旦因异常关机/存储故障等损坏，
@@ -104,7 +111,20 @@ data class LibraryPreferences(
  * Proto DataStore 的 schema 维护成本在这里不划算。
  * 单例由 `preferencesDataStore` 委托保证。
  */
+/** A25：弹幕六项共享一条 DataStore 映射流，避免六个独立 map 各跑一遍。 */
+internal data class DanmakuPreferences(
+    val enabled: Boolean = true,
+    val areaFraction: Float = 0.5f,
+    val speed: Float = 1f,
+    val maxOnScreen: Int = 0,
+    val fontScale: Float = 1f,
+    val alpha: Float = 1f,
+)
+
 class AppSettings(private val context: Context) {
+
+    /** A25：设置侧共享 stateIn 的作用域（进程级，不随页面取消）。 */
+    private val settingsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     companion object {
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
@@ -174,6 +194,16 @@ class AppSettings(private val context: Context) {
         private val KEY_DANMAKU_DENSITY = intPreferencesKey("danmaku_density")
         private val KEY_DANMAKU_FONT_SCALE = stringPreferencesKey("danmaku_font_scale")
         private val KEY_DANMAKU_ALPHA = stringPreferencesKey("danmaku_alpha")
+
+        /** A25：弹幕六项一次映射，供共享 stateIn 与纯函数测试使用。 */
+        internal fun danmakuPreferencesOf(prefs: Preferences): DanmakuPreferences = DanmakuPreferences(
+            enabled = prefs[KEY_DANMAKU_ENABLED] ?: true,
+            areaFraction = prefs[KEY_DANMAKU_AREA]?.toFloatOrNull() ?: 0.5f,
+            speed = prefs[KEY_DANMAKU_SPEED]?.toFloatOrNull() ?: 1f,
+            maxOnScreen = prefs[KEY_DANMAKU_DENSITY] ?: 0,
+            fontScale = prefs[KEY_DANMAKU_FONT_SCALE]?.toFloatOrNull()?.coerceIn(0.4f, 3f) ?: 1f,
+            alpha = prefs[KEY_DANMAKU_ALPHA]?.toFloatOrNull() ?: 1f,
+        )
 
         /** §8.3：历史迁移完成标记（E11：迁移后 DataStore 只留设置项） */
         private val KEY_HISTORY_MIGRATED = booleanPreferencesKey("history_migrated")
@@ -661,9 +691,22 @@ class AppSettings(private val context: Context) {
     // 渲染层尚未接入（PlaybackOverlay 落地时消费）；设置面板先行提供入口，
     // 与 scanner 的模式一致——偏好集中在本类，插件只贡献 UI 区块。
 
+    /**
+     * A25：六项弹幕偏好共享一条 DataStore 映射 + stateIn。此前六个独立
+     * `dataStore.data.map{}` 各自解析整份 Preferences，改一个键六条流全重算；
+     * 现在上游只跑一遍，六个公开 Flow 只做属性投影。
+     */
+    private val danmakuPreferences: Flow<DanmakuPreferences> = context.dataStore.data
+        .map { danmakuPreferencesOf(it) }
+        .distinctUntilChanged()
+        .stateIn(
+            scope = settingsScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = DanmakuPreferences(),
+        )
+
     /** 弹幕总开关，默认开 */
-    val danmakuEnabled: Flow<Boolean> = context.dataStore.data
-        .map { it[KEY_DANMAKU_ENABLED] ?: true }
+    val danmakuEnabled: Flow<Boolean> = danmakuPreferences.map { it.enabled }
 
     suspend fun setDanmakuEnabled(enabled: Boolean) {
         context.dataStore.edit { it[KEY_DANMAKU_ENABLED] = enabled }
@@ -673,40 +716,35 @@ class AppSettings(private val context: Context) {
      * 显示区域 = 弹幕层占屏幕高度的比例上限。规格四档：
      * 1/4 (0.25) / 1/3 (0.33) / 半屏 (0.5) / 全屏 (1.0)，默认半屏。
      */
-    val danmakuAreaFraction: Flow<Float> = context.dataStore.data
-        .map { it[KEY_DANMAKU_AREA]?.toFloatOrNull() ?: 0.5f }
+    val danmakuAreaFraction: Flow<Float> = danmakuPreferences.map { it.areaFraction }
 
     suspend fun setDanmakuAreaFraction(fraction: Float) {
         context.dataStore.edit { it[KEY_DANMAKU_AREA] = fraction.toString() }
     }
 
     /** 滚动速度倍率（1.0 = 标准速度），默认 1.0 */
-    val danmakuSpeed: Flow<Float> = context.dataStore.data
-        .map { it[KEY_DANMAKU_SPEED]?.toFloatOrNull() ?: 1f }
+    val danmakuSpeed: Flow<Float> = danmakuPreferences.map { it.speed }
 
     suspend fun setDanmakuSpeed(speed: Float) {
         context.dataStore.edit { it[KEY_DANMAKU_SPEED] = speed.toString() }
     }
 
     /** 同屏密度上限（条数），0 = 不限，默认 0 */
-    val danmakuMaxOnScreen: Flow<Int> = context.dataStore.data
-        .map { it[KEY_DANMAKU_DENSITY] ?: 0 }
+    val danmakuMaxOnScreen: Flow<Int> = danmakuPreferences.map { it.maxOnScreen }
 
     suspend fun setDanmakuMaxOnScreen(max: Int) {
         context.dataStore.edit { it[KEY_DANMAKU_DENSITY] = max }
     }
 
     /** 字号倍率（1.0 = 标准），默认 1.0；范围钳制（自定义输入可能落任意值，渲染层按此值直接乘） */
-    val danmakuFontScale: Flow<Float> = context.dataStore.data
-        .map { it[KEY_DANMAKU_FONT_SCALE]?.toFloatOrNull()?.coerceIn(0.4f, 3f) ?: 1f }
+    val danmakuFontScale: Flow<Float> = danmakuPreferences.map { it.fontScale }
 
     suspend fun setDanmakuFontScale(scale: Float) {
         context.dataStore.edit { it[KEY_DANMAKU_FONT_SCALE] = scale.toString() }
     }
 
     /** 不透明度（0..1），默认 1.0 */
-    val danmakuAlpha: Flow<Float> = context.dataStore.data
-        .map { it[KEY_DANMAKU_ALPHA]?.toFloatOrNull() ?: 1f }
+    val danmakuAlpha: Flow<Float> = danmakuPreferences.map { it.alpha }
 
     suspend fun setDanmakuAlpha(alpha: Float) {
         context.dataStore.edit { it[KEY_DANMAKU_ALPHA] = alpha.toString() }

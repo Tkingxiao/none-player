@@ -481,16 +481,36 @@ fun npStaggerWindow(key: Any? = Unit): Long = remember(key) { staggerWindowFor(k
  * （2026-10-08 用户实报；同页复用直接给终态是本项目在 M15 空态上已经立过的规矩，
  * 错峰窗口此前没照做）。
  *
- * 窗口只增不删是有意的：key 就那几个（版式 / 查询词 / 目录路径），不为省几十字节
- * 引入淘汰逻辑与它自己的边界情况。
+ * A25：key 里包含搜索词（用户输入），无界 map 会随输入无限增长。改为 [maxEntries]
+ * 上限的 LRU：淘汰后同一 key 再进来会重播一次入场，这是可接受的代价。
  */
-private val staggerWindows = mutableMapOf<Any?, Long>()
+internal class StaggerWindowCache(
+    private val maxEntries: Int = STAGGER_WINDOW_MAX_ENTRIES,
+    private val nowMs: () -> Long = { SystemClock.uptimeMillis() },
+) {
+    private val windows = object : LinkedHashMap<Any?, Long>(maxEntries, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Any?, Long>?): Boolean =
+            size > maxEntries
+    }
 
-private fun staggerWindowFor(key: Any?): Long = synchronized(staggerWindows) {
-    staggerWindows.getOrPut(key) {
-        SystemClock.uptimeMillis() + Motion.Stagger * StaggerMaxItems + Motion.Switch
+    fun windowFor(key: Any?): Long = synchronized(windows) {
+        windows.getOrPut(key) {
+            nowMs() + Motion.Stagger * StaggerMaxItems + Motion.Switch
+        }
+    }
+
+    fun sizeForTest(): Int = synchronized(windows) { windows.size }
+
+    fun clearForTest() {
+        synchronized(windows) { windows.clear() }
     }
 }
+
+internal const val STAGGER_WINDOW_MAX_ENTRIES = 64
+
+private val staggerWindows = StaggerWindowCache()
+
+private fun staggerWindowFor(key: Any?): Long = staggerWindows.windowFor(key)
 
 /**
  * M12 网格/列表入场：第 [index] 项延迟 `Stagger×min(index,6)`，从下方 12dp 上移并淡入，
