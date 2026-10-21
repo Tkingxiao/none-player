@@ -1708,7 +1708,10 @@ internal fun MediaCover(
 ) {
     val context = LocalContext.current
     val isAudio = item.kind == MediaKind.AUDIO
-    val model = remember(item.coverUri, item.uri, isAudio) {
+    var frameFailed by remember(item.uri) {
+        mutableStateOf(CoverFrameFailureMemo.hasFailed(item.uri))
+    }
+    val model = remember(item.coverUri, item.uri, isAudio, frameFailed) {
         when {
             item.coverUri != null -> ImageRequest.Builder(context)
                 .data(item.coverUri)
@@ -1716,6 +1719,7 @@ internal fun MediaCover(
                 .build()
 
             isAudio -> null
+            !shouldExtractFrame(item.sourceId, item.coverUri, isAudio, frameFailed) -> null
             else -> ImageRequest.Builder(context)
                 .data(item.uri)
                 .videoFrameMillis(0)
@@ -1736,6 +1740,13 @@ internal fun MediaCover(
                 // 保留 item.title 会让 TalkBack 把标题读两遍。读屏用户不缺这一条。
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
+                onError = {
+                    // 只给“现场抽帧”记失败；缓存封面失败另有兜底，不把视频 uri 钉死。
+                    if (item.coverUri == null && !isAudio) {
+                        frameFailed = true
+                        CoverFrameFailureMemo.markFailed(item.uri)
+                    }
+                },
                 modifier = Modifier.fillMaxSize(),
             )
         }
