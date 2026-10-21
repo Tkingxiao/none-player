@@ -2,6 +2,7 @@ package com.noneplayer.kernel.api
 
 import com.noneplayer.core.media.MediaItem
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 
 /**
  * 媒体来源扩展点——提供一路媒体库数据。
@@ -32,7 +33,28 @@ interface MediaSourceProvider : ExtensionPoint {
 
     /** 触发一次扫描 */
     suspend fun scan(): ScanResult
+
+    /**
+     * A25：扫描进度（可选能力）。来源不支持时恒为 idle。
+     *
+     * UI 不再用本地 `refreshing` + 15s 超时猜扫描何时结束，直接跟这条流；
+     * [total] 为 0 表示还在准备（尚未拿到本次范围）。
+     */
+    fun observeScanProgress(): Flow<ScanProgress> = flowOf(ScanProgress())
+
+    /**
+     * A25：取消当前扫描（可选能力）。未在扫描 / 不支持时无操作；取消后
+     * [observeScanProgress] 应回到 idle。
+     */
+    fun cancelScan() {}
 }
+
+/** 一次扫描的进度快照。 */
+data class ScanProgress(
+    val active: Boolean = false,
+    val processed: Int = 0,
+    val total: Int = 0,
+)
 
 /** 一次扫描的结果统计 */
 data class ScanResult(

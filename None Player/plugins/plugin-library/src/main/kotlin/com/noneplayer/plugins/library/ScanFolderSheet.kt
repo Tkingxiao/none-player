@@ -21,6 +21,7 @@ import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpSheet
 import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.kernel.api.ScanProgress
 
 /**
  * 「扫描目录」管理面板（媒体库统一入口）。
@@ -37,13 +38,15 @@ import com.noneplayer.core.ui.NpTypography
 @Composable
 internal fun ScanFolderSheet(
     folders: List<String>,
-    scanning: Boolean,
+    scanProgress: ScanProgress,
     onDismiss: () -> Unit,
     onPickFolder: () -> Unit,
     onRemoveFolder: (String) -> Unit,
     onRescan: () -> Unit,
+    onCancelScan: () -> Unit,
 ) {
     val ink = LocalNpInk.current
+    val scanning = scanProgress.active
 
     NpSheet(onDismiss = onDismiss, title = "扫描目录") {
         Column(
@@ -88,9 +91,21 @@ internal fun ScanFolderSheet(
                     )
                 },
             )
+            if (scanning) {
+                NpSettingRow(
+                    title = "取消扫描",
+                    subtitle = if (scanProgress.total > 0) {
+                        "已处理 ${scanProgress.processed} / ${scanProgress.total} 项"
+                    } else {
+                        "正在准备扫描…"
+                    },
+                    icon = NpIcon.Close,
+                    onClick = onCancelScan,
+                )
+            }
             NpSettingRow(
                 title = "重新扫描",
-                subtitle = "对比上次结果，只处理新增与移除的文件",
+                subtitle = if (scanning) "正在扫描，完成后可再次对比" else "对比上次结果，只处理新增与移除的文件",
                 icon = NpIcon.Rotate,
                 onClick = if (scanning) null else onRescan,
                 showDivider = false,

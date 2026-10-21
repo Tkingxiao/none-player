@@ -37,13 +37,16 @@ import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.MetadataEnricher
 import com.noneplayer.kernel.api.ProcessLifecycle
 import com.noneplayer.kernel.api.ScanFolderController
+import com.noneplayer.kernel.api.ScanProgress
 import com.noneplayer.kernel.api.ScanResult
 import com.noneplayer.kernel.api.query
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -160,6 +163,18 @@ class LocalMediaSource(
     private val _scanning = MutableStateFlow(false)
     val scanning: StateFlow<Boolean> = _scanning.asStateFlow()
 
+    /** A25：扫描进度（active/processed/total），UI 用它替代本地 15s 假收尾。 */
+    private val _scanProgress = MutableStateFlow(ScanProgress())
+    override fun observeScanProgress(): Flow<ScanProgress> = _scanProgress.asStateFlow()
+
+    /** A25：当前实际持有扫描闸门的协程；cancelScan() 只取消它。 */
+    @Volatile
+    private var activeScanJob: Job? = null
+
+    override fun cancelScan() {
+        activeScanJob?.cancel()
+    }
+
     private val _lastScan = MutableStateFlow<LocalScanSummary?>(null)
     val lastScan: StateFlow<LocalScanSummary?> = _lastScan.asStateFlow()
 
@@ -193,6 +208,14 @@ class LocalMediaSource(
     @Volatile
     internal var beforeCommitHook: (suspend () -> Unit)? = null
 
+    /**
+     * A25 测试 seam：首扫的“基础列表已发布、封面尚未补齐”时点。
+     *
+     * 生产为 null；回归测试用它验证首扫在封面阶段前已有内容（UI 不再停在骨架）。
+     */
+    @Volatile
+    internal var beforeCoversHook: (suspend () -> Unit)? = null
+
     // R0/REV-13：可用性按"可见类别"判定——只拒了音频不应把已授权的视频一起封死；
     // 已有 SAF 目录授权时即便没有媒体权限，来源依然可用（隐藏目录走 SAF 遍历）。
     override suspend fun isAvailable(): Boolean = MediaAccessPolicy.current(context, sdkInt).isAvailable
@@ -201,7 +224,10 @@ class LocalMediaSource(
         if (!acquireScanGate()) {
             return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
         }
+        val scanJob = currentCoroutineContext()[Job]
+        activeScanJob = scanJob
         _scanning.value = true
+        _scanProgress.value = ScanProgress(active = true)
         try {
             val folderUriStrs = settings.scanFolderUris.first()
             if (folderUriStrs.isEmpty()) {
@@ -229,6 +255,8 @@ class LocalMediaSource(
                 }
         } finally {
             _scanning.value = false
+            _scanProgress.value = ScanProgress()
+            if (activeScanJob === scanJob) activeScanJob = null
             scanGate.set(false)
             // A5/P2-2：记下「这次扫描完成于何时」，回前台的补扫据此去重
             lastScanFinishedAt = SystemClock.elapsedRealtime()
@@ -236,20 +264,23 @@ class LocalMediaSource(
     }
 
     /**
-     * 抢扫描闸门。拿到返回 true；有人正在扫则短轮询等它结束再抢一次——
-     * E67 的语义要保留：ContentObserver 的 debounce 已经消费掉那次发射，
-     * 这里的请求再被丢弃就等于永久漏掉这批文件增删。
+     * 抢扫描闸门。拿到返回 true；有人正在扫则短轮询等它结束——E67 的语义保留：
+     * ContentObserver 的 debounce 已经消费掉那次发射，等待方不白丢这批变更。
      *
-     * 等超时或抢不到（说明又有人开跑）时返回 false，交给持有方，避免 N 个调用者
-     * 排队跑 N 次全量查询。
+     * A25：超时直接返回 false，由调用方这一次跳过；**不在超时后再 CAS 抢一次**——
+     * 那会在持有方刚结束时再跑一遍全量查询，等于 N 个等待者排队跑 N 次。持有方
+     * 的扫描已经覆盖了等待窗口内的变更。
      */
     private suspend fun acquireScanGate(): Boolean {
         if (scanGate.compareAndSet(false, true)) return true
         var waited = 0L
-        while (scanGate.get() && waited < SCAN_WAIT_TIMEOUT_MS) {
+        while (scanGate.get()) {
+            // 还在扫且已经等满预算：这次直接跳过，不再追加一次全量查询。
+            if (waited >= SCAN_WAIT_TIMEOUT_MS) return false
             delay(SCAN_WAIT_POLL_MS)
             waited += SCAN_WAIT_POLL_MS
         }
+        // 观察到闸门已释放（等待预算内）：做一次 CAS 抢占；抢不到说明又有人开跑。
         return scanGate.compareAndSet(false, true)
     }
 
@@ -334,8 +365,20 @@ class LocalMediaSource(
             .map { item -> if (item === baseline[item.id]) item else enrichAll(item) }
         // 封面并发补齐放在**发布之前**：UI 侧拿到的列表永远是"封面已就绪"的那一份，
         // 不需要两段式刷新，也不会因为某一项封面慢而整页停在占位图。
-        val items = attachCovers((storeItems + unknownItems + hiddenItems).distinctBy { it.id })
-            .map { it.withAviDuration() }
+        val baseItems = (storeItems + unknownItems + hiddenItems).distinctBy { it.id }
+        _scanProgress.value = ScanProgress(active = true, total = baseItems.size)
+        // A25：**首扫**先发布基础列表（富化/嗅探已完成、封面待补），UI 不再等全库
+        // 抽帧。只在 previousList 为空时做——增量扫描已有旧列表可见，提前发布反而
+        // 会和 REV-03 的“提交段整份复核”抢时序。这里同样过代际门；目录集在首扫
+        // 期间变化时这次发布会被拒绝，最终提交也会丢弃（新扫描会重发）。
+        if (previousList.isEmpty()) {
+            commitGate.commitIfCurrent(generation) { _media.value = baseItems }
+        }
+        beforeCoversHook?.invoke()
+        val items = attachCovers(baseItems) { processed, total ->
+            _scanProgress.value = ScanProgress(active = true, processed = processed, total = total)
+        }.map { it.withAviDuration() }
+        _scanProgress.value = ScanProgress(active = true, processed = items.size, total = items.size)
         // [诊断] 发布前自检：同 id 重复会以 Lazy 重复 key 直接打崩 UI（实报闪退），
         // 这里留一行日志把缺陷暴露在数据层，而不是让它到界面上炸（正常应为零输出）
         run {
@@ -540,7 +583,10 @@ class LocalMediaSource(
      * 未命中的项最多 [THUMB_PARALLELISM] 个同时抽帧。语义不变——仍然在发布前把封面
      * 全部备好，UI 不需要任何两段式刷新。
      */
-    private suspend fun attachCovers(items: List<MediaItem>): List<MediaItem> {
+    private suspend fun attachCovers(
+        items: List<MediaItem>,
+        onProgress: ((processed: Int, total: Int) -> Unit)? = null,
+    ): List<MediaItem> {
         // 音频（`msa-`，含 .cue 分轨）走相册封面 URI，没有可生成的帧缩略图；
         // 其余项（MediaStore 视频 `ms-` / 隐藏目录文档 `saf-`）缺封面、或封面的
         // 缓存文件已被清掉（清缓存/系统清 cacheDir）时才补——只信 `coverUri != null`
@@ -551,13 +597,21 @@ class LocalMediaSource(
             val cover = it.coverUri
             !it.id.startsWith(AUDIO_ID_PREFIX) && (cover == null || !File(cover).isFile)
         }
-        if (pending.isEmpty()) return items
+        if (pending.isEmpty()) {
+            onProgress?.invoke(items.size, items.size)
+            return items
+        }
         val covers = java.util.concurrent.ConcurrentHashMap<String, String>()
         val gate = Semaphore(THUMB_PARALLELISM)
+        val done = java.util.concurrent.atomic.AtomicInteger(items.size - pending.size)
+        onProgress?.invoke(done.get(), items.size)
         coroutineScope {
             pending.map { item ->
                 async(dispatchers.io) {
-                    gate.withPermit { coverFor(item)?.let { covers[item.id] = it } }
+                    gate.withPermit {
+                        coverFor(item)?.let { covers[item.id] = it }
+                        onProgress?.invoke(done.incrementAndGet(), items.size)
+                    }
                 }
             }.awaitAll()
         }

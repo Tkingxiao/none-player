@@ -140,10 +140,12 @@ import com.noneplayer.kernel.api.ContextMenuItem
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.combine
 import com.noneplayer.kernel.api.subscribe
 import com.noneplayer.kernel.api.KernelEvent
 import com.noneplayer.kernel.api.EventBus
 import com.noneplayer.kernel.api.MediaSourceProvider
+import com.noneplayer.kernel.api.ScanProgress
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.api.PermissionProvider
 import com.noneplayer.kernel.api.ScanFolderController
@@ -582,9 +584,19 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val lastAt = remember(historyEntries) {
         historyEntries.associate { it.mediaKey to it.lastPlayedAt }
     }
-    // 下拉刷新（§10 批次 4）：重扫全部来源；指示器跟随 MediaScanned 事件收尾，
-    // 不靠"假转 1 秒"——扫描失败/无目录时也会按时收（超时兜底）
-    var refreshing by remember { mutableStateOf(false) }
+    // 下拉刷新（A25）：指示器跟随各来源的 scanProgress，不再用本地 refreshing +
+    // 15s 超时猜收尾；扫描失败/取消时来源自己回到 idle，指示器随之收起。
+    val scanProgress by produceState(ScanProgress(), sources) {
+        val flows = sources.map { it.observeScanProgress() }
+        if (flows.isEmpty()) {
+            value = ScanProgress()
+        } else {
+            combine(*flows.toTypedArray()) { progresses ->
+                aggregateScanProgress(progresses.toList())
+            }.collect { value = it }
+        }
+    }
+    val refreshing = scanProgress.active
     val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
     val eventBus = remember { kernel.services.get<EventBus>() }
     val haptics = rememberNpHaptics()
@@ -603,21 +615,10 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
 
     fun refresh() {
         if (refreshing || sources.isEmpty()) return
-        refreshing = true
         // M14（§7.5 `Tick`）：真的开始重扫才响——空来源/正在扫时按下去没有变化，不该给反馈
         haptics.performHaptic(NpHaptic.Tick)
         scope.launch {
-            coroutineScope {
-                // 先订阅再触发扫描，避免扫描完成的事件早于订阅到达而错过
-                val waited = async {
-                    withTimeoutOrNull(15_000L) {
-                        eventBus.subscribe<KernelEvent.MediaScanned>().first()
-                    }
-                }
-                sources.filter { it.isAvailable() }.forEach { it.scan() }
-                waited.await()
-            }
-            refreshing = false
+            sources.filter { it.isAvailable() }.forEach { it.scan() }
         }
     }
 
@@ -1113,11 +1114,12 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
         if (scanFolderSheet) {
             ScanFolderSheet(
                 folders = folderUris ?: emptyList(),
-                scanning = refreshing,
+                scanProgress = scanProgress,
                 onDismiss = { scanFolderSheet = false },
                 onPickFolder = { folderPicker.launch(null) },
                 onRemoveFolder = removeScanFolder,
                 onRescan = ::refresh,
+                onCancelScan = { sources.forEach { it.cancelScan() } },
             )
         }
 

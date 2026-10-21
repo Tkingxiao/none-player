@@ -26,6 +26,8 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -186,7 +188,11 @@ class Kernel private constructor(
                         try {
                             task.await()
                         } catch (cancellation: CancellationException) {
-                            throw cancellation
+                            // A25：插件自己的启动任务被用户取消（如取消首扫）时，父作用域
+                            // 仍活着——隔离这次取消，不能把整个引导连带取消/卡在 Booting。
+                            // 真停机/预算超时会让 currentCoroutineContext 失活，必须原样抛。
+                            if (!currentCoroutineContext().isActive) throw cancellation
+                            Log.i(TAG, "插件 $pluginId 启动任务被取消，已隔离，其余插件不受影响")
                         } catch (cause: Throwable) {
                             Log.w(TAG, "插件 $pluginId 启动任务异常，已隔离，其余插件不受影响", cause)
                             events.publish(KernelEvent.PluginStartFailed(pluginId, cause))
