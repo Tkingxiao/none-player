@@ -65,6 +65,19 @@ android {
                 )
                 signingConfigs.getByName("debug")
             }
+            // A21：真机几乎用不到 x86/x86_64，但四个 ABI 的 FFmpeg/NextLib 会一起进包。
+            // 发布包只留 ARM 两档；debug 保留 x86_64 给模拟器。ABI 过滤只影响打包，
+            // 不影响各模块 native 编译任务；prebuilt 目录保持原样（debug 仍可能需要）。
+            ndk {
+                abiFilters.clear()
+                abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a"))
+            }
+        }
+        debug {
+            ndk {
+                abiFilters.clear()
+                abiFilters.addAll(listOf("arm64-v8a", "armeabi-v7a", "x86_64"))
+            }
         }
     }
     // E35：lint 口径显式化——当前 13/13 模块 0 issue，**不生成攒账式 baseline 文件**，
