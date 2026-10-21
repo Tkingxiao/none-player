@@ -3,6 +3,7 @@ package com.noneplayer.plugins.player.exo
 import android.os.Parcel
 import android.util.Log
 import android.view.Surface
+import com.noneplayer.core.media.SurfaceCloneMemo
 
 /**
  * CPU 渲染要用的 Surface 持有器。
@@ -51,7 +52,9 @@ internal class OwnedSurfaceCloner(private val tag: String) {
             parcel.recycle()
         }
     } catch (t: Throwable) {
-        Log.d(tag, "Surface 克隆失败，退回直渲：${t.javaClass.simpleName}: ${t.message}")
+        val detail = "${t.javaClass.simpleName}: ${t.message}"
+        Log.w(tag, "Surface 克隆失败，退回直渲：$detail")
+        SurfaceCloneMemo.recordFailure(tag, detail)
         null
     }
 }

@@ -10,6 +10,7 @@ import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.VideoRendererEventListener
 import com.noneplayer.core.media.probe.PlatformDecoderSupport
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegVideoRenderer
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 
 /**
@@ -70,6 +71,22 @@ open class NpRenderersFactory(
             allowedVideoJoiningTimeMs,
             out,
         )
+        // A19：NextLib 默认用 availableProcessors() 做 FFmpeg 线程数，8 核上软解 HEVC
+        // 会吃满大核。替换成 min(4, max(2, 核数/2))，不打开 DecoderManager。
+        val ffmpegThreads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
+        for (index in out.indices) {
+            if (out[index] is FfmpegVideoRenderer) {
+                out[index] = FfmpegVideoRenderer(
+                    allowedVideoJoiningTimeMs,
+                    eventHandler,
+                    eventListener,
+                    MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
+                    ffmpegThreads,
+                    /* numInputBuffers= */ 4,
+                    /* numOutputBuffers= */ 4,
+                )
+            }
+        }
         // 追加在最后：前面的渲染器都不认领 MJPEG（平台无此解码器，FFmpeg 也不含该编码），
         // 这条才会被选中。取值与 Media3Avi 的 MjpegRenderersFactory 一致；
         // 用 NpMjpegVideoRenderer 包装是为了换集时归还 Surface 的 CPU 连接（见该类注释）。

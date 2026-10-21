@@ -5,8 +5,10 @@
 #include <libavcodec/avcodec.h>
 #include <libavutil/avutil.h>
 #include <libavutil/error.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define LOG_TAG "LegacyDecoder"
 #define ALOG(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
@@ -17,7 +19,8 @@ typedef struct Frame {
     int height;
     int y_stride;
     int uv_stride;
-    int colorspace;
+    int colorspace; /* 0 = full range, 1 = limited */
+    int matrix;     /* 0 = BT.601, 1 = BT.709 */
     int64_t pts;
     uint8_t *y;
     uint8_t *u;
@@ -31,6 +34,11 @@ typedef struct Legacy {
     Frame queue[MAX_QUEUE];
     int qh;
     int qn;
+    /* A19: 窗口句柄按 Surface 缓存，几何只在尺寸变化时设置。 */
+    ANativeWindow *win;
+    jobject surface_ref;
+    int win_w;
+    int win_h;
 } Legacy;
 
 static void frame_clear(Frame *f) {
@@ -54,8 +62,9 @@ static int enqueue_frame(Legacy *L, const AVFrame *f) {
         return AVERROR(ENOMEM);
     }
     if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) {
-        ALOG("unsupported pix_fmt %d", f->format);
-        return AVERROR(EINVAL);
+        // A19：非 YUV420 帧跳过并计数，不要让整部片子以解码失败告终。
+        ALOG("unsupported pix_fmt %d, dropping frame", f->format);
+        return 0;
     }
     int w = f->width;
     int h = f->height;
@@ -84,7 +93,22 @@ static int enqueue_frame(Legacy *L, const AVFrame *f) {
     out->height = h;
     out->y_stride = y_stride;
     out->uv_stride = uv_stride;
-    out->colorspace = (f->format == AV_PIX_FMT_YUVJ420P) ? 0 : 1;
+    out->colorspace = (f->format == AV_PIX_FMT_YUVJ420P || f->color_range == AVCOL_RANGE_JPEG) ? 0 : 1;
+    /* A19: AVFrame 的 matrix 与 range 分开带出；未标注时 HD 按 BT.709、SD 按 BT.601。 */
+    switch (f->colorspace) {
+        case AVCOL_SPC_BT709:
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:
+            out->matrix = 1;
+            break;
+        case AVCOL_SPC_BT470BG:
+        case AVCOL_SPC_SMPTE170M:
+            out->matrix = 0;
+            break;
+        default:
+            out->matrix = (w >= 1280 || h >= 720) ? 1 : 0;
+            break;
+    }
     out->pts = (f->best_effort_timestamp == AV_NOPTS_VALUE) ? f->pts : f->best_effort_timestamp;
     L->qn++;
     return 0;
@@ -94,6 +118,12 @@ static int drain(Legacy *L) {
     for (;;) {
         int r = avcodec_receive_frame(L->ctx, L->frame);
         if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) return 0;
+        if (r == AVERROR_INVALIDDATA) {
+            // A19：截断/损坏帧丢掉继续，不把整部片子打成终态。
+            ALOG("invalid data, dropping frame");
+            av_frame_unref(L->frame);
+            continue;
+        }
         if (r < 0) return r;
         int e = enqueue_frame(L, L->frame);
         av_frame_unref(L->frame);
@@ -107,18 +137,30 @@ static int clamp8(int v) {
     return v;
 }
 
-static void yuv_to_rgb(int y, int u, int v, int full, int *r, int *g, int *b) {
+static void yuv_to_rgb(int y, int u, int v, int full, int matrix, int *r, int *g, int *b) {
     int c = full ? y : y - 16;
     int d = u - 128;
     int e = v - 128;
     if (!full) {
-        *r = clamp8((298 * c + 409 * e + 128) >> 8);
-        *g = clamp8((298 * c - 100 * d - 208 * e + 128) >> 8);
-        *b = clamp8((298 * c + 516 * d + 128) >> 8);
+        if (matrix == 1) { /* BT.709 limited */
+            *r = clamp8((298 * c + 459 * e + 128) >> 8);
+            *g = clamp8((298 * c - 55 * d - 136 * e + 128) >> 8);
+            *b = clamp8((298 * c + 541 * d + 128) >> 8);
+        } else { /* BT.601 limited */
+            *r = clamp8((298 * c + 409 * e + 128) >> 8);
+            *g = clamp8((298 * c - 100 * d - 208 * e + 128) >> 8);
+            *b = clamp8((298 * c + 516 * d + 128) >> 8);
+        }
     } else {
-        *r = clamp8((256 * c + 359 * e + 128) >> 8);
-        *g = clamp8((256 * c - 88 * d - 183 * e + 128) >> 8);
-        *b = clamp8((256 * c + 454 * d + 128) >> 8);
+        if (matrix == 1) { /* BT.709 full */
+            *r = clamp8((256 * c + 403 * e + 128) >> 8);
+            *g = clamp8((256 * c - 48 * d - 120 * e + 128) >> 8);
+            *b = clamp8((256 * c + 475 * d + 128) >> 8);
+        } else { /* BT.601 full */
+            *r = clamp8((256 * c + 359 * e + 128) >> 8);
+            *g = clamp8((256 * c - 88 * d - 183 * e + 128) >> 8);
+            *b = clamp8((256 * c + 454 * d + 128) >> 8);
+        }
     }
 }
 
@@ -157,7 +199,13 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCreate(
     }
     if (width > 0) L->ctx->width = width;
     if (height > 0) L->ctx->height = height;
-    L->ctx->thread_count = 1;
+    /* A19: legacy 软解不再单线程。slice 线程不引入帧级延迟，pump 的时序不变。 */
+    long cores = sysconf(_SC_NPROCESSORS_ONLN);
+    int threads = cores > 0 ? (int)cores : 2;
+    if (threads > 4) threads = 4;
+    if (threads < 1) threads = 1;
+    L->ctx->thread_count = threads;
+    L->ctx->thread_type = FF_THREAD_SLICE;
     L->ctx->pkt_timebase = (AVRational){1, 1000000};
     if (avcodec_open2(L->ctx, codec, NULL) < 0) {
         ALOG("avcodec_open2 failed: %s", name);
@@ -196,6 +244,15 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeSend(
     L->pkt->pts = pts_us;
     L->pkt->dts = pts_us;
     r = avcodec_send_packet(L->ctx, L->pkt);
+    if (r == AVERROR(EAGAIN)) {
+        // A19：先 drain 再重试一次，不把可恢复的背压当失败。
+        int d = drain(L);
+        if (d < 0) {
+            av_packet_unref(L->pkt);
+            return d;
+        }
+        r = avcodec_send_packet(L->ctx, L->pkt);
+    }
     av_packet_unref(L->pkt);
     if (r < 0) return r;
     return drain(L);
@@ -216,24 +273,25 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativePeek(
     Legacy *L = (Legacy *)handle;
     if (!L || L->qn <= 0) return JNI_FALSE;
     Frame *f = &L->queue[L->qh];
-    jint values[5];
+    jint values[6];
     values[0] = f->width;
     values[1] = f->height;
     values[2] = f->y_stride;
     values[3] = f->uv_stride;
     values[4] = f->colorspace;
-    (*env)->SetIntArrayRegion(env, info, 0, 5, values);
+    values[5] = f->matrix;
+    (*env)->SetIntArrayRegion(env, info, 0, 6, values);
     jlong pts_value = f->pts;
     (*env)->SetLongArrayRegion(env, pts, 0, 1, &pts_value);
     return JNI_TRUE;
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jboolean JNICALL
 Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCopy(
         JNIEnv *env, jclass clazz, jlong handle, jobject y, jobject u, jobject v) {
     (void)clazz;
     Legacy *L = (Legacy *)handle;
-    if (!L || L->qn <= 0) return;
+    if (!L || L->qn <= 0) return JNI_FALSE;
     Frame *f = &L->queue[L->qh];
     int uv_h = (f->height + 1) / 2;
     size_t y_bytes = (size_t)f->y_stride * (size_t)f->height;
@@ -241,11 +299,11 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCopy(
     uint8_t *yd = (*env)->GetDirectBufferAddress(env, y);
     uint8_t *ud = (*env)->GetDirectBufferAddress(env, u);
     uint8_t *vd = (*env)->GetDirectBufferAddress(env, v);
-    if (!yd || !ud || !vd) return;
+    if (!yd || !ud || !vd) return JNI_FALSE;
     if ((size_t)(*env)->GetDirectBufferCapacity(env, y) < y_bytes ||
         (size_t)(*env)->GetDirectBufferCapacity(env, u) < uv_bytes ||
         (size_t)(*env)->GetDirectBufferCapacity(env, v) < uv_bytes) {
-        return;
+        return JNI_FALSE;
     }
     memcpy(yd, f->y, y_bytes);
     memcpy(ud, f->u, uv_bytes);
@@ -253,6 +311,7 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCopy(
     frame_clear(f);
     L->qh = (L->qh + 1) % MAX_QUEUE;
     L->qn--;
+    return JNI_TRUE;
 }
 
 static void write_pixel(uint8_t *row, int format, int x, int r, int g, int b) {
@@ -272,6 +331,7 @@ JNIEXPORT jint JNICALL
 Java_com_noneplayer_core_media_legacy_LegacyNative_nativeRender(
         JNIEnv *env,
         jclass clazz,
+        jlong handle,
         jobject y,
         jint y_stride,
         jobject u,
@@ -280,51 +340,105 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeRender(
         jint width,
         jint height,
         jint colorspace,
+        jint matrix,
         jobject surface) {
     (void)clazz;
-    if (!surface || width <= 0 || height <= 0) return -1;
+    Legacy *L = (Legacy *)handle;
+    if (!L || !surface || width <= 0 || height <= 0) return -1;
     uint8_t *yp = (*env)->GetDirectBufferAddress(env, y);
     uint8_t *up = (*env)->GetDirectBufferAddress(env, u);
     uint8_t *vp = (*env)->GetDirectBufferAddress(env, v);
     if (!yp || !up || !vp) return -2;
-    ANativeWindow *win = ANativeWindow_fromSurface(env, surface);
-    if (!win) return -3;
-    ANativeWindow_setBuffersGeometry(win, width, height, WINDOW_FORMAT_RGBA_8888);
-    ANativeWindow_Buffer buf;
-    if (ANativeWindow_lock(win, &buf, NULL) != 0) {
-        ANativeWindow_release(win);
-        return -4;
+
+    /* A19: Surface 句柄缓存；几何只在视频尺寸变化时设置，缩放交给 GPU。 */
+    if (!L->surface_ref || !(*env)->IsSameObject(env, L->surface_ref, surface)) {
+        if (L->win) {
+            ANativeWindow_release(L->win);
+            L->win = NULL;
+        }
+        if (L->surface_ref) {
+            (*env)->DeleteGlobalRef(env, L->surface_ref);
+            L->surface_ref = NULL;
+        }
+        L->win = ANativeWindow_fromSurface(env, surface);
+        if (!L->win) return -3;
+        L->surface_ref = (*env)->NewGlobalRef(env, surface);
+        L->win_w = 0;
+        L->win_h = 0;
     }
+    if (L->win_w != width || L->win_h != height) {
+        ANativeWindow_setBuffersGeometry(L->win, width, height, WINDOW_FORMAT_RGBA_8888);
+        L->win_w = width;
+        L->win_h = height;
+    }
+
+    ANativeWindow_Buffer buf;
+    if (ANativeWindow_lock(L->win, &buf, NULL) != 0) return -4;
     int format = buf.format;
     if (format != WINDOW_FORMAT_RGBA_8888 && format != WINDOW_FORMAT_RGBX_8888 &&
         format != WINDOW_FORMAT_RGB_565) {
-        ANativeWindow_unlockAndPost(win);
-        ANativeWindow_release(win);
+        ANativeWindow_unlockAndPost(L->win);
         return -5;
     }
     int full = colorspace == 0;
     int dw = buf.width > 0 ? buf.width : width;
     int dh = buf.height > 0 ? buf.height : height;
     uint8_t *base = (uint8_t *)buf.bits;
-    for (int dy = 0; dy < dh; dy++) {
-        int sy = (int)(((int64_t)dy * height) / dh);
-        if (sy >= height) sy = height - 1;
-        uint8_t *row = base + (size_t)dy * (size_t)buf.stride * (format == WINDOW_FORMAT_RGB_565 ? 2 : 4);
-        for (int dx = 0; dx < dw; dx++) {
-            int sx = (int)(((int64_t)dx * width) / dw);
-            if (sx >= width) sx = width - 1;
-            int Y = yp[(size_t)sy * y_stride + sx];
-            int cx = sx / 2;
-            int cy = sy / 2;
-            int U = up[(size_t)cy * uv_stride + cx];
-            int V = vp[(size_t)cy * uv_stride + cx];
-            int r, g, b;
-            yuv_to_rgb(Y, U, V, full, &r, &g, &b);
-            write_pixel(row, format, dx, r, g, b);
+    int bpp = format == WINDOW_FORMAT_RGB_565 ? 2 : 4;
+    size_t stride_bytes = (size_t)buf.stride * (size_t)bpp;
+
+    if (dw == width && dh == height) {
+        /* 1:1 快路径：GPU 已按视频原始尺寸显示，不再做两百万次除法。 */
+        for (int sy = 0; sy < height; sy++) {
+            uint8_t *row = base + (size_t)sy * stride_bytes;
+            const uint8_t *yr = yp + (size_t)sy * (size_t)y_stride;
+            const uint8_t *ur = up + (size_t)(sy >> 1) * (size_t)uv_stride;
+            const uint8_t *vr = vp + (size_t)(sy >> 1) * (size_t)uv_stride;
+            for (int sx = 0; sx < width; sx++) {
+                int Y = yr[sx];
+                int U = ur[sx >> 1];
+                int V = vr[sx >> 1];
+                int r, g, b;
+                yuv_to_rgb(Y, U, V, full, matrix, &r, &g, &b);
+                write_pixel(row, format, sx, r, g, b);
+            }
         }
+    } else {
+        /* 非 1:1 退路：预计算 dx→sx 与每行 sy，避免逐像素 64 位除法。 */
+        int *sx_map = (int *)malloc(sizeof(int) * (size_t)dw);
+        int *sy_map = (int *)malloc(sizeof(int) * (size_t)dh);
+        if (sx_map && sy_map) {
+            for (int dx = 0; dx < dw; dx++) {
+                int sx = (int)(((int64_t)dx * width) / dw);
+                sx_map[dx] = sx < width ? sx : width - 1;
+            }
+            for (int dy = 0; dy < dh; dy++) {
+                int sy = (int)(((int64_t)dy * height) / dh);
+                sy_map[dy] = sy < height ? sy : height - 1;
+            }
+        }
+        for (int dy = 0; dy < dh; dy++) {
+            int sy = sy_map ? sy_map[dy] : (int)(((int64_t)dy * height) / dh);
+            if (sy >= height) sy = height - 1;
+            uint8_t *row = base + (size_t)dy * stride_bytes;
+            const uint8_t *yr = yp + (size_t)sy * (size_t)y_stride;
+            const uint8_t *ur = up + (size_t)(sy >> 1) * (size_t)uv_stride;
+            const uint8_t *vr = vp + (size_t)(sy >> 1) * (size_t)uv_stride;
+            for (int dx = 0; dx < dw; dx++) {
+                int sx = sx_map ? sx_map[dx] : (int)(((int64_t)dx * width) / dw);
+                if (sx >= width) sx = width - 1;
+                int Y = yr[sx];
+                int U = ur[sx >> 1];
+                int V = vr[sx >> 1];
+                int r, g, b;
+                yuv_to_rgb(Y, U, V, full, matrix, &r, &g, &b);
+                write_pixel(row, format, dx, r, g, b);
+            }
+        }
+        free(sx_map);
+        free(sy_map);
     }
-    ANativeWindow_unlockAndPost(win);
-    ANativeWindow_release(win);
+    ANativeWindow_unlockAndPost(L->win);
     return 0;
 }
 
@@ -340,10 +454,17 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeFlush(JNIEnv *env, jcla
 
 JNIEXPORT void JNICALL
 Java_com_noneplayer_core_media_legacy_LegacyNative_nativeRelease(JNIEnv *env, jclass clazz, jlong handle) {
-    (void)env;
     (void)clazz;
     Legacy *L = (Legacy *)handle;
     if (!L) return;
+    if (L->win) {
+        ANativeWindow_release(L->win);
+        L->win = NULL;
+    }
+    if (L->surface_ref) {
+        (*env)->DeleteGlobalRef(env, L->surface_ref);
+        L->surface_ref = NULL;
+    }
     queue_drop_all(L);
     avcodec_free_context(&L->ctx);
     av_frame_free(&L->frame);

@@ -16,10 +16,11 @@ public final class LegacyNative {
 
     static native boolean nativePeek(long handle, int[] info, long[] pts);
 
-    static native void nativeCopy(long handle, ByteBuffer y, ByteBuffer u, ByteBuffer v);
+    static native boolean nativeCopy(long handle, ByteBuffer y, ByteBuffer u, ByteBuffer v);
 
     /** @return 0 成功，负数表示 Surface 拒绝绘制 */
     static native int nativeRender(
+            long handle,
             ByteBuffer y,
             int yStride,
             ByteBuffer u,
@@ -28,6 +29,7 @@ public final class LegacyNative {
             int width,
             int height,
             int colorspace,
+            int matrix,
             Surface surface);
 
     static native void nativeFlush(long handle);

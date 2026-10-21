@@ -50,6 +50,7 @@ import androidx.navigation.compose.composable
 import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.ProbeMemo
+import com.noneplayer.core.media.SurfaceCloneMemo
 import com.noneplayer.core.data.ThemeMode
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.NpAnchorHolder
@@ -649,6 +650,7 @@ private fun DecoderCapabilityRow() {
     }
     // 批次 8（E39 余项）：最近一次起播探测——排障时先看这里（"刚才那个文件为什么不行"）
     val lastProbe by ProbeMemo.last.collectAsStateWithLifecycle()
+    val lastSurfaceClone by SurfaceCloneMemo.last.collectAsStateWithLifecycle()
     Column {
         NpSettingRow(
             title = "解码能力检测",
@@ -701,6 +703,14 @@ private fun DecoderCapabilityRow() {
                                 maxLines = 2,
                             )
                         }
+                    }
+                    lastSurfaceClone?.let { message ->
+                        Text(
+                            text = "最近 Surface 克隆失败：$message",
+                            style = com.noneplayer.core.ui.NpMonoSmall,
+                            color = ink.danger,
+                            maxLines = 2,
+                        )
                     }
                     diagnostics.forEach { d ->
                         Row(verticalAlignment = Alignment.CenterVertically) {

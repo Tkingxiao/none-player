@@ -14,6 +14,10 @@ class LegacyCodec(
     height: Int,
 ) : AutoCloseable {
 
+    private var yBuffer: ByteBuffer? = null
+    private var uBuffer: ByteBuffer? = null
+    private var vBuffer: ByteBuffer? = null
+
     private var handle: Long = LegacyNative.nativeCreate(
         codecName,
         extradata ?: ByteArray(0),
@@ -35,7 +39,7 @@ class LegacyCodec(
 
     fun receive(): LegacyFrame? {
         if (handle == 0L || LegacyNative.nativePending(handle) <= 0) return null
-        val info = IntArray(5)
+        val info = IntArray(6)
         val pts = LongArray(1)
         if (!LegacyNative.nativePeek(handle, info, pts)) return null
         val width = info[0]
@@ -43,15 +47,20 @@ class LegacyCodec(
         val yStride = info[2]
         val uvStride = info[3]
         val colorspace = info[4]
+        val matrix = info[5]
         if (width <= 0 || height <= 0 || yStride <= 0 || uvStride <= 0) {
             throw LegacyDecoderException("帧尺寸无效 ${width}x$height")
         }
         val uvHeight = (height + 1) / 2
-        val y = ByteBuffer.allocateDirect(yStride * height)
-        val u = ByteBuffer.allocateDirect(uvStride * uvHeight)
-        val v = ByteBuffer.allocateDirect(uvStride * uvHeight)
-        LegacyNative.nativeCopy(handle, y, u, v)
-        return LegacyFrame(width, height, y, u, v, yStride, uvStride, colorspace, pts[0])
+        // A19：direct buffer 按最大尺寸复用；调用方（pump）在下一帧 receive 前已消费完，
+        // 不允许长期持有 LegacyFrame 的 ByteBuffer。
+        val y = reuse(yBuffer, yStride * height).also { yBuffer = it }
+        val u = reuse(uBuffer, uvStride * uvHeight).also { uBuffer = it }
+        val v = reuse(vBuffer, uvStride * uvHeight).also { vBuffer = it }
+        if (!LegacyNative.nativeCopy(handle, y, u, v)) {
+            throw LegacyDecoderException("拷贝解码帧失败")
+        }
+        return LegacyFrame(width, height, y, u, v, yStride, uvStride, colorspace, matrix, pts[0])
     }
 
     fun render(
@@ -63,11 +72,20 @@ class LegacyCodec(
         width: Int,
         height: Int,
         colorspace: Int,
+        matrix: Int,
         surface: Surface,
     ) {
-        val rc = LegacyNative.nativeRender(y, yStride, u, uvStride, v, width, height, colorspace, surface)
+        val rc = LegacyNative.nativeRender(handle, y, yStride, u, uvStride, v, width, height, colorspace, matrix, surface)
         if (rc < 0) throw LegacyDecoderException("画到 Surface 失败 ($rc)")
     }
+
+    private fun reuse(buffer: ByteBuffer?, size: Int): ByteBuffer =
+        if (buffer != null && buffer.capacity() >= size) {
+            buffer.clear()
+            buffer
+        } else {
+            ByteBuffer.allocateDirect(size)
+        }
 
     fun flush() {
         if (handle != 0L) LegacyNative.nativeFlush(handle)
@@ -90,6 +108,8 @@ class LegacyFrame(
     val yStride: Int,
     val uvStride: Int,
     val colorspace: Int,
+    /** A19: 0 = BT.601, 1 = BT.709 */
+    val matrix: Int,
     val ptsUs: Long,
 )
 

@@ -143,6 +143,7 @@ private class LegacyVideoDecoder(
         freeOut.add(buffer)
     }
     private var outputStartTimeUs = C.TIME_UNSET
+    private val outputMatrices = java.util.WeakHashMap<VideoDecoderOutputBuffer, Int>()
     private var skipCarry = 0
     private var eosQueued = false
     private var released = false
@@ -199,6 +200,7 @@ private class LegacyVideoDecoder(
     override fun flush() {
         codec.flush()
         eosQueued = false
+        outputMatrices.clear()
         skipCarry = 0
         dequeuedIn?.let {
             it.clear()
@@ -228,6 +230,7 @@ private class LegacyVideoDecoder(
                 width = buffer.width,
                 height = buffer.height,
                 colorspace = buffer.colorspace,
+                matrix = outputMatrices.remove(buffer) ?: 0,
                 surface = surface,
             )
         } catch (e: LegacyDecoderException) {
@@ -256,6 +259,7 @@ private class LegacyVideoDecoder(
         copyPlane(frame.y, output.yuvPlanes!![0])
         copyPlane(frame.u, output.yuvPlanes!![1])
         copyPlane(frame.v, output.yuvPlanes!![2])
+        outputMatrices[output] = frame.matrix
         output.skippedOutputBufferCount = skipCarry
         skipCarry = 0
         return output

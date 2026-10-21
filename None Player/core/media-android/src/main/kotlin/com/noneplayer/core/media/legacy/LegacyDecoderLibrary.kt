@@ -1,5 +1,6 @@
 package com.noneplayer.core.media.legacy
 
+import android.os.SystemClock
 import android.util.Log
 import com.noneplayer.core.media.MediaNames
 
@@ -13,9 +14,13 @@ import com.noneplayer.core.media.MediaNames
 object LegacyDecoderLibrary {
 
     private const val TAG = "LegacyDecoder"
+    private const val RETRY_MS = 30_000L
 
     @Volatile
     private var loaded: Boolean? = null
+
+    @Volatile
+    private var failedAtElapsed = 0L
 
     fun codecName(mime: String?): String? = when (mime) {
         MediaNames.MIME_WMV2 -> "wmv2"
@@ -29,18 +34,30 @@ object LegacyDecoderLibrary {
     }
 
     fun isAvailable(): Boolean {
-        loaded?.let { return it }
+        loaded?.let { cached ->
+            if (cached) return true
+            if (SystemClock.elapsedRealtime() - failedAtElapsed < RETRY_MS) return false
+        }
+        // A19：dlopen 不占着锁；并发重复加载由 ClassLoader 自身串行化，失败仍是否定结果。
+        val ok = try {
+            System.loadLibrary("nplegacy")
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "libnplegacy 加载失败，退回不可播：${t.javaClass.simpleName}: ${t.message}")
+            false
+        }
         synchronized(this) {
-            loaded?.let { return it }
-            val ok = try {
-                System.loadLibrary("nplegacy")
-                true
-            } catch (t: Throwable) {
-                Log.d(TAG, "libnplegacy 加载失败，退回不可播：${t.javaClass.simpleName}: ${t.message}")
-                false
-            }
             loaded = ok
-            return ok
+            failedAtElapsed = if (ok) 0L else SystemClock.elapsedRealtime()
+        }
+        return ok
+    }
+
+    /** A19：失败后允许诊断入口主动重试（清掉否定缓存）。 */
+    fun reset() {
+        synchronized(this) {
+            loaded = null
+            failedAtElapsed = 0L
         }
     }
 }
