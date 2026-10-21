@@ -1723,18 +1723,22 @@ internal fun MediaCover(
                 .build()
         }
     }
-    if (model != null) {
-        AsyncImage(
-            model = model,
-            // E128：封面是**装饰**——四张调用点（网格卡/列表行/文件夹卡/详情海报）旁边
-            // 都有标题文本，卡片语义合并后（NpMediaCard 的 mergeDescendants），
-            // 保留 item.title 会让 TalkBack 把标题读两遍。读屏用户不缺这一条。
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = modifier.fillMaxSize(),
-        )
-    } else {
-        NpCoverPlaceholder(hue = hue, modifier = modifier)
+    // A25：占位铺在图片下方而不是塞进 AsyncImage 的 placeholder/error——后者只能给
+    // 单色块，抽帧失败时会把设计稿的色相渐变+胶片图标盖成一块死灰。载入完成前/失败后
+    // 自然露出 NpCoverPlaceholder，与“没有封面”的形态一致。
+    Box(modifier = modifier.fillMaxSize()) {
+        NpCoverPlaceholder(hue = hue, modifier = Modifier.fillMaxSize())
+        if (model != null) {
+            AsyncImage(
+                model = model,
+                // E128：封面是**装饰**——四张调用点（网格卡/列表行/文件夹卡/详情海报）旁边
+                // 都有标题文本，卡片语义合并后（NpMediaCard 的 mergeDescendants），
+                // 保留 item.title 会让 TalkBack 把标题读两遍。读屏用户不缺这一条。
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize(),
+            )
+        }
     }
 }
 
@@ -1842,7 +1846,7 @@ private fun FolderBrowser(
         // 扫描目录管理不放在列表第一行：点首页文件夹进来时，这一行会让整页看起来像
         // 「管理文件夹」。入口改到文件夹根层顶栏的文件夹图标。
         if (noSubfolders) {
-            item(key = "hint", span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "hint", span = { GridItemSpan(maxLineSpan) }, contentType = "hint") {
                 Text(
                     text = "该目录下没有子文件夹，已按全部媒体展示",
                     style = NpTypography.bodySmall,
@@ -1851,7 +1855,7 @@ private fun FolderBrowser(
                 )
             }
         }
-        item(key = "controls", span = { GridItemSpan(maxLineSpan) }) {
+        item(key = "controls", span = { GridItemSpan(maxLineSpan) }, contentType = "controls") {
             ControlsRow(
                 filter = filter,
                 onFilter = onFilter,
@@ -1871,7 +1875,7 @@ private fun FolderBrowser(
         // 选集入口放在**控件行之下、内容之上**——原来在列表尾部，一屏几十条要滚到底才看得见。
         val episodes = node.directVideos
         if (episodes.size > 1 && shownVideos.isNotEmpty()) {
-            item(key = "episodes-entry", span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "episodes-entry", span = { GridItemSpan(maxLineSpan) }, contentType = "episodes") {
                 EpisodesEntry(
                     multiCount = shownVideos.size,
                     onOpen = { onOpenEpisodes(episodes) },
@@ -1889,6 +1893,7 @@ private fun FolderBrowser(
             node.children,
             key = { _, child -> "folder:${child.path}" },
             span = { _, _ -> GridItemSpan(if (viewStyle == "list") maxLineSpan else 1) },
+            contentType = { _, _ -> if (viewStyle == "list") "folder-list" else "folder-card" },
         ) { index, child ->
             val folderModifier = Modifier
                 .animateItem(fadeInSpec = itemFade, placementSpec = null, fadeOutSpec = itemFade)
@@ -1926,6 +1931,7 @@ private fun FolderBrowser(
                 shownVideos,
                 key = { _, item -> "video:${item.sourceId}:${item.id}" },
                 span = { _, _ -> GridItemSpan(maxLineSpan) },
+                contentType = { _, _ -> "video-list" },
             ) { index, item ->
                 MediaListRow(
                     item = item,
@@ -1940,6 +1946,7 @@ private fun FolderBrowser(
             gridItemsIndexed(
                 shownVideos,
                 key = { _, item -> "video:${item.sourceId}:${item.id}" },
+                contentType = { _, _ -> "video-card" },
             ) { index, item ->
                 MediaCardBody(
                     item = item,
@@ -1952,7 +1959,7 @@ private fun FolderBrowser(
             }
         }
         if (shownVideos.isEmpty() && node.children.isEmpty() && node.totalCount == 0) {
-            item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "empty", span = { GridItemSpan(maxLineSpan) }, contentType = "empty") {
                 NpEmptyState(
                     title = "此文件夹没有内容",
                     message = "换个筛选条件看看。",
@@ -2416,7 +2423,7 @@ private fun AggregateList(
         verticalArrangement = Arrangement.spacedBy(16.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
-        item(key = "head", span = { GridItemSpan(maxLineSpan) }) {
+        item(key = "head", span = { GridItemSpan(maxLineSpan) }, contentType = "head") {
             if (isLead) {
                 // E134：`‹ 返回` chip 已删（顶栏有返回，内容区不再重复）；
                 // 这里只留「标题 + N 项」。
@@ -2443,7 +2450,7 @@ private fun AggregateList(
                 }
             }
         }
-        item(key = "controls", span = { GridItemSpan(maxLineSpan) }) {
+        item(key = "controls", span = { GridItemSpan(maxLineSpan) }, contentType = "controls") {
             ControlsRow(
                 filter = filter,
                 onFilter = onFilter,
@@ -2459,7 +2466,7 @@ private fun AggregateList(
                 onToggleAscending = onToggleAscending,
             )
         }
-        item(key = "lead", span = { GridItemSpan(maxLineSpan) }) {
+        item(key = "lead", span = { GridItemSpan(maxLineSpan) }, contentType = "lead") {
             // 设计稿 `.lead`：列表上方的 13px muted 副标题（"未看完的视频与音频"）
             Text(
                 text = meta.second,
@@ -2469,7 +2476,7 @@ private fun AggregateList(
             )
         }
         if (shown.isEmpty()) {
-            item(key = "empty", span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "empty", span = { GridItemSpan(maxLineSpan) }, contentType = "empty") {
                 NpEmptyState(
                     title = "暂无内容",
                     message = "换个筛选条件看看。",
@@ -2478,7 +2485,7 @@ private fun AggregateList(
         }
         // E134：选集入口从列表尾部移到"lead"之下（与文件夹页同口径：入口在内容之前）
         if (multi.isNotEmpty()) {
-            item(key = "episodes-entry", span = { GridItemSpan(maxLineSpan) }) {
+            item(key = "episodes-entry", span = { GridItemSpan(maxLineSpan) }, contentType = "episodes") {
                 EpisodesEntry(
                     multiCount = multi.size,
                     onOpen = { onOpenEpisodes(episodes) },
@@ -2490,6 +2497,7 @@ private fun AggregateList(
                 shown,
                 key = { _, item -> "${item.sourceId}:${item.id}" },
                 span = { _, _ -> GridItemSpan(maxLineSpan) },
+                contentType = { _, _ -> "video-list" },
             ) { index, item ->
                 MediaListRow(
                     item = item,
@@ -2504,6 +2512,7 @@ private fun AggregateList(
             gridItemsIndexed(
                 shown,
                 key = { _, item -> "${item.sourceId}:${item.id}" },
+                contentType = { _, _ -> "video-card" },
             ) { index, item ->
                 MediaCardBody(
                     item = item,
