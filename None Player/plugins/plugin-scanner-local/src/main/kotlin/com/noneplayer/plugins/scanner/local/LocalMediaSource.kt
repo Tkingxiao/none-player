@@ -188,6 +188,10 @@ class LocalMediaSource(
     @Volatile
     private var lastScanFinishedAt = 0L
 
+    /** A25：辅助 I/O 失败短 TTL（缩略图生成 / AVI 时长读头）。 */
+    private val coverFailures = ScanFailureMemo()
+    private val aviDurationFailures = ScanFailureMemo()
+
     /**
      * 扫描互斥闸门。
      *
@@ -498,10 +502,16 @@ class LocalMediaSource(
             mimeType.contains("avi", ignoreCase = true) ||
             mimeType.equals("video/x-msvideo", ignoreCase = true)
         if (!avi) return this
+        if (aviDurationFailures.hasFailed(uri)) return this
         val ms = runCatching {
             context.contentResolver.openInputStream(uri.toUri())?.use { AviDuration.read(it) }
         }.getOrNull() ?: 0L
-        return if (ms > 0L) copy(durationMs = ms) else this
+        if (ms <= 0L) {
+            aviDurationFailures.markFailed(uri)
+            return this
+        }
+        aviDurationFailures.markOk(uri)
+        return copy(durationMs = ms)
     }
 
     private fun isJunkFile(name: String, sizeBytes: Long): Boolean {
@@ -607,7 +617,9 @@ class LocalMediaSource(
             // 先落成本地 val 再判：直接写 `File(it.coverUri)` 时属性链上的可空性
             // 跨模块（:core:media）不进 Smart Cast，Java 构造器会收到 String? 告警
             val cover = it.coverUri
-            !it.id.startsWith(AUDIO_ID_PREFIX) && (cover == null || !File(cover).isFile)
+            !it.id.startsWith(AUDIO_ID_PREFIX) &&
+                (cover == null || !File(cover).isFile) &&
+                !coverFailures.hasFailed(it.uri)
         }
         if (pending.isEmpty()) {
             onProgress?.invoke(items.size, items.size)
@@ -621,7 +633,13 @@ class LocalMediaSource(
             pending.map { item ->
                 async(dispatchers.io) {
                     gate.withPermit {
-                        coverFor(item)?.let { covers[item.id] = it }
+                        val cover = coverFor(item)
+                        if (cover != null) {
+                            coverFailures.markOk(item.uri)
+                            covers[item.id] = cover
+                        } else {
+                            coverFailures.markFailed(item.uri)
+                        }
                         onProgress?.invoke(done.incrementAndGet(), items.size)
                     }
                 }
