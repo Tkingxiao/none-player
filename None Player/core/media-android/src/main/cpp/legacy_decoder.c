@@ -12,7 +12,9 @@
 
 #define LOG_TAG "LegacyDecoder"
 #define ALOG(...) __android_log_print(ANDROID_LOG_DEBUG, LOG_TAG, __VA_ARGS__)
-#define MAX_QUEUE 16
+/* A19: 4 帧足以喂饱 Media3 的输出池；更深的队列只会增加常驻 YUV 内存。 */
+#define MAX_QUEUE 4
+#define POOL_MAX MAX_QUEUE
 
 typedef struct Frame {
     int width;
@@ -25,7 +27,17 @@ typedef struct Frame {
     uint8_t *y;
     uint8_t *u;
     uint8_t *v;
+    size_t y_cap;
+    size_t uv_cap;
 } Frame;
+
+typedef struct PlanePool {
+    uint8_t *y;
+    uint8_t *u;
+    uint8_t *v;
+    size_t y_cap;
+    size_t uv_cap;
+} PlanePool;
 
 typedef struct Legacy {
     AVCodecContext *ctx;
@@ -34,6 +46,13 @@ typedef struct Legacy {
     Frame queue[MAX_QUEUE];
     int qh;
     int qn;
+    /* A19: 解码帧离开队列后按尺寸回收到池里，稳态不再每帧 malloc/free。 */
+    PlanePool pool[POOL_MAX];
+    int pool_n;
+    /* A19: 队列满时暂存一帧，等 Kotlin 取走后再入队，形成背压而不是报错。 */
+    AVFrame *pending;
+    int has_pending;
+    int eof;
     /* A19: 窗口句柄按 Surface 缓存，几何只在尺寸变化时设置。 */
     ANativeWindow *win;
     jobject surface_ref;
@@ -41,26 +60,80 @@ typedef struct Legacy {
     int win_h;
 } Legacy;
 
-static void frame_clear(Frame *f) {
-    free(f->y);
-    free(f->u);
-    free(f->v);
+static void frame_clear(Legacy *L, Frame *f) {
+    if (f->y) {
+        if (L && L->pool_n < POOL_MAX) {
+            PlanePool *p = &L->pool[L->pool_n++];
+            p->y = f->y;
+            p->u = f->u;
+            p->v = f->v;
+            p->y_cap = f->y_cap;
+            p->uv_cap = f->uv_cap;
+        } else {
+            free(f->y);
+            free(f->u);
+            free(f->v);
+        }
+    }
     memset(f, 0, sizeof(*f));
+}
+
+static void pool_clear(Legacy *L) {
+    for (int i = 0; i < L->pool_n; i++) {
+        free(L->pool[i].y);
+        free(L->pool[i].u);
+        free(L->pool[i].v);
+    }
+    L->pool_n = 0;
+}
+
+static int frame_alloc(Legacy *L, Frame *out, size_t y_bytes, size_t uv_bytes) {
+    for (int i = 0; i < L->pool_n; i++) {
+        PlanePool *p = &L->pool[i];
+        if (p->y_cap >= y_bytes && p->uv_cap >= uv_bytes) {
+            out->y = p->y;
+            out->u = p->u;
+            out->v = p->v;
+            out->y_cap = p->y_cap;
+            out->uv_cap = p->uv_cap;
+            L->pool[i] = L->pool[--L->pool_n];
+            return 0;
+        }
+    }
+    if (L->pool_n >= POOL_MAX) {
+        PlanePool *p = &L->pool[--L->pool_n];
+        free(p->y);
+        free(p->u);
+        free(p->v);
+    }
+    uint8_t *y = (uint8_t *)malloc(y_bytes);
+    uint8_t *u = (uint8_t *)malloc(uv_bytes);
+    uint8_t *v = (uint8_t *)malloc(uv_bytes);
+    if (!y || !u || !v) {
+        free(y);
+        free(u);
+        free(v);
+        return AVERROR(ENOMEM);
+    }
+    out->y = y;
+    out->u = u;
+    out->v = v;
+    out->y_cap = y_bytes;
+    out->uv_cap = uv_bytes;
+    return 0;
 }
 
 static void queue_drop_all(Legacy *L) {
     while (L->qn > 0) {
-        frame_clear(&L->queue[L->qh]);
+        frame_clear(L, &L->queue[L->qh]);
         L->qh = (L->qh + 1) % MAX_QUEUE;
         L->qn--;
     }
 }
 
 static int enqueue_frame(Legacy *L, const AVFrame *f) {
-    if (L->qn >= MAX_QUEUE) {
-        ALOG("frame queue full");
-        return AVERROR(ENOMEM);
-    }
+    // A19：队列满返回 EAGAIN，由调用方暂存 pending，不再丢帧也不再报终态错误。
+    if (L->qn >= MAX_QUEUE) return AVERROR(EAGAIN);
     if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) {
         // A19：非 YUV420 帧跳过并计数，不要让整部片子以解码失败告终。
         ALOG("unsupported pix_fmt %d, dropping frame", f->format);
@@ -74,12 +147,10 @@ static int enqueue_frame(Legacy *L, const AVFrame *f) {
     int uv_h = (h + 1) / 2;
     Frame *out = &L->queue[(L->qh + L->qn) % MAX_QUEUE];
     memset(out, 0, sizeof(*out));
-    out->y = (uint8_t *)malloc((size_t)y_stride * (size_t)h);
-    out->u = (uint8_t *)malloc((size_t)uv_stride * (size_t)uv_h);
-    out->v = (uint8_t *)malloc((size_t)uv_stride * (size_t)uv_h);
-    if (!out->y || !out->u || !out->v) {
-        frame_clear(out);
-        return AVERROR(ENOMEM);
+    int a = frame_alloc(L, out, (size_t)y_stride * (size_t)h, (size_t)uv_stride * (size_t)uv_h);
+    if (a < 0) {
+        frame_clear(L, out);
+        return a;
     }
     for (int row = 0; row < h; row++) {
         memcpy(out->y + (size_t)row * y_stride, f->data[0] + (size_t)row * f->linesize[0], (size_t)w);
@@ -114,10 +185,27 @@ static int enqueue_frame(Legacy *L, const AVFrame *f) {
     return 0;
 }
 
+static int enqueue_pending(Legacy *L) {
+    if (!L->has_pending) return 0;
+    int e = enqueue_frame(L, L->pending);
+    if (e == AVERROR(EAGAIN)) return 0;
+    if (e < 0) return e;
+    av_frame_unref(L->pending);
+    L->has_pending = 0;
+    return 0;
+}
+
 static int drain(Legacy *L) {
     for (;;) {
+        int p = enqueue_pending(L);
+        if (p < 0) return p;
+        if (L->has_pending) return 0;
         int r = avcodec_receive_frame(L->ctx, L->frame);
-        if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) return 0;
+        if (r == AVERROR(EAGAIN)) return 0;
+        if (r == AVERROR_EOF) {
+            L->eof = 1;
+            return 0;
+        }
         if (r == AVERROR_INVALIDDATA) {
             // A19：截断/损坏帧丢掉继续，不把整部片子打成终态。
             ALOG("invalid data, dropping frame");
@@ -126,9 +214,30 @@ static int drain(Legacy *L) {
         }
         if (r < 0) return r;
         int e = enqueue_frame(L, L->frame);
+        if (e == AVERROR(EAGAIN)) {
+            if (av_frame_ref(L->pending, L->frame) < 0) {
+                av_frame_unref(L->frame);
+                return AVERROR(ENOMEM);
+            }
+            L->has_pending = 1;
+            e = 0;
+        }
         av_frame_unref(L->frame);
         if (e < 0) return e;
+        if (L->has_pending) return 0;
     }
+}
+
+/* 队列空出来后继续向解码器要帧；EOS 后的尾帧因此不会被 4 帧上限截断。 */
+static int refill(Legacy *L) {
+    int e;
+    if (L->qn >= MAX_QUEUE) return 0;
+    e = drain(L);
+    if (e < 0) {
+        ALOG("refill failed: %d", e);
+        return e;
+    }
+    return 0;
 }
 
 static int clamp8(int v) {
@@ -184,7 +293,8 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCreate(
     L->ctx = avcodec_alloc_context3(codec);
     L->frame = av_frame_alloc();
     L->pkt = av_packet_alloc();
-    if (!L->ctx || !L->frame || !L->pkt) {
+    L->pending = av_frame_alloc();
+    if (!L->ctx || !L->frame || !L->pkt || !L->pending) {
         ALOG("alloc failed for %s", name);
         goto fail;
     }
@@ -219,6 +329,7 @@ fail:
         avcodec_free_context(&L->ctx);
         av_frame_free(&L->frame);
         av_packet_free(&L->pkt);
+        av_frame_free(&L->pending);
         free(L);
     }
     return 0;
@@ -255,6 +366,7 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeSend(
     }
     av_packet_unref(L->pkt);
     if (r < 0) return r;
+    L->eof = 0;
     return drain(L);
 }
 
@@ -263,7 +375,17 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativePending(JNIEnv *env, jc
     (void)env;
     (void)clazz;
     Legacy *L = (Legacy *)handle;
-    return L ? L->qn : 0;
+    if (!L) return 0;
+    refill(L);
+    return L->qn;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_noneplayer_core_media_legacy_LegacyNative_nativeEof(JNIEnv *env, jclass clazz, jlong handle) {
+    (void)env;
+    (void)clazz;
+    Legacy *L = (Legacy *)handle;
+    return (L && L->eof) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -308,7 +430,7 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCopy(
     memcpy(yd, f->y, y_bytes);
     memcpy(ud, f->u, uv_bytes);
     memcpy(vd, f->v, uv_bytes);
-    frame_clear(f);
+    frame_clear(L, f);
     L->qh = (L->qh + 1) % MAX_QUEUE;
     L->qn--;
     return JNI_TRUE;
@@ -450,6 +572,9 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeFlush(JNIEnv *env, jcla
     if (!L || !L->ctx) return;
     avcodec_flush_buffers(L->ctx);
     queue_drop_all(L);
+    av_frame_unref(L->pending);
+    L->has_pending = 0;
+    L->eof = 0;
 }
 
 JNIEXPORT void JNICALL
@@ -466,8 +591,10 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeRelease(JNIEnv *env, jc
         L->surface_ref = NULL;
     }
     queue_drop_all(L);
+    pool_clear(L);
     avcodec_free_context(&L->ctx);
     av_frame_free(&L->frame);
     av_packet_free(&L->pkt);
+    av_frame_free(&L->pending);
     free(L);
 }

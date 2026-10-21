@@ -14,6 +14,8 @@ public final class LegacyNative {
 
     static native int nativePending(long handle);
 
+    static native boolean nativeEof(long handle);
+
     static native boolean nativePeek(long handle, int[] info, long[] pts);
 
     static native boolean nativeCopy(long handle, ByteBuffer y, ByteBuffer u, ByteBuffer v);

@@ -37,6 +37,10 @@ class LegacyCodec(
         if (rc < 0) throw LegacyDecoderException("送入 $rc")
     }
 
+    /** 解码器已把 EOS 前的所有帧交出来（队列也因此排空）。 */
+    val isEof: Boolean
+        get() = handle != 0L && LegacyNative.nativeEof(handle)
+
     fun receive(): LegacyFrame? {
         if (handle == 0L || LegacyNative.nativePending(handle) <= 0) return null
         val info = IntArray(6)

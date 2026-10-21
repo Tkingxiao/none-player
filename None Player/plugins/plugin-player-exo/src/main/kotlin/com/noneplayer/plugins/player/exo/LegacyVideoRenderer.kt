@@ -145,6 +145,7 @@ private class LegacyVideoDecoder(
     private var outputStartTimeUs = C.TIME_UNSET
     private val outputMatrices = java.util.WeakHashMap<VideoDecoderOutputBuffer, Int>()
     private var skipCarry = 0
+    private var eosReceived = false
     private var eosQueued = false
     private var released = false
 
@@ -180,11 +181,8 @@ private class LegacyVideoDecoder(
                 ByteArray(0)
             }
             codec.send(bytes, pts, eos)
+            if (eos) eosReceived = true
             pump(fallbackPts = pts)
-            if (eos) {
-                eosQueued = true
-                enqueueEos()
-            }
         } catch (e: LegacyDecoderException) {
             throw DecoderException(e.message ?: "legacy decoder", e)
         } finally {
@@ -199,6 +197,7 @@ private class LegacyVideoDecoder(
 
     override fun flush() {
         codec.flush()
+        eosReceived = false
         eosQueued = false
         outputMatrices.clear()
         skipCarry = 0
@@ -246,6 +245,11 @@ private class LegacyVideoDecoder(
                 continue
             }
             readyOut.add(fill(frame, fallbackPts))
+        }
+        // 原生队列上限只有 4 帧，EOS 后的尾帧要等解码器真正排空再发 EOS。
+        if (eosReceived && !eosQueued && codec.isEof) {
+            eosQueued = true
+            enqueueEos()
         }
     }
 

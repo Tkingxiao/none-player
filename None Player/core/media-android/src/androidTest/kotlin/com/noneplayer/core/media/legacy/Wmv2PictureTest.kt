@@ -18,6 +18,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.noneplayer.core.media.MediaNames
 import com.noneplayer.core.media.extract.Wmv2AviExtractor
 import java.io.File
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -64,6 +65,44 @@ class Wmv2PictureTest {
             }
         }
         assertTrue("saved=$saved", saved >= 1)
+    }
+
+    /**
+     * 队列只有 4 帧，EOS 时必须继续从解码器取尾帧，且 isEof 只在真正排空后置位。
+     * 45 个 AVI 视频包对应 45 帧（WMV2 无 B 帧），末帧仍要是彩条而不是池复用后的残影。
+     */
+    @Test
+    fun eosDrainsTailFramesAfterBoundedQueue() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val file = File(instrumentation.targetContext.cacheDir, "np-wmv2.avi")
+        instrumentation.context.assets.open("np-wmv2.avi").use { src ->
+            file.outputStream().use { src.copyTo(it) }
+        }
+        assertTrue("libnplegacy 加载失败", LegacyDecoderLibrary.isAvailable())
+        val samples = demux(file)
+        var decoded = 0
+        var tail: LegacyFrame? = null
+        LegacyCodec("wmv2", samples.extra, samples.width, samples.height).use { decoder ->
+            samples.packets.forEach { packet ->
+                decoder.send(packet.data, packet.timeUs, false)
+                while (true) {
+                    tail = decoder.receive() ?: break
+                    decoded++
+                }
+            }
+            assertTrue("普通包结束时不应已 EOF", !decoder.isEof)
+            decoder.send(ByteArray(0), 0L, true)
+            while (true) {
+                tail = decoder.receive() ?: break
+                decoded++
+            }
+            assertTrue("EOS 后 isEof 仍为假", decoder.isEof)
+        }
+        assertEquals("packets=${samples.packets.size}", samples.packets.size, decoded)
+        val last = checkNotNull(tail)
+        assertTrue("尾帧 PTS=${last.ptsUs}", last.ptsUs > 0)
+        assertTrue("尾帧疑似被池复用污染", lumaSpread(last) > 12)
+        assertColorBars(yuvFrameToPixels(last), last.width, samples.packets.size - 1)
     }
 
     /**
