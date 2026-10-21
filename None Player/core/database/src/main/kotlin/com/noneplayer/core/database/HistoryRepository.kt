@@ -27,7 +27,7 @@ import kotlinx.coroutines.withContext
  * `kernel.services.get<HistoryRepository>()` 取用（core-* 对插件是允许依赖，
  * 但走服务定位更贴合"内核级服务"的定位，见 §8.3）。
  *
- * **写入语义（§8.3/E12）**：播放中每 5s + 暂停/切集/退页 upsert；`<10s 且未完看`
+ * **写入语义（§8.3/E12/A24）**：播放中每 15s 窄更新 + 暂停/切集/退页整行 upsert；`<10s 且未完看`
  * 不写（切集瞬间的 0 附近位置会污染"继续观看"）；`watchedRatio ≥ 0.95` 视为看完，
  * 从「继续观看」里过滤掉。
  *
@@ -202,26 +202,38 @@ class HistoryRepository private constructor(
         if (!shouldPersist(positionMs, durationMs)) return true
         val written = storageWrite("record") {
             dao.upsert(
-                PlaybackHistoryEntity(
-                    mediaKey = HistoryEntry.keyOf(item),
-                    sourceId = item.sourceId,
-                    title = item.title,
-                    uri = item.uri,
-                    mime = item.mimeType,
-                    coverUri = item.coverUri,
-                    folder = item.folder,
-                    durationMs = durationMs,
-                    positionMs = positionMs,
-                    watchedRatio = watchedRatio(positionMs, durationMs),
-                    playCount = 0,
-                    lastPlayedAt = System.currentTimeMillis(),
-                    width = item.width,
-                    height = item.height,
-                    sizeBytes = item.sizeBytes,
-                    lastModifiedSec = item.lastModifiedSec,
-                ),
+                rowFor(item, positionMs, durationMs, System.currentTimeMillis()),
                 countPlay = countPlay,
             )
+        }
+        return written != null
+    }
+
+    /**
+     * A24：周期落点走窄更新（position/ratio/last_played_at），避免每 15s 读整行再覆盖
+     * 16 列。行不存在（首次落点早于 `markPlayed`，或旧数据被清）时回退整行 upsert，
+     * 保持与 [record] 相同的插入语义；失败仍由 [storageWrite] 收口并返回 false。
+     */
+    override suspend fun persistProgress(
+        item: MediaItem,
+        positionMs: Long,
+        durationMs: Long,
+    ): Boolean {
+        if (item.id.isEmpty() || item.uri.isEmpty()) return true
+        if (!shouldPersist(positionMs, durationMs)) return true
+        val key = HistoryEntry.keyOf(item)
+        val now = System.currentTimeMillis()
+        val written = storageWrite("persistProgress") {
+            val updated = dao.updateProgress(
+                key = key,
+                positionMs = positionMs,
+                watchedRatio = watchedRatio(positionMs, durationMs),
+                now = now,
+            )
+            if (updated == 0) {
+                dao.upsert(rowFor(item, positionMs, durationMs, now), countPlay = false)
+            }
+            Unit
         }
         return written != null
     }
@@ -476,6 +488,31 @@ class HistoryRepository private constructor(
 
         /** E12：进度门槛——低于它且未完看时不落盘（切集瞬间的 0 附近位置不污染历史） */
         const val MIN_PERSIST_POSITION_MS = 10_000L
+
+        /** 构造历史行（record / persistProgress 回退共用，避免两处字段漂移） */
+        private fun rowFor(
+            item: MediaItem,
+            positionMs: Long,
+            durationMs: Long,
+            now: Long,
+        ): PlaybackHistoryEntity = PlaybackHistoryEntity(
+            mediaKey = HistoryEntry.keyOf(item),
+            sourceId = item.sourceId,
+            title = item.title,
+            uri = item.uri,
+            mime = item.mimeType,
+            coverUri = item.coverUri,
+            folder = item.folder,
+            durationMs = durationMs,
+            positionMs = positionMs,
+            watchedRatio = watchedRatio(positionMs, durationMs),
+            playCount = 0,
+            lastPlayedAt = now,
+            width = item.width,
+            height = item.height,
+            sizeBytes = item.sizeBytes,
+            lastModifiedSec = item.lastModifiedSec,
+        )
 
         /** 纯函数（可单测）：已看比例；时长未知时按 0 处理（完看判定只在时长可信时成立） */
         fun watchedRatio(positionMs: Long, durationMs: Long): Float {

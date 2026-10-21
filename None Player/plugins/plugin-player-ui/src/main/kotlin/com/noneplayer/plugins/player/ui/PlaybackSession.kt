@@ -799,7 +799,7 @@ class PlaybackSession(
         )
         scope.launch {
             withContext(Dispatchers.IO) {
-                val persisted = history.record(
+                val persisted = history.persistProgress(
                     target,
                     positionMs = snapshot.positionMs,
                     durationMs = snapshot.durationMs,

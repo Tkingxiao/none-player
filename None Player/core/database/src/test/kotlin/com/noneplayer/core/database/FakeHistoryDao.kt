@@ -66,6 +66,7 @@ internal class FakeHistoryDao : HistoryDao {
     var deleteError: Throwable? = null
     var clearError: Throwable? = null
     var bumpPlayError: Throwable? = null
+    var progressUpdateError: Throwable? = null
     var allHistoryKeysError: Throwable? = null
     var mimePatternError: Throwable? = null
     var addFavoriteError: Throwable? = null
@@ -169,6 +170,23 @@ internal class FakeHistoryDao : HistoryDao {
         maybeFail(bumpPlayError)
         val row = history[key] ?: return 0
         history[key] = row.copy(playCount = row.playCount + 1, lastPlayedAt = now)
+        return 1
+    }
+
+    override suspend fun updateProgress(
+        key: String,
+        positionMs: Long,
+        watchedRatio: Float,
+        now: Long,
+    ): Int {
+        writeCalls += "updateProgress:$key"
+        maybeFail(progressUpdateError)
+        val row = history[key] ?: return 0
+        history[key] = row.copy(
+            positionMs = positionMs,
+            watchedRatio = watchedRatio,
+            lastPlayedAt = now,
+        )
         return 1
     }
 

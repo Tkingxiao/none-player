@@ -142,6 +142,18 @@ internal interface HistoryDao {
     suspend fun bumpPlay(key: String, now: Long): Int
 
     /**
+     * A24：周期落点的窄更新——只写位置/进度/最近播放时间，不读出再整行覆盖 16 列。
+     *
+     * 返回受影响行数；0 = 行不存在（例如首次落点早于 `markPlayed`），调用方回退整行
+     * upsert。与 [bumpPlay] 一样用单条 UPDATE，避免和“进入播放”的并发读改写互相覆盖。
+     */
+    @Query(
+        "UPDATE playback_history SET position_ms = :positionMs, " +
+            "watched_ratio = :watchedRatio, last_played_at = :now WHERE media_key = :key",
+    )
+    suspend fun updateProgress(key: String, positionMs: Long, watchedRatio: Float, now: Long): Int
+
+    /**
      * 「进入播放」写入（§8.3/E12）：已有行只自增不覆盖其它列；没有行才落一条快照。
      * 整个判断 + 写入包在事务里，与 [upsert] 的读改写互斥。
      */
