@@ -538,9 +538,21 @@ class LocalMediaSource(
                 Log.e(TAG, "[诊断] 快照恢复列表出现重复 id：${dupKeys.take(5)}（共 ${dupKeys.size} 个）")
             }
         }
-        _media.value = items.map { it.withAviDuration() }
+        // A25：先发布快照原样，AVI 时长补读挪到首帧之后——旧实现 map{withAviDuration()}
+        // 会在 IO 线程上给每个 0 时长 AVI 串行读文件头，把首帧一起拖住。
+        _media.value = items
         hasSnapshot = true
         Log.i(TAG, "扫描索引快照已恢复：${items.size} 项（冷启动首帧不再等全量扫描）")
+        if (items.any { it.durationMs == 0L }) {
+            observerScope.launch(dispatchers.io) {
+                val filled = items.map { it.withAviDuration() }
+                // 只在列表仍是快照原样（扫描尚未提交新列表）时替换，避免回灌旧时长。
+                if (filled != items && _media.value == items) {
+                    _media.value = filled
+                    Log.i(TAG, "快照 AVI 时长后台补读完成：${filled.size} 项")
+                }
+            }
+        }
     }
 
     /** 把当前列表写为下次启动的基线；失败静默——快照是加速增益，不是真相来源 */
