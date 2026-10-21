@@ -63,9 +63,11 @@ class Kernel private constructor(
     private val scope: CoroutineScope,
 ) : KernelHost {
 
-    override val registry: ExtensionRegistry = DefaultExtensionRegistry()
+    private val extensionRegistry = DefaultExtensionRegistry()
+    override val registry: ExtensionRegistry get() = extensionRegistry
     override val events: EventBus = FlowEventBus()
-    override val services: ServiceLocator = DefaultServiceLocator()
+    private val serviceLocator = DefaultServiceLocator()
+    override val services: ServiceLocator get() = serviceLocator
 
     // E25：进程前台/后台状态。在本对象构造（= Application.onCreate，任何 Activity
     // 存在之前）时就装好 ActivityLifecycleCallbacks，计数不漏首个 Activity 的 onStart。
@@ -204,7 +206,19 @@ class Kernel private constructor(
         }
     }
 
-    /** 停机：逆序 onStop 释放资源（设计文档 §15.5） */
+    /**
+     * 停机：逆序 onStop 释放资源（设计文档 §15.5）。
+     *
+     * 契约：停机后允许重新 [boot]，且重建的是一套**新**的服务与扩展，不允许沿用停机前的
+     * 实例。因此 onStop 全部结束后要清空 [serviceLocator] 与 [extensionRegistry]：
+     *   - 不清服务：重引导时 `registerKernelServices()` 会撞上 `DefaultServiceLocator`
+     *     的重复注册检查，直接崩溃；
+     *   - 不清扩展：旧插件实例已被 onStop，但仍在注册表里，新插件实例追加进去，
+     *     查询会同时拿到已停机与在役的两份。
+     *
+     * 只由宿主在进程级收尾时调用；不要与 [boot] 并发调用（本方法把 bootGate 的复位放到
+     * 最后，允许下一次 boot 发生在清空完成之后，但开机与停机本身不串行）。
+     */
     suspend fun shutdown() {
         backgroundStartupJobs.forEach(Job::cancel)
         backgroundStartupJobs.clear()
@@ -215,6 +229,8 @@ class Kernel private constructor(
             }
             installed = emptyList()
         }
+        serviceLocator.clear()
+        extensionRegistry.clear()
         _bootState.value = BootState.Idle
         bootGate.set(false)
     }

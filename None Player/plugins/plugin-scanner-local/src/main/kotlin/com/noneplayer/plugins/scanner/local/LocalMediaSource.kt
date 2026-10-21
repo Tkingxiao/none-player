@@ -1253,6 +1253,11 @@ private fun readHead(uri: android.net.Uri, maxBytes: Int): ByteArray? = runCatch
 private fun sniffMimeCorrection(item: MediaItem): MediaItem {
     // .cue 分轨与原文件同 uri，逐轨重复嗅探纯属浪费 I/O
     if (item.isClipped) return item
+    // A25：MediaStore 已给出可信 media mime 时不再逐文件 openInputStream——大库首扫
+    // 最贵的一步就是给每条已索引媒体开流读 64 字节。needsSniff 只对缺失/通用二进制/
+    // 非媒体 mime 放行；已知媒体 mime 的“错扩展名”以 MediaStore 为准（失败面回到
+    // 扩展名错误本身，交给播放器 extractor 兜底）。
+    if (!ContainerSniffer.needsSniff(item.mimeType)) return item
     val head = readHead(item.uri.toUri(), ContainerSniffer.HEAD_BYTES) ?: return item
     val sniffed = ContainerSniffer.sniff(head) ?: return item
     if (sniffed.equals(item.mimeType, true)) return item

@@ -28,4 +28,12 @@ class DefaultServiceLocator : ServiceLocator {
         requireNotNull(services[clazz]) {
             "内核服务未注册: ${clazz.qualifiedName}。请在 Kernel.create 装配时注册。"
         } as T
+
+    /**
+     * 清空全部服务。仅供 `Kernel.shutdown()` 在插件 onStop 之后调用，让下一次 boot
+     * 重新注册新实例；运行期清空会让已启动的插件持有失效句柄。
+     */
+    fun clear() {
+        services.clear()
+    }
 }

@@ -9,13 +9,13 @@ import com.noneplayer.core.data.ThemeMode
 import com.noneplayer.kernel.BootState
 import com.noneplayer.kernel.Kernel
 import com.noneplayer.kernel.api.get
-import com.noneplayer.kernel.generated.DanmakuPluginIndex
-import com.noneplayer.kernel.generated.ExoPlayerPluginIndex
-import com.noneplayer.kernel.generated.FilenameEnricherPluginIndex
-import com.noneplayer.kernel.generated.LibraryPluginIndex
-import com.noneplayer.kernel.generated.LocalScannerPluginIndex
-import com.noneplayer.kernel.generated.PlayerUiPluginIndex
-import com.noneplayer.kernel.generated.ProfilePluginIndex
+import com.noneplayer.kernel.generated.DanmakuPluginIndex_com_noneplayer_plugins_danmaku
+import com.noneplayer.kernel.generated.ExoPlayerPluginIndex_com_noneplayer_plugins_player_exo
+import com.noneplayer.kernel.generated.FilenameEnricherPluginIndex_com_noneplayer_plugins_enricher_filename
+import com.noneplayer.kernel.generated.LibraryPluginIndex_com_noneplayer_plugins_library
+import com.noneplayer.kernel.generated.LocalScannerPluginIndex_com_noneplayer_plugins_scanner_local
+import com.noneplayer.kernel.generated.PlayerUiPluginIndex_com_noneplayer_plugins_player_ui
+import com.noneplayer.kernel.generated.ProfilePluginIndex_com_noneplayer_plugins_profile
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -62,13 +62,13 @@ class NonePlayerApplication : Application(), ImageLoaderFactory {
         kernel = Kernel.create(
             context = this,
             pluginIndexes = listOf(
-                LibraryPluginIndex(),
-                LocalScannerPluginIndex(),
-                ExoPlayerPluginIndex(),
-                PlayerUiPluginIndex(),
-                ProfilePluginIndex(),
-                FilenameEnricherPluginIndex(),
-                DanmakuPluginIndex(),
+                LibraryPluginIndex_com_noneplayer_plugins_library(),
+                LocalScannerPluginIndex_com_noneplayer_plugins_scanner_local(),
+                ExoPlayerPluginIndex_com_noneplayer_plugins_player_exo(),
+                PlayerUiPluginIndex_com_noneplayer_plugins_player_ui(),
+                ProfilePluginIndex_com_noneplayer_plugins_profile(),
+                FilenameEnricherPluginIndex_com_noneplayer_plugins_enricher_filename(),
+                DanmakuPluginIndex_com_noneplayer_plugins_danmaku(),
             ),
         )
         kernel.boot()

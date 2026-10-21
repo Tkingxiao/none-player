@@ -18,7 +18,11 @@ import com.google.devtools.ksp.validate
  * 对每个标注 `@PluginMarker` 的类：
  *  1. 校验它是具体类且实现了 `com.noneplayer.kernel.api.Plugin`；
  *  2. 校验存在可访问的无参构造（生成代码将直接 `XxxPlugin()` 实例化）；
- *  3. 生成 `com.noneplayer.kernel.generated.<SimpleName>PluginIndex`。
+ *  3. 生成 `com.noneplayer.kernel.generated.<SimpleName>PluginIndex_<包名>`。
+ *
+ * 索引类名带插件 FQN 的包信息：两个模块各有一个同名插件（如都叫 `LibraryPlugin`）
+ * 时，只用 simpleName 会生成同一个类名、互相覆盖或撞重复类。宿主仍在装配处显式
+ * 列出索引（默认发现机制不变），改名后编译期即可暴露漏改。
  *
  * 全部为编译期产物，零反射，不受 R8 混淆影响（设计文档 §3.3 方案 B）。
  */
@@ -109,10 +113,7 @@ class PluginMarkerProcessor(
     }
 
     private fun generateIndex(clazz: KSClassDeclaration, pluginFqn: String) {
-        val simpleName = clazz.simpleName.asString()
-        // LibraryPlugin -> LibraryPluginIndex（避免 LibraryPluginPluginIndex）
-        val base = simpleName.removeSuffix("Plugin")
-        val indexName = "${base}PluginIndex"
+        val indexName = generatedIndexName(pluginFqn)
 
         val containingFile = clazz.containingFile
         val dependencies = if (containingFile != null) Dependencies(false, containingFile) else Dependencies(false)
@@ -139,6 +140,22 @@ class PluginMarkerProcessor(
         }
         logger.info("kernel-ksp: generated $GENERATED_PACKAGE.$indexName for $pluginFqn")
     }
+}
+
+/**
+ * 生成索引类名：`<插件类名去掉 Plugin>PluginIndex_<插件包名>`。
+ *
+ * 只用 simpleName 会让不同模块里的同名插件生成同一个类名（覆盖或重复类）。
+ * 包名里的点与非标识符字符换成下划线；同一 FQN 跨构建稳定。
+ */
+internal fun generatedIndexName(pluginFqn: String): String {
+    fun sanitize(value: String) = value.map { if (it.isLetterOrDigit()) it else '_' }.joinToString("")
+
+    val simpleName = pluginFqn.substringAfterLast('.')
+    val base = sanitize(simpleName.removeSuffix("Plugin"))
+    val pkg = pluginFqn.substringBeforeLast('.', missingDelimiterValue = "")
+    val suffix = sanitize(pkg).ifEmpty { "root" }
+    return "${base}PluginIndex_$suffix"
 }
 
 class PluginMarkerProcessorProvider : SymbolProcessorProvider {

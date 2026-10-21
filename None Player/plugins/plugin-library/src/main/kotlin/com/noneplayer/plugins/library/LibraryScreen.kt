@@ -2547,63 +2547,6 @@ private fun aggregateMeta(mode: String): Pair<String, String> = when (mode) {
     else -> "最近添加" to "按加入时间排序"
 }
 
-/** 文件夹层级节点（path 为相对路径，如 "Movies/[SAIO-Raws]"；虚拟根为 ""） */
-data class FolderNode(
-    val path: String,
-    val name: String,
-    val directVideos: List<MediaItem>,
-    val children: List<FolderNode>,
-) {
-    /**
-     * 含所有子层级的媒体（角标与封面用），保持列表排序顺序。
-     *
-     * 在**构造期**算好而不是写成 `get()`：子树是自底向上构建的（`toNode` 先递归
-     * children 再建父节点），父节点构造时子节点的聚合已就绪，整棵树只算一遍。
-     * 此前是惰性 getter，而文件夹网格里每张卡都要读 `totalCount`/`videoCount`——
-     * 每张卡每次重组都重新递归整棵子树并分配中间列表，深目录 + 滚动时就是
-     * O(节点数 × 子树大小) 的重复分配。
-     */
-    val allVideos: List<MediaItem> = directVideos + children.flatMap { it.allVideos }
-    val totalCount: Int = allVideos.size
-
-    /** 只数视频的条目数（设计稿 `.folder .pill` 的「N 个视频」口径） */
-    val videoCount: Int = allVideos.count { it.kind == MediaKind.VIDEO }
-}
-
-private class MutableFolderNode(val path: String) {
-    val videos = mutableListOf<MediaItem>()
-}
-
-/** 由媒体的相对路径构建文件夹层级树（"A/B/C" → A > B > C，自动补齐中间层） */
-private fun buildFolderTree(items: List<MediaItem>): FolderNode {
-    val nodes = mutableMapOf<String, MutableFolderNode>()
-    fun nodeOf(path: String): MutableFolderNode = nodes.getOrPut(path) { MutableFolderNode(path) }
-
-    items.filter { it.folder != null }.forEach { item ->
-        val folder = item.folder!!
-        nodeOf(folder).videos += item
-        var parent = folder.substringBeforeLast('/', "")
-        while (true) {
-            nodeOf(parent)
-            if (parent.isEmpty()) break
-            parent = parent.substringBeforeLast('/', "")
-        }
-    }
-
-    fun toNode(mutable: MutableFolderNode): FolderNode {
-        val children = nodes.values
-            .filter { it.path.isNotEmpty() && it.path.substringBeforeLast('/', "") == mutable.path }
-            .map { toNode(it) }
-            .sortedBy { it.name.lowercase() }
-        return FolderNode(
-            path = mutable.path,
-            name = mutable.path.substringAfterLast('/'),
-            directVideos = mutable.videos,
-            children = children,
-        )
-    }
-    return toNode(nodeOf(""))
-}
 
 private fun FolderNode.findByPath(path: String?): FolderNode? {
     if (path == null) return this

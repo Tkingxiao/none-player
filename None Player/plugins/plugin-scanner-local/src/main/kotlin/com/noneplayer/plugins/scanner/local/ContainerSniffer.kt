@@ -6,9 +6,10 @@ package com.noneplayer.plugins.scanner.local
  *
  * 触发面（[needsSniff]）：MediaStore 不索引非媒体文件，所以"无扩展名"的来源是
  * `MediaStore.Files` 集合里 `media_type = 0` 的行（需"所有文件访问"才可见，见
- * [LocalMediaSource] 的 sniffUnknownFiles）；"错扩展名"则来自已索引文件——
- * MediaStore 的 mimeType 也是按扩展名推的，扩展名错了它就跟着错。
- * 两类都嗅探（每文件只读 64 字节，远轻于缩略图抽帧）。
+ * [LocalMediaSource] 的 sniffUnknownFiles）；"错扩展名"在 mime 不可信
+ * （缺失/通用二进制/非媒体）时同样会校正。**已带可信 video/audio mime 的条目
+ * 信任 MediaStore、不再逐条开流读头**（A25：大库首扫成本），由此错扩展名且仍落到
+ * 媒体 mime 的极端情况不在这里纠正，交给 extractor 的容器识别兜底。
  *
  * 规则表与 §12.4 行一致；认不出的头返回 null（**保持 MediaStore 原值**，
  * 绝不因为"嗅探不到"就把一个已知 mime 打回 unknown）。

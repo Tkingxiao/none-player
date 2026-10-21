@@ -51,8 +51,8 @@ interface Plugin {
  * 插件贡献索引——KSP 生成的编译期插件清单。
  *
  * 每个标注了 [PluginMarker] 的插件类，其所在模块会生成一个
- * `<插件类名>PluginIndex` 实现本接口；宿主 `:app` 在装配时收集所有索引，
- * 交给 `NonePlayerApplication` 引导内核。
+ * `<插件类名>PluginIndex_<插件包名>` 实现本接口（包名后缀用于区分不同模块的同名
+ * 插件）；宿主 `:app` 在装配时收集所有索引，交给 `NonePlayerApplication` 引导内核。
  */
 interface PluginIndex {
     fun plugins(): List<Plugin>

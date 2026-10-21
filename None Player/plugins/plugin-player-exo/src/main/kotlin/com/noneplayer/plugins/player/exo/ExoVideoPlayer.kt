@@ -785,26 +785,38 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         while (currentCoroutineContext().isActive) {
             // 控制器被换掉/断连后这个轮询必须退出：旧控制器上的读数不再有意义
             if (controller !== c || !c.isConnected) return
-            val position = c.currentPosition.coerceAtLeast(0)
-            if (_positionMs.value != position) _positionMs.value = position
-            val duration = c.duration
-            if (duration > 0 && _durationMs.value != duration) _durationMs.value = duration
-            // 缓冲前沿夹在 [0, duration]：未就绪/未知时 media3 可能给 TIME_UNSET 或超出值，
-            // 直接透传会让进度条画出一段超出时长的"假缓冲"
-            val buffered = c.bufferedPosition.coerceIn(0L, if (duration > 0) duration else Long.MAX_VALUE)
-            if (_bufferedPositionMs.value != buffered) _bufferedPositionMs.value = buffered
-            // REV-04：applied 身份只随已生效媒体更新
-            if (isAppliedMediaCurrent(c)) {
-                if (_appliedPositionMs.value != position) _appliedPositionMs.value = position
-                if (duration > 0 && _appliedDurationMs.value != duration) _appliedDurationMs.value = duration
-                // REV-11：挂起 seek 只属于当前已生效媒体，且位置收敛到目标附近才算落实
-                if (shouldClearPendingSeekAfterPoll(pendingSeek, _appliedMediaKey.value, position, SEEK_SETTLE_MS)) {
-                    pendingSeek = null
+            // A24：空队列不读位置/时长/缓冲（binder 都是 0 或旧值），只隔 1s 检查有没有新媒体。
+            val hasMedia = c.currentMediaItem != null
+            if (hasMedia) {
+                val position = c.currentPosition.coerceAtLeast(0)
+                if (_positionMs.value != position) _positionMs.value = position
+                val duration = c.duration
+                if (duration > 0 && _durationMs.value != duration) _durationMs.value = duration
+                // 缓冲前沿夹在 [0, duration]：未就绪/未知时 media3 可能给 TIME_UNSET 或超出值，
+                // 直接透传会让进度条画出一段超出时长的"假缓冲"
+                val buffered = c.bufferedPosition.coerceIn(0L, if (duration > 0) duration else Long.MAX_VALUE)
+                if (_bufferedPositionMs.value != buffered) _bufferedPositionMs.value = buffered
+                // REV-04：applied 身份只随已生效媒体更新
+                if (isAppliedMediaCurrent(c)) {
+                    if (_appliedPositionMs.value != position) _appliedPositionMs.value = position
+                    if (duration > 0 && _appliedDurationMs.value != duration) _appliedDurationMs.value = duration
+                    // REV-11：挂起 seek 只属于当前已生效媒体，且位置收敛到目标附近才算落实
+                    if (shouldClearPendingSeekAfterPoll(pendingSeek, _appliedMediaKey.value, position, SEEK_SETTLE_MS)) {
+                        pendingSeek = null
+                    }
                 }
+                // 字幕偏移非零时，按位置重取对应时间窗的 Cue（窗口边界由 onCues 到达时机维护）
+                if (subtitleOffsetMs != 0L) recomputeCues(position)
             }
-            // 字幕偏移非零时，按位置重取对应时间窗的 Cue（窗口边界由 onCues 到达时机维护）
-            if (subtitleOffsetMs != 0L) recomputeCues(position)
-            delay(250)
+            val state = _state.value
+            delay(
+                pollIntervalMs(
+                    hasMedia = hasMedia,
+                    playing = state == PlaybackState.Playing,
+                    buffering = state == PlaybackState.Buffering,
+                    subtitleOffsetMs = subtitleOffsetMs,
+                ),
+            )
         }
     }
 

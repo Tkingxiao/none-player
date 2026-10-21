@@ -230,7 +230,8 @@ class PlaybackSession(
                 shouldStopInBackground(background, visible, queue.isNotEmpty())
             }.distinctUntilChanged().collect { shouldStop -> if (shouldStop) stop() }
         }
-        // §8.3 写入时机：播放中每 5s 落一次断点；暂停/切集/退页另有显式调用。
+        // §8.3 写入时机：播放中每 15s 落一次断点；暂停/切集/退页另有显式调用。
+        // A24：2h 片子的周期写从约 1440 次降到约 480 次；显式时机的实时性不变。
         // 引擎/队列未就绪时 persistPosition 自行短路，这里不做状态判断之外的事。
         scope.launch {
             while (true) {
@@ -523,7 +524,7 @@ class PlaybackSession(
                 hasNext = index in 0 until queue.lastIndex,
                 hasPrevious = index > 0,
             )
-        }.stateIn(scope, SharingStarted.Eagerly, null)
+        }.stateIn(scope, SharingStarted.WhileSubscribed(5_000), null)
 
     /**
      * **位置无关**的会话摘要——只用来渲染"在播什么"，进度请自己订阅
@@ -633,7 +634,7 @@ class PlaybackSession(
     ) {
         // REV-04：换媒体前先把**上一条**的断点落盘。页退时的 persist 只保得住
         // "当时那一条"：从迷你条/详情页直接打开另一条时，旧媒体会丢掉最后一段进度
-        // （周期落点最多差 5s）。必须放在 acquire/替换队列之前——此刻 _queue/_index
+        // （周期落点最多差 15s）。必须放在 acquire/替换队列之前——此刻 _queue/_index
         // 与引擎都还指向旧媒体，身份核对才会通过。
         persistPosition()
         // 换代标记：此后队列/下标不再代表"引擎里正在放的那条"
@@ -737,7 +738,7 @@ class PlaybackSession(
         startingIntent = null
         val p = _player.value
         p?.pause()
-        // 清队列前先把当前项断点落盘：周期落点最多差 5s，显式关闭不该丢掉这一截
+        // 清队列前先把当前项断点落盘：周期落点最多差 15s，显式关闭不该丢掉这一截
         // （persistPosition 自行短路，队列已空/引擎未就绪时是空操作）。
         persistPosition()
         // 清理前换代（REV-04）：此后"当前项"已不存在，任何迟到的落点都必须先过身份核对
@@ -782,7 +783,7 @@ class PlaybackSession(
         )
         if (snapshot == null) {
             // 身份不符：引擎里生效的还不是这条（切集/换媒体的异步窗口）。宁可这次不写，
-            // 等下一次落点——写错键的代价是"点开另一集直接跳到别的位置"，比丢 5s 大得多。
+            // 等下一次落点——写错键的代价是"点开另一集直接跳到别的位置"，比丢 15s 大得多。
             Log.d(
                 TAG,
                 "persistPosition skipped: identity mismatch target=${keyOf(target)} " +
@@ -803,7 +804,7 @@ class PlaybackSession(
                     positionMs = snapshot.positionMs,
                     durationMs = snapshot.durationMs,
                 )
-                // R2-1/REV-06：失败不抛，只记诊断；下一次周期落点（5s）会继续尝试自愈。
+                // R2-1/REV-06：失败不抛，只记诊断；下一次周期落点（15s）会继续尝试自愈。
                 if (!persisted) {
                     Log.w(TAG, "断点落盘失败（存储降级），下次周期落点将重试 ${snapshot.mediaKey}")
                 }
@@ -815,8 +816,8 @@ class PlaybackSession(
         /** Logcat 前缀（会话级诊断：断点落盘、引擎换代、连接状态） */
         const val TAG = "PlaybackSession"
 
-        /** §8.3：播放中每 5s 落一次断点 */
-        const val PERIODIC_PERSIST_MS = 5_000L
+        /** §8.3 / A24：播放中每 15s 落一次断点（暂停/切集/退页另有显式落盘）。 */
+        const val PERIODIC_PERSIST_MS = 15_000L
     }
 }
 

@@ -43,6 +43,14 @@ class DefaultExtensionRegistry : ExtensionRegistry {
     override fun <T : ExtensionPoint> observe(clazz: Class<T>): Flow<List<T>> =
         synchronized(lock) { flowFor(clazz).map { list -> castList(clazz, list) } }
 
+    /**
+     * 清空全部扩展。仅供 `Kernel.shutdown()` 在插件 onStop 之后调用；已 `observe`
+     * 旧桶的收集者不会收到这次清空（它们持有旧 StateFlow），停机后应随界面一起结束。
+     */
+    fun clear() {
+        synchronized(lock) { extensions.clear() }
+    }
+
     private fun flowFor(clazz: Class<*>): MutableStateFlow<List<Any>> =
         extensions.getOrPut(clazz) { MutableStateFlow(emptyList()) }
 

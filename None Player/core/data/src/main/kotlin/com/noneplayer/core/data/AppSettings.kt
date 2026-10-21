@@ -166,6 +166,15 @@ class AppSettings(private val context: Context) {
         /** 弹幕本地屏蔽词（批次 6）：换行分隔的原始串 */
         private val KEY_DANMAKU_BLOCKLIST = stringPreferencesKey("danmaku_blocklist")
 
+        // A25：弹幕六项曾经在 map/edit lambda 里现造 PreferencesKey，每次 DataStore
+        // 发射都会新建六个 Key；提到 companion 后同一进程内复用，不影响持久化键名。
+        private val KEY_DANMAKU_ENABLED = booleanPreferencesKey("danmaku_enabled")
+        private val KEY_DANMAKU_AREA = stringPreferencesKey("danmaku_area")
+        private val KEY_DANMAKU_SPEED = stringPreferencesKey("danmaku_speed")
+        private val KEY_DANMAKU_DENSITY = intPreferencesKey("danmaku_density")
+        private val KEY_DANMAKU_FONT_SCALE = stringPreferencesKey("danmaku_font_scale")
+        private val KEY_DANMAKU_ALPHA = stringPreferencesKey("danmaku_alpha")
+
         /** §8.3：历史迁移完成标记（E11：迁移后 DataStore 只留设置项） */
         private val KEY_HISTORY_MIGRATED = booleanPreferencesKey("history_migrated")
 
@@ -654,10 +663,10 @@ class AppSettings(private val context: Context) {
 
     /** 弹幕总开关，默认开 */
     val danmakuEnabled: Flow<Boolean> = context.dataStore.data
-        .map { it[booleanPreferencesKey("danmaku_enabled")] ?: true }
+        .map { it[KEY_DANMAKU_ENABLED] ?: true }
 
     suspend fun setDanmakuEnabled(enabled: Boolean) {
-        context.dataStore.edit { it[booleanPreferencesKey("danmaku_enabled")] = enabled }
+        context.dataStore.edit { it[KEY_DANMAKU_ENABLED] = enabled }
     }
 
     /**
@@ -665,42 +674,42 @@ class AppSettings(private val context: Context) {
      * 1/4 (0.25) / 1/3 (0.33) / 半屏 (0.5) / 全屏 (1.0)，默认半屏。
      */
     val danmakuAreaFraction: Flow<Float> = context.dataStore.data
-        .map { it[stringPreferencesKey("danmaku_area")]?.toFloatOrNull() ?: 0.5f }
+        .map { it[KEY_DANMAKU_AREA]?.toFloatOrNull() ?: 0.5f }
 
     suspend fun setDanmakuAreaFraction(fraction: Float) {
-        context.dataStore.edit { it[stringPreferencesKey("danmaku_area")] = fraction.toString() }
+        context.dataStore.edit { it[KEY_DANMAKU_AREA] = fraction.toString() }
     }
 
     /** 滚动速度倍率（1.0 = 标准速度），默认 1.0 */
     val danmakuSpeed: Flow<Float> = context.dataStore.data
-        .map { it[stringPreferencesKey("danmaku_speed")]?.toFloatOrNull() ?: 1f }
+        .map { it[KEY_DANMAKU_SPEED]?.toFloatOrNull() ?: 1f }
 
     suspend fun setDanmakuSpeed(speed: Float) {
-        context.dataStore.edit { it[stringPreferencesKey("danmaku_speed")] = speed.toString() }
+        context.dataStore.edit { it[KEY_DANMAKU_SPEED] = speed.toString() }
     }
 
     /** 同屏密度上限（条数），0 = 不限，默认 0 */
     val danmakuMaxOnScreen: Flow<Int> = context.dataStore.data
-        .map { it[intPreferencesKey("danmaku_density")] ?: 0 }
+        .map { it[KEY_DANMAKU_DENSITY] ?: 0 }
 
     suspend fun setDanmakuMaxOnScreen(max: Int) {
-        context.dataStore.edit { it[intPreferencesKey("danmaku_density")] = max }
+        context.dataStore.edit { it[KEY_DANMAKU_DENSITY] = max }
     }
 
     /** 字号倍率（1.0 = 标准），默认 1.0；范围钳制（自定义输入可能落任意值，渲染层按此值直接乘） */
     val danmakuFontScale: Flow<Float> = context.dataStore.data
-        .map { it[stringPreferencesKey("danmaku_font_scale")]?.toFloatOrNull()?.coerceIn(0.4f, 3f) ?: 1f }
+        .map { it[KEY_DANMAKU_FONT_SCALE]?.toFloatOrNull()?.coerceIn(0.4f, 3f) ?: 1f }
 
     suspend fun setDanmakuFontScale(scale: Float) {
-        context.dataStore.edit { it[stringPreferencesKey("danmaku_font_scale")] = scale.toString() }
+        context.dataStore.edit { it[KEY_DANMAKU_FONT_SCALE] = scale.toString() }
     }
 
     /** 不透明度（0..1），默认 1.0 */
     val danmakuAlpha: Flow<Float> = context.dataStore.data
-        .map { it[stringPreferencesKey("danmaku_alpha")]?.toFloatOrNull() ?: 1f }
+        .map { it[KEY_DANMAKU_ALPHA]?.toFloatOrNull() ?: 1f }
 
     suspend fun setDanmakuAlpha(alpha: Float) {
-        context.dataStore.edit { it[stringPreferencesKey("danmaku_alpha")] = alpha.toString() }
+        context.dataStore.edit { it[KEY_DANMAKU_ALPHA] = alpha.toString() }
     }
 
     /** 本地屏蔽词表：换行分隔的原始串 */
