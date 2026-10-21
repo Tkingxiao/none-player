@@ -1,8 +1,8 @@
 package com.noneplayer.core.ui
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FiniteAnimationSpec
+import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -42,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Job
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -94,10 +95,12 @@ fun NpSheet(
     var visible by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { visible = true }
 
-    // §5.5 下滑关闭：面板高与拖拽位移分开存——`progress` 只服务进出场，
-    // 手势用独立的 Animatable，才能把抬手速度直接交给回弹弹簧（§7.3 速度接棒）。
+    // §5.5 下滑关闭：面板高与拖拽位移分开存——`progress` 只服务进出场。
+    // A25：拖动中直接写 float state，抬手才起动画。旧实现每个 drag delta 都
+    // `scope.launch { snapTo() }`，跟手晚一帧，还每帧起一个协程。
     var panelHeightPx by remember { mutableFloatStateOf(0f) }
-    val dragOffset = remember { Animatable(0f) }
+    var dragPx by remember { mutableFloatStateOf(0f) }
+    var settleJob by remember { mutableStateOf<Job?>(null) }
     // 抬手收尾的 spec 读在组合期：`settle()` 是本函数里的局部函数，协程内调不到
     // @Composable 的 [npMotion]，所以在这里造好再被它捕获。E119 之前这里写的是
     // `silkSpring` + 裸令牌——进了弹簧、没进管道，三档倍率与 Reduce Motion
@@ -123,7 +126,7 @@ fun NpSheet(
     val haptics = rememberNpHaptics()
     var detentArmed by remember { mutableStateOf(true) }
     fun trackDetent() {
-        val past = dragOffset.value > panelHeightPx * 0.30f
+        val past = dragPx > panelHeightPx * 0.30f
         when {
             past && detentArmed -> {
                 detentArmed = false
@@ -141,11 +144,13 @@ fun NpSheet(
      * "面板能无限往上拉、还浮在半空"。钳制后抬手只需处理向下方向的收尾。
      */
     fun applyDrag(delta: Float) {
+        // 用户重新抓住正在回弹/关闭的面板：取消收尾动画，跟手优先。
+        settleJob?.cancel()
+        settleJob = null
+        settling = false
         rawDrag = (rawDrag + delta).coerceAtLeast(0f)
-        scope.launch {
-            dragOffset.snapTo(rawDrag)
-            trackDetent()
-        }
+        dragPx = rawDrag
+        trackDetent()
     }
 
     /**
@@ -156,20 +161,23 @@ fun NpSheet(
         if (settling) return
         settling = true
         rawDrag = 0f
-        val far = dragOffset.value > panelHeightPx * 0.30f
-        if (far || velocity > dismissVelocityPx) {
+        val start = dragPx
+        val far = start > panelHeightPx * 0.30f
+        val closing = far || velocity > dismissVelocityPx
+        if (closing) {
             // 关闭走拖拽自己的动画：`close()` 会从 progress 重新起跳，
             // 半路的位移被清零，读起来就是"弹一下才走"。
             dismissDragged = true
-            scope.launch {
-                dragOffset.animateTo(panelHeightPx, drawerSettleSpec, initialVelocity = velocity)
-                onDismiss()
-            }
-        } else {
-            scope.launch {
-                dragOffset.animateTo(0f, drawerSettleSpec, initialVelocity = velocity)
-                settling = false
-            }
+        }
+        val target = if (closing) panelHeightPx else 0f
+        settleJob = scope.launch {
+            animate(
+                initialValue = start,
+                targetValue = target,
+                initialVelocity = velocity,
+                animationSpec = drawerSettleSpec,
+            ) { value, _ -> dragPx = value }
+            if (closing) onDismiss() else settling = false
         }
     }
     // `if (reduceMotion) 1` 那个裸 1 是"跳过动画"的哨兵，读起来像漏了单位：
@@ -198,7 +206,7 @@ fun NpSheet(
 
             override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity {
                 val down = available.y
-                if (dragOffset.value > 0f && down > 0f) {
+                if (dragPx > 0f && down > 0f) {
                     settle(down)
                     return Velocity(0f, down)
                 }
@@ -215,7 +223,7 @@ fun NpSheet(
             do {
                 event = awaitPointerEvent(PointerEventPass.Main)
             } while (event.changes.any { it.id == down.id && it.pressed })
-            if (dragOffset.value != 0f) settle(0f)
+            if (dragPx != 0f) settle(0f)
         }
     }
     BackHandler(enabled = true) { close() }
@@ -292,7 +300,7 @@ fun NpSheet(
                     // 面板层重绘，不重组下面的整棵 sheet 内容（此前 `alpha(progress)`
                     // 在组合期取值，每帧都要把 content() 重组一遍——开合时的主要掉帧源）。
                     .graphicsLayer {
-                        val dragged = if (panelHeightPx > 0f) dragOffset.value / panelHeightPx else 0f
+                        val dragged = if (panelHeightPx > 0f) dragPx / panelHeightPx else 0f
                         alpha = (progress.value - dragged).coerceIn(0f, 1f)
                     }
                     .background(ink.scrim)
@@ -309,7 +317,7 @@ fun NpSheet(
                     .fillMaxWidth()
                     .graphicsLayer {
                         translationY =
-                            (1f - progress.value) * size.height + dragOffset.value + screenBottomAdjustPx
+                            (1f - progress.value) * size.height + dragPx + screenBottomAdjustPx
                     },
             ) {
                 Column(
