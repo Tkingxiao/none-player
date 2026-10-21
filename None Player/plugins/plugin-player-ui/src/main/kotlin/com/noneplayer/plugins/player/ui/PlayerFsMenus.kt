@@ -35,6 +35,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -1360,14 +1362,27 @@ fun FsEpisodesMenuContent(
     onSelect: (Int) -> Unit,
     onBack: () -> Unit,
 ) {
-    FsMenuBackRow(title = "选集（${queue.size}）", onBack = onBack)
-    queue.forEachIndexed { index, item ->
-        val current = index == currentIndex
-        FsMenuRow(
-            label = "${index + 1}. " + item.title.ifBlank { item.uri.substringAfterLast('/') },
-            value = if (current) "播放中" else null,
-            active = current,
-            onClick = { onSelect(index) },
-        )
+    // A25：全屏选集改 LazyColumn。几百集时旧 Column 一次组合全部行；返回行固定，
+    // 列表给一个有界高度在内部滚动，未进视口的行不组合。
+    Column(modifier = Modifier.fillMaxWidth()) {
+        FsMenuBackRow(title = "选集（${queue.size}）", onBack = onBack)
+        LazyColumn(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(max = 360.dp),
+        ) {
+            itemsIndexed(
+                items = queue,
+                key = { index, item -> "ep:${item.sourceId}:${item.id}:$index" },
+            ) { index, item ->
+                val current = index == currentIndex
+                FsMenuRow(
+                    label = "${index + 1}. " + item.title.ifBlank { item.uri.substringAfterLast('/') },
+                    value = if (current) "播放中" else null,
+                    active = current,
+                    onClick = { onSelect(index) },
+                )
+            }
+        }
     }
 }
