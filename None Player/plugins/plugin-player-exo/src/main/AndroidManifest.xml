@@ -21,24 +21,13 @@
             </intent-filter>
         </service>
 
-        <!-- A2：媒体键入口。小窗（PiP）的暂停 / 下一集与耳机、蓝牙媒体键都经
-             ACTION_MEDIA_BUTTON 广播到这里，它再按上面的 MediaSessionService intent-filter
-             找到 PlaybackService，把按键交给会话侧播放器执行。
-             exported 是硬性要求：按键由系统媒体栈发出，加 permission 会让耳机键失联——
-             与 service 那条同一口径，刻意豁免。 -->
-        <receiver
-            android:name="androidx.media3.session.MediaButtonReceiver"
-            android:exported="true"
-            tools:ignore="ExportedReceiver">
-            <intent-filter>
-                <action android:name="android.intent.action.MEDIA_BUTTON" />
-            </intent-filter>
-        </receiver>
-
-        <!-- E144-1：小窗（PiP）动作按钮的入口。media3 的 MediaButtonReceiver 在 API 26+
-             丢弃非 PLAY 键（避免前台服务冷启动超时），PiP 的暂停/下一集因此静默失效；
-             这里用显式组件的自建接收器 + 同进程桥接，不经过系统媒体栈。
-             exported=false：PendingIntent 发送方借用本应用身份执行，无需导出。 -->
+        <!-- E157：不再声明 media3 的 MediaButtonReceiver。
+             会话活着时，系统媒体键直接投给 MediaSession；PiP 的暂停/下一集走下面
+             自建的 NpMediaActionReceiver。清单接收器只在“服务未运行”时冷启动
+             PlaybackService——本应用尚未实现 onPlaybackResumption，冷启动拿到 PLAY
+             会拉起一个空会话，5s 内没有可发的前台通知，系统直接抛
+             ForegroundServiceDidNotStartInTimeException 杀进程（E156-1 实测）。
+             在补 resumption 之前，冷启动媒体键明确不支持，优先不崩溃。 -->
         <receiver
             android:name=".NpMediaActionReceiver"
             android:exported="false" />
