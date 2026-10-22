@@ -20,6 +20,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
@@ -104,6 +106,27 @@ fun KernelNavHost(
      */
     val tabNavController = rememberNavController()
 
+    /**
+     * Tab 内层 `NavHost` 的 ViewModelStore 宿主（B25）。
+     *
+     * `NavHost` 每次重组都会把当下 `LocalViewModelStoreOwner` 的 store 塞给自己的控制器，
+     * 而内层那台控制器默认继承的是**外层 SHELL 条目**的 store。E53 把 `tabNavController`
+     * 提升到跨导航存活，store 却还跟着条目走：外层条目一重建（深链落到播放页后返回、
+     * 小窗回前台重投），`NavController.setViewModelStore` 就撞上
+     * `check(backQueue.isEmpty())` → `IllegalStateException: ViewModelStore should be set
+     * before setGraph call`（真机两条路径同一个栈）。
+     * 这里给内层一份**与控制器同寿命**的宿主，store 不再随外层条目换；清理交给本层的
+     * `DisposableEffect`——比条目活得久，但绝不比组合活得久。
+     */
+    val tabViewModelStoreOwner = remember {
+        object : ViewModelStoreOwner {
+            override val viewModelStore = ViewModelStore()
+        }
+    }
+    DisposableEffect(tabViewModelStoreOwner) {
+        onDispose { tabViewModelStoreOwner.viewModelStore.clear() }
+    }
+
     // 导航图的构建块**必须是稳定引用**：`NavHost` 内部以
     // `remember(route, startDestination, builder)` 缓存导航图，`builder` 的 lambda
     // 身份一旦每次重组都变，整张图就会被重建（所有目的地重新注册）。
@@ -112,7 +135,11 @@ fun KernelNavHost(
         {
             // 主界面 = 底部标签栏 Shell（B 站式信息架构）；Tab 由各插件贡献
             composable(SHELL_ROUTE) {
-                KernelTabScaffold(navigator = navigator, tabNavController = tabNavController)
+                KernelTabScaffold(
+                    navigator = navigator,
+                    tabNavController = tabNavController,
+                    tabViewModelStoreOwner = tabViewModelStoreOwner,
+                )
             }
             screens.forEach { screen ->
                 screen.register(builder = this, navigator = navigator)

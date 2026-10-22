@@ -79,7 +79,9 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.ViewModelStoreOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.navigation.NavDestination
 import androidx.navigation.NavGraphBuilder
 import androidx.navigation.NavHostController
@@ -197,6 +199,7 @@ val LocalNpBottomInset: ProvidableCompositionLocal<Dp> =
 fun KernelTabScaffold(
     navigator: Navigator,
     tabNavController: NavHostController,
+    tabViewModelStoreOwner: ViewModelStoreOwner,
 ) {
     val kernel = LocalKernel.current
     val windowInfo = LocalNpWindowInfo.current
@@ -336,19 +339,25 @@ fun KernelTabScaffold(
             }
     }
     val navHost: @Composable (Modifier) -> Unit = { modifier ->
-        NavHost(
-            navController = tabNavController,
-            startDestination = sortedTabs.first().route,
-            modifier = modifier,
-            // 必须显式声明：NavHost 默认转场是 `tween(700)`，切一次标签要 0.7s
-            // 才"到位"，是整壳里最慢的一处响应。pop 两份与 push 同源——Tab 之间没有
-            // 前进/后退的层级语义，对称处理才不会"从二级页回来是另一种手感"。
-            enterTransition = tabEnter,
-            exitTransition = tabExit,
-            popEnterTransition = tabEnter,
-            popExitTransition = tabExit,
-            builder = tabGraph,
-        )
+        // B25：内层 NavHost 的 store 必须跟着**提升后的控制器**走，不能继承外层当前
+        // 目的地的条目 store——外层条目一重建，`setViewModelStore` 就会撞上
+        // `check(backQueue.isEmpty())` 抛 `ViewModelStore should be set before setGraph call`。
+        // 宿主由 [KernelNavHost] 给出，与 tabNavController 同寿命。
+        CompositionLocalProvider(LocalViewModelStoreOwner provides tabViewModelStoreOwner) {
+            NavHost(
+                navController = tabNavController,
+                startDestination = sortedTabs.first().route,
+                modifier = modifier,
+                // 必须显式声明：NavHost 默认转场是 `tween(700)`，切一次标签要 0.7s
+                // 才"到位"，是整壳里最慢的一处响应。pop 两份与 push 同源——Tab 之间没有
+                // 前进/后退的层级语义，对称处理才不会"从二级页回来是另一种手感"。
+                enterTransition = tabEnter,
+                exitTransition = tabExit,
+                popEnterTransition = tabEnter,
+                popExitTransition = tabExit,
+                builder = tabGraph,
+            )
+        }
     }
 
     // 底部条实测高度：内容层延伸到条之下后，各页靠它做最后一屏的 contentPadding
