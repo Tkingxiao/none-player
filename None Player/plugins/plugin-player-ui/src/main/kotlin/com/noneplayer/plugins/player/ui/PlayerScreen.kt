@@ -2464,9 +2464,7 @@ fun PlayerScreen(
                                     FsMenuPage.SUBTITLE -> FsSubtitleMenuContent(
                                         subtitleOn = subtitleEnabled,
                                         subtitleLoaded = subtitleLoaded,
-                                        savedSubtitleName = savedSubtitle
-                                            ?.substringAfterLast('/')
-                                            ?.substringBeforeLast('.'),
+                                        savedSubtitleName = subtitleMountName(savedSubtitle),
                                         textTracks = tracks.filter { it.type == NpTrackType.TEXT },
                                         offsetMs = subtitleOffsetMs,
                                         colorArgb = subtitleColorArgb,
@@ -3457,6 +3455,18 @@ fun PlayerScreen(
  * 点任意处关闭（scrim 即关闭手势）。
  */
 /**
+ * 挂载字幕的展示名（B4）：SAF 文档 uri 的末段是**百分号编码**的 docId
+ * （`primary%3AMovies%2F…%2Fnp-long.srt`），直接按 `/` 切会切不开、把整串编码当文件名
+ * 显示；先解码再取末段、去掉扩展名——面板里要读的是"挂了哪个字幕"，不是完整地址。
+ * 竖屏面板、全屏下拉与内嵌菜单共用这一份口径。
+ */
+internal fun subtitleMountName(savedSubtitle: String?): String? = savedSubtitle
+    ?.let { android.net.Uri.decode(it) }
+    ?.substringAfterLast('/')
+    ?.substringBeforeLast('.')
+    ?.takeIf { it.isNotBlank() }
+
+/**
  * 字幕状态行（E131）：`[没有字幕]` / `已挂载：<名>` / `内嵌：<轨名>`。
  *
  * 与参考示例的 `[没有字幕]` 同义——面板里改的是"样式"，这一行回答的是
@@ -3472,12 +3482,7 @@ private fun subtitleStatusText(
     // （挂载记录仍在，是为了重新开启时能装回去）。真机实测中发现的口径问题。
     !enabled -> "[已关闭]"
     subtitleLoaded && savedSubtitle != null ->
-        // SAF 文档 uri 的末段是**百分号编码**的 docId（`primary%3AMovies%2F…%2Fnp-long.srt`），
-        // 直接按 `/` 切会切不开、把整串编码当文件名显示。先解码再取末段——
-        // 顺带去掉扩展名（面板里显示的是"挂载了哪个字幕"，不是完整文件名）。
-        "已挂载：" + android.net.Uri.decode(savedSubtitle)
-            .substringAfterLast('/')
-            .substringBeforeLast('.')
+        "已挂载：" + (subtitleMountName(savedSubtitle) ?: savedSubtitle)
     embeddedLabel != null -> "内嵌：$embeddedLabel"
     else -> "[没有字幕]"
 }
@@ -3747,7 +3752,8 @@ private fun SubtitleSettingsPanel(
 
     if (showEmbedded && embeddedTracks.isNotEmpty()) {
         Text(
-            text = "内嵌字幕轨",
+            // 与全屏下拉同一口径：这条列表里也可能出现刚挂上的外挂轨，标题不写"内嵌"。
+            text = "字幕轨",
             style = NpTypography.titleSmall,
             color = ink.fg,
             modifier = Modifier.padding(top = 14.dp, bottom = 4.dp),

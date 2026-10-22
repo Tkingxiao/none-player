@@ -81,7 +81,6 @@ import com.noneplayer.kernel.ui.api.PlaybackOverlay
 import com.noneplayer.kernel.ui.api.PlaybackMenuContributor
 import com.noneplayer.plugins.player.ui.brightness.rememberWindowBrightness
 import kotlinx.coroutines.flow.first
-import androidx.core.net.toUri
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
@@ -640,7 +639,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                         FsMenuPage.SUBTITLE -> FsSubtitleMenuContent(
                             subtitleOn = subtitleEnabled,
                             subtitleLoaded = data.savedSubtitle != null,
-                            savedSubtitleName = data.savedSubtitle?.toUri()?.lastPathSegment,
+                            savedSubtitleName = subtitleMountName(data.savedSubtitle),
                             textTracks = data.tracks.filter { it.type == NpTrackType.TEXT },
                             offsetMs = data.subtitleOffsetMs,
                             colorArgb = subtitleColorArgb,

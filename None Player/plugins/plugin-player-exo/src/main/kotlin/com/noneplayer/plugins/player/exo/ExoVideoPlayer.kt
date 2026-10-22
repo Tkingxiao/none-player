@@ -1693,7 +1693,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     val id = format.id ?: "${type.name}_$i"
                     if (trackGroupById.containsKey(id)) continue
                     trackGroupById[id] = group to i
-                    val label = buildList {
+                    // 外挂字幕被 media3 平铺进同一条文本轨组、没有自己的名字，
+                    // 落到下面的"轨道 N"兜底就把外挂读成了内嵌轨（B4 真机实报）。
+                    val label = "外挂字幕".takeIf {
+                        type == NpTrackType.TEXT && id.endsWith(EXTERNAL_SUBTITLE_TRACK_ID)
+                    } ?: buildList {
                         format.label?.let { add(it) }
                         format.language?.let { add(languageName(it)) }
                         if (type == NpTrackType.AUDIO) {

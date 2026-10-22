@@ -1193,7 +1193,9 @@ fun FsSubtitleMenuContent(
     if (savedSubtitleName != null) {
         FsMenuCaption("已挂载：$savedSubtitleName")
     }
-    FsMenuTitle("内嵌字幕轨")
+    // 这条列表里既可能有内嵌轨、也可能有刚挂上的外挂轨（media3 把它们平铺进同一条
+    // 文本轨组），标题只说"字幕轨"，外挂那行由引擎直接标成「外挂字幕」（B4 真机实报）。
+    FsMenuTitle("字幕轨")
     if (textTracks.isEmpty()) {
         FsMenuCaption("此视频没有内嵌字幕轨")
     } else {

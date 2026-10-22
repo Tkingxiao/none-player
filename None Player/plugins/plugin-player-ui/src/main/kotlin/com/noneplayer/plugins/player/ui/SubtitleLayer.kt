@@ -5,7 +5,6 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -290,7 +289,9 @@ private fun TextCue(
             },
         contentAlignment = Alignment.TopStart,
     ) {
-        Column(
+        // 描边与正文必须**叠在同一行**上：用 Column 排会把它变成第二条字幕（真机实报
+        // "字幕多出一行黑框"），正文也被顶离用户设定的垂直位置。
+        Box(
             modifier = if (style.background) {
                 Modifier
                     .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(NpRadius.chip))
@@ -298,6 +299,7 @@ private fun TextCue(
             } else {
                 Modifier
             },
+            contentAlignment = Alignment.TopStart,
         ) {
             if (style.outline) {
                 Text(
