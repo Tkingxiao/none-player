@@ -27,7 +27,7 @@
 - **R7/A19 余项（2026-10-22，E172）**：NextLib `FfmpegVideoRenderer` 的 Surface 克隆已用 `Renderer` 委托包上；两机 `NpFfmpegVideoRendererTest` 3/3、相关 `LegacyPlaybackTest` 6/6（天玑首次安装时点掉了 MIUI「USB 安装提示」）；全量 test 116/778、lint 15 份 0 issue、release 19,687,445 B。FFmpeg-only 实片端到端与 AVFrame 直接上屏仍欠（B24 / §0 第 10 行）。
 - **§9 排序增量（2026-10-22，E173）**：`SortMode` 增「最近播放 / 最常看」，按 `lastPlayedAt` / `playCount` 排序；修「最近添加」聚合强制按加入时间重排的实测缺陷。骁龙 82 项聚合页六档菜单与两种顺序已截图；全量 test 116/781、lint 15 份 0 issue、release 19,687,445 B。天玑掉线待补。
 - **B1 后台关闭语义（2026-10-22，E174）**：骁龙后台关时全屏 Home / 锁屏 / 内嵌视频与仅听 Home / 空队列 Home 均停到 `NONE(0)`；竖屏播放中转到横屏交还右栏也 `NONE(0)`，回详情页停在 3:22；开关已恢复 ON。截图 `screenshots/B1/23043RP34C/`。
-- **B2 不可播项后高亮（2026-10-22，E175）**：xvid-qpel 选中并 ERROR 后页头/「当前」仍停在 05；从 np-mjpeg 起播自动推进到 05 后也未退回 01。快速切集组合未单独复拍；天玑掉线。截图 `screenshots/B2/23043RP34C/`。
+- **B2 不可播项后高亮（2026-10-22，E175）**：xvid-qpel 选中并 ERROR 后页头/「当前」仍停在 05；从 np-mjpeg 起播自动推进到 05 后也未退回 01；快速切集 02→04、05→03 均跟随最后一次选择。通知栏按钮单独触发未拍；天玑按要求不补。截图 `screenshots/B2/23043RP34C/`。
 - **R0 收口后（2026-10-20 18:52–18:53）`test` 通过：70 套件 / 439 项 / 0 失败、错误、跳过**；强制重跑且关闭构建缓存，327 个任务 executed（1m33s）。精确离线命令、模块计数、警告与时间见[审查文档 §6.1](审查文档.md) 与[路线 §2](项目审查与优化路线-2026-10-20.md#2-本轮测试基线)。
 - **R1 收口后（2026-10-20 19:24–19:25）`test` 通过：77 套件 / 496 项 / 0 失败、错误、跳过**；337 个任务 executed（46s）。同一工作树补跑 `lint + assembleDebug + assembleRelease`（2m8s，`lintVitalRelease` 通过；模块 lint 0 issue、app release 1 条既有 `UseKtx` 警告），release APK 41,847,947 B（SHA256 `9DF8F0C8…`，装机 19:28:10）；androidTest 未跑。
 - **R0（REV-01/02/03/12/13 + A33）已在平板 `60dd2f94` 用最终包完成 REV-01/REV-13 真机复验**（撤音频权限→不完整扫描不删历史/收藏/快照、横幅与 note、恢复后复原）；REV-02/REV-12 的旧 SDK/第二卷分支只有自动测试背书。证据见[审查文档 §9](审查文档.md)、《任务文档》§11 E151。
