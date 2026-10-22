@@ -1037,6 +1037,8 @@ fun PlayerScreen(
     val subtitlePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uriResult ->
+        // SAF 会把本进程推到后台：选择器期间挂起“退后台即停”，返回后会话仍然活着
+        session.setPickerOpen(false)
         if (uriResult != null) {
             context.contentResolver.takePersistableUriPermission(
                 uriResult,
@@ -2502,6 +2504,7 @@ fun PlayerScreen(
                                         },
                                         onMountExternal = {
                                             dismiss()
+                                            session.setPickerOpen(true)
                                             subtitlePicker.launch(arrayOf("*/*"))
                                         },
                                         onOffset = ::setSubtitleOffset,
@@ -3142,6 +3145,7 @@ fun PlayerScreen(
                     },
                     onPickExternal = {
                         subtitleSheetVisible = false
+                        session.setPickerOpen(true)
                         subtitlePicker.launch(arrayOf("*/*"))
                     },
                     onEmbeddedUnavailable = { toast.show("此视频没有内嵌字幕轨") },

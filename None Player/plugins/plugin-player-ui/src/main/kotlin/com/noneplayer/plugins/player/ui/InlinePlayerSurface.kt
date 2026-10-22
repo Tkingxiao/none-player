@@ -349,6 +349,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
             scope.launch { settings.setPlaybackSpeed(next) }
         }
         val subtitlePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            session.setPickerOpen(false)
             if (uri != null) scope.launch {
                 runCatching {
                     context.contentResolver.takePersistableUriPermission(
@@ -668,6 +669,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             },
                             onMountExternal = {
                                 dismiss()
+                                session.setPickerOpen(true)
                                 subtitlePicker.launch(arrayOf("*/*"))
                             },
                             onOffset = session::setSubtitleOffsetMs,

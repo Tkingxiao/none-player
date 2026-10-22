@@ -110,7 +110,18 @@ class PlaybackSession(
 
     /** 在途装载的**完整意图**（A9）；与 [startJob] 同生共死，stop() 时一并清空。 */
     private var startingIntent: StartIntent? = null
-    private val appVisible = MutableStateFlow(true)
+
+    /**
+     * 外部前台状态（可见性 + 应用内 SAF 选择器）**原子合并**：分属两个 StateFlow 时，
+     * ON_START 的两次赋值之间会被 combine 看到 “picker=false + visible=false” 的瞬时态，
+     * 从而误触发退后台停止。选择器在前台期间要挂起“退后台即停”——SAF 会把本进程推到
+     * 后台，但用户仍在本应用发起的流程里，按退后台处理会留下 0:00 的死页面（E177 记、E178 修）。
+     */
+    private data class ForegroundState(
+        val visible: Boolean = true,
+        val picker: Boolean = false,
+    )
+    private val foreground = MutableStateFlow(ForegroundState())
     private val _sleepTimerEndsAtMs = MutableStateFlow(0L)
     val sleepTimerEndsAtMs: StateFlow<Long> = _sleepTimerEndsAtMs.asStateFlow()
     private var sleepJob: Job? = null
@@ -217,17 +228,19 @@ class PlaybackSession(
             val lifecycle = ProcessLifecycleOwner.get().lifecycle
             lifecycle.addObserver(LifecycleEventObserver { _, event ->
                 when (event) {
-                    Lifecycle.Event.ON_START -> appVisible.value = true
+                    Lifecycle.Event.ON_START -> foreground.value = ForegroundState()
                     Lifecycle.Event.ON_STOP -> {
                         persistPosition()
-                        appVisible.value = false
+                        foreground.value = foreground.value.copy(visible = false)
                     }
                     else -> Unit
                 }
             })
-            appVisible.value = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
-            combine(settings.backgroundPlay, appVisible, _queue) { background, visible, queue ->
-                shouldStopInBackground(background, visible, queue.isNotEmpty())
+            foreground.value = foreground.value.copy(
+                visible = lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED),
+            )
+            combine(settings.backgroundPlay, foreground, _queue) { background, fg, queue ->
+                shouldStopInBackground(background, fg.visible, queue.isNotEmpty(), fg.picker)
             }.distinctUntilChanged().collect { shouldStop -> if (shouldStop) stop() }
         }
         // §8.3 写入时机：播放中每 15s 落一次断点；暂停/切集/退页另有显式调用。
@@ -721,6 +734,11 @@ class PlaybackSession(
         events.publish(KernelEvent.PlaybackStarted(_queue.value[index].id))
     }
 
+    /** 见 [ForegroundState.picker]：应用内文件选择器打开/关闭时切换，挂起“退后台即停”。 */
+    fun setPickerOpen(open: Boolean) {
+        foreground.value = foreground.value.copy(picker = open)
+    }
+
     /**
      * 停止播放并清空会话（迷你条 ✕）。
      *
@@ -838,7 +856,8 @@ internal fun shouldStopInBackground(
     backgroundPlay: Boolean,
     appVisible: Boolean,
     hasSession: Boolean,
-): Boolean = hasSession && !appVisible && !backgroundPlay
+    pickerOpen: Boolean,
+): Boolean = hasSession && !appVisible && !backgroundPlay && !pickerOpen
 
 /**
  * 决定某个媒体此刻该处于哪种呈现模式（E129 / 审查 #1、#2）——纯函数，便于单测。
