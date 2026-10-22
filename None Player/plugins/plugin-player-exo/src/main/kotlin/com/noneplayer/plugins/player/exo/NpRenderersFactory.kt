@@ -76,14 +76,16 @@ open class NpRenderersFactory(
         val ffmpegThreads = (Runtime.getRuntime().availableProcessors() / 2).coerceIn(2, 4)
         for (index in out.indices) {
             if (out[index] is FfmpegVideoRenderer) {
-                out[index] = FfmpegVideoRenderer(
-                    allowedVideoJoiningTimeMs,
-                    eventHandler,
-                    eventListener,
-                    MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
-                    ffmpegThreads,
-                    /* numInputBuffers= */ 4,
-                    /* numOutputBuffers= */ 4,
+                out[index] = NpFfmpegVideoRenderer(
+                    FfmpegVideoRenderer(
+                        allowedVideoJoiningTimeMs,
+                        eventHandler,
+                        eventListener,
+                        MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
+                        ffmpegThreads,
+                        /* numInputBuffers= */ 4,
+                        /* numOutputBuffers= */ 4,
+                    ),
                 )
             }
         }

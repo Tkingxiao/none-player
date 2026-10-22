@@ -1,0 +1,3781 @@
+{
+  "schema": 1,
+  "capturedAt": 1792652091608,
+  "cacheKey": "665d01fd2a8fb76e2c966a0e5e5df3cebc071b0f159f6873f803e436d160913b",
+  "device": {
+    "sdkInt": 36,
+    "release": "16",
+    "fingerprint": "Redmi\/rothko\/rothko:16\/BP2A.250605.031.A3\/OS3.0.303.0.WNNCNXM:user\/release-keys",
+    "manufacturer": "Xiaomi",
+    "model": "2407FRK8EC",
+    "device": "rothko",
+    "board": "rothko",
+    "hardware": "mt6989",
+    "socManufacturer": "Mediatek",
+    "socModel": "MT6989",
+    "supportedAbis": [
+      "arm64-v8a"
+    ],
+    "appVersion": null
+  },
+  "codecs": [
+    {
+      "name": "c2.mtk.adpcm-dvi-ima.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/x-adpcm-dvi-ima",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.AUDIO.DECODER.ADPCM.DVI",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/x-adpcm-dvi-ima",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.adpcm-ms.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/x-adpcm-ms",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.AUDIO.DECODER.ADPCM.MS",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/x-adpcm-ms",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.alac.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/alac",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.AUDIO.DECODER.ALAC",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/alac",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.dolby.ac4.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/ac4",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.dolby.ac4.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/ac4",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.dolby.eac3.decoder.ac3",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/ac3",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.dolby.eac3.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/ac3",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.dolby.eac3.decoder.eac3",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/eac3",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.dolby.eac3.decoder.eac3-joc",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/eac3-joc",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.aac.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/mp4a-latm",
+          "profileLevels": [
+            {
+              "profile": 2,
+              "level": 0,
+              "profileName": "0x2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 5,
+              "level": 0,
+              "profileName": "0x5",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 20,
+              "level": 0,
+              "profileName": "0x14",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 23,
+              "level": 0,
+              "profileName": "0x17",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 29,
+              "level": 0,
+              "profileName": "0x1d",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 39,
+              "level": 0,
+              "profileName": "0x27",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 42,
+              "level": 0,
+              "profileName": "0x2a",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.aac.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/mp4a-latm",
+          "profileLevels": [
+            {
+              "profile": 2,
+              "level": 0,
+              "profileName": "0x2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 5,
+              "level": 0,
+              "profileName": "0x5",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 20,
+              "level": 0,
+              "profileName": "0x14",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 23,
+              "level": 0,
+              "profileName": "0x17",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 29,
+              "level": 0,
+              "profileName": "0x1d",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 39,
+              "level": 0,
+              "profileName": "0x27",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 42,
+              "level": 0,
+              "profileName": "0x2a",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.aac.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/mp4a-latm",
+          "profileLevels": [
+            {
+              "profile": 2,
+              "level": 0,
+              "profileName": "0x2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 5,
+              "level": 0,
+              "profileName": "0x5",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 23,
+              "level": 0,
+              "profileName": "0x17",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 29,
+              "level": 0,
+              "profileName": "0x1d",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 39,
+              "level": 0,
+              "profileName": "0x27",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.aac.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/mp4a-latm",
+          "profileLevels": [
+            {
+              "profile": 2,
+              "level": 0,
+              "profileName": "0x2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 5,
+              "level": 0,
+              "profileName": "0x5",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 23,
+              "level": 0,
+              "profileName": "0x17",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 29,
+              "level": 0,
+              "profileName": "0x1d",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 39,
+              "level": 0,
+              "profileName": "0x27",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.amrnb.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/3gpp",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.amrnb.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/3gpp",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.amrnb.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/3gpp",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "CBR"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.amrnb.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/3gpp",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "CBR"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.amrwb.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/amr-wb",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.amrwb.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/amr-wb",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.amrwb.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/amr-wb",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "CBR"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.amrwb.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/amr-wb",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "CBR"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.flac.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/flac",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.flac.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/flac",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.flac.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/flac",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "CQ"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.flac.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/flac",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "CQ"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.g711.alaw.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/g711-alaw",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.g711.alaw.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/g711-alaw",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.g711.mlaw.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/g711-mlaw",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.g711.mlaw.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/g711-mlaw",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.mp3.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/mpeg",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.mp3.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/mpeg",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.opus.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/opus",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.opus.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/opus",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.opus.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/opus",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [
+            "CBR",
+            "VBR"
+          ],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.raw.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/raw",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.raw.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/raw",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.android.vorbis.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/vorbis",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.vorbis.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/vorbis",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.mp3.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "audio\/mpeg",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.AUDIO.DECODER.MP3",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "audio\/mpeg",
+          "profileLevels": [],
+          "video": null,
+          "maxInstances": 32,
+          "surfaceColorFormat": false,
+          "bitrateModes": [],
+          "colorFormats": []
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.av1.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/av01",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 65536,
+              "profileName": "AV1 Main8",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 65536,
+              "profileName": "AV1 Main10",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 65536,
+              "profileName": "AV1 Main10 HDR10",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 60000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.VIDEO.DECODER.AV1",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/av01",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 65536,
+              "profileName": "AV1 Main8",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 65536,
+              "profileName": "AV1 Main10",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 65536,
+              "profileName": "AV1 Main10 HDR10",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 60000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.av1.decoder.lowlatency",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/av01",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 65536,
+              "profileName": "AV1 Main8",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 65536,
+              "profileName": "AV1 Main10",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 65536,
+              "profileName": "AV1 Main10 HDR10",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 60000000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.avc.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 131072,
+              "profileName": "AVC Baseline",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 131072,
+              "profileName": "AVC Main",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 8,
+              "level": 131072,
+              "profileName": "AVC High",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 16,
+              "level": 131072,
+              "profileName": "AVC High10",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 65536,
+              "level": 131072,
+              "profileName": "AVC ConstrainedBaseline",
+              "levelRank": 6,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 64,
+            "maxWidth": 8192,
+            "minHeight": 64,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.VIDEO.DECODER.AVC",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 131072,
+              "profileName": "AVC Baseline",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 131072,
+              "profileName": "AVC Main",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 8,
+              "level": 131072,
+              "profileName": "AVC High",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 16,
+              "level": 131072,
+              "profileName": "AVC High10",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 65536,
+              "level": 131072,
+              "profileName": "AVC ConstrainedBaseline",
+              "levelRank": 6,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 64,
+            "maxWidth": 8192,
+            "minHeight": 64,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.avc.decoder.lowlatency",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 131072,
+              "profileName": "AVC Baseline",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 131072,
+              "profileName": "AVC Main",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 8,
+              "level": 131072,
+              "profileName": "AVC High",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 16,
+              "level": 131072,
+              "profileName": "AVC High10",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 65536,
+              "level": 131072,
+              "profileName": "AVC ConstrainedBaseline",
+              "levelRank": 6,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 64,
+            "maxWidth": 8192,
+            "minHeight": 64,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 720000000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.avc.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 131072,
+              "profileName": "AVC Baseline",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 131072,
+              "profileName": "AVC Main",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 8,
+              "level": 131072,
+              "profileName": "AVC High",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 16,
+              "level": 131072,
+              "profileName": "AVC High10",
+              "levelRank": 6,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 160,
+            "maxWidth": 7680,
+            "minHeight": 128,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 10,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54,
+            2130750114
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.VIDEO.ENCODER.AVC",
+      "isEncoder": true,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 131072,
+              "profileName": "AVC Baseline",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 131072,
+              "profileName": "AVC Main",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 8,
+              "level": 131072,
+              "profileName": "AVC High",
+              "levelRank": 6,
+              "levelTier": 0
+            },
+            {
+              "profile": 16,
+              "level": 131072,
+              "profileName": "AVC High10",
+              "levelRank": 6,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 160,
+            "maxWidth": 7680,
+            "minHeight": 128,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 10,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54,
+            2130750114
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.heif.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "image\/vnd.android.heic",
+          "profileLevels": [],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 16383,
+            "minHeight": 16,
+            "maxHeight": 16383,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 64000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.VIDEO.DECODER.HEIF",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "image\/vnd.android.heic",
+          "profileLevels": [],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 16383,
+            "minHeight": 16,
+            "maxHeight": 16383,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 64000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.heif.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "image\/vnd.android.heic",
+          "profileLevels": [],
+          "video": {
+            "minWidth": 160,
+            "maxWidth": 16368,
+            "minHeight": 128,
+            "maxHeight": 16368,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 64000,
+            "widthAlignment": 16,
+            "heightAlignment": 16
+          },
+          "maxInstances": 16,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR",
+            "CQ"
+          ],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54,
+            2130750114
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.VIDEO.ENCODER.HEIF",
+      "isEncoder": true,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "image\/vnd.android.heic",
+          "profileLevels": [],
+          "video": {
+            "minWidth": 160,
+            "maxWidth": 16368,
+            "minHeight": 128,
+            "maxHeight": 16368,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 64000,
+            "widthAlignment": 16,
+            "heightAlignment": 16
+          },
+          "maxInstances": 16,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR",
+            "CQ"
+          ],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54,
+            2130750114
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.hevc.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/hevc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8388608,
+              "profileName": "HEVC Main",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 2,
+              "level": 8388608,
+              "profileName": "HEVC Main10",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 4,
+              "level": 8388608,
+              "profileName": "HEVC MainStill",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 4096,
+              "level": 8388608,
+              "profileName": "HEVC Main10 HDR10",
+              "levelRank": 6.1,
+              "levelTier": 1
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4352,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.VIDEO.DECODER.HEVC",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/hevc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8388608,
+              "profileName": "HEVC Main",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 2,
+              "level": 8388608,
+              "profileName": "HEVC Main10",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 4,
+              "level": 8388608,
+              "profileName": "HEVC MainStill",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 4096,
+              "level": 8388608,
+              "profileName": "HEVC Main10 HDR10",
+              "levelRank": 6.1,
+              "levelTier": 1
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4352,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.hevc.decoder.lowlatency",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/hevc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8388608,
+              "profileName": "HEVC Main",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 2,
+              "level": 8388608,
+              "profileName": "HEVC Main10",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 4,
+              "level": 8388608,
+              "profileName": "HEVC MainStill",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 4096,
+              "level": 8388608,
+              "profileName": "HEVC Main10 HDR10",
+              "levelRank": 6.1,
+              "levelTier": 1
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4352,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 480000000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.hevc.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/hevc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8388608,
+              "profileName": "HEVC Main",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 2,
+              "level": 8388608,
+              "profileName": "HEVC Main10",
+              "levelRank": 6.1,
+              "levelTier": 1
+            }
+          ],
+          "video": {
+            "minWidth": 160,
+            "maxWidth": 7680,
+            "minHeight": 128,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 10,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR",
+            "CQ"
+          ],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54,
+            2130750114
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.VIDEO.ENCODER.HEVC",
+      "isEncoder": true,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/hevc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8388608,
+              "profileName": "HEVC Main",
+              "levelRank": 6.1,
+              "levelTier": 1
+            },
+            {
+              "profile": 2,
+              "level": 8388608,
+              "profileName": "HEVC Main10",
+              "levelRank": 6.1,
+              "levelTier": 1
+            }
+          ],
+          "video": {
+            "minWidth": 160,
+            "maxWidth": 7680,
+            "minHeight": 128,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 10,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR",
+            "CQ"
+          ],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54,
+            2130750114
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.vp9.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp9",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 2048,
+              "profileName": "VP9 Profile0",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 2048,
+              "profileName": "VP9 Profile1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4,
+              "level": 2048,
+              "profileName": "VP9 Profile2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 2048,
+              "profileName": "VP9 Profile2 HDR",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 120000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.MTK.VIDEO.DECODER.VP9",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp9",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 2048,
+              "profileName": "VP9 Profile0",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 2048,
+              "profileName": "VP9 Profile1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4,
+              "level": 2048,
+              "profileName": "VP9 Profile2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 2048,
+              "profileName": "VP9 Profile2 HDR",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 120000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.mtk.vp9.decoder.lowlatency",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp9",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 2048,
+              "profileName": "VP9 Profile0",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 2048,
+              "profileName": "VP9 Profile1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4,
+              "level": 2048,
+              "profileName": "VP9 Profile2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 2048,
+              "profileName": "VP9 Profile2 HDR",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 8192,
+            "minHeight": 16,
+            "maxHeight": 4320,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 180000000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 15,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.dolby.decoder.hevc",
+      "isEncoder": false,
+      "isHardwareAccelerated": true,
+      "isSoftwareOnly": false,
+      "isVendor": true,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/dolby-vision",
+          "profileLevels": [
+            {
+              "profile": 32,
+              "level": 2048,
+              "profileName": "0x20",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 256,
+              "level": 2048,
+              "profileName": "0x100",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 64,
+            "maxWidth": 4096,
+            "minHeight": 64,
+            "maxHeight": 4096,
+            "minFrameRate": 1,
+            "maxFrameRate": 240,
+            "minBitrate": 1,
+            "maxBitrate": 100000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 16,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2130708361,
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.apv.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/apv",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 2097160,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 2097160,
+              "profileName": "0x1000",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 8192,
+              "level": 2097160,
+              "profileName": "0x2000",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 1920,
+            "minHeight": 16,
+            "maxHeight": 1920,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361,
+            54,
+            2130750114
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.apv.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/apv",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 2097160,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 1920,
+            "minHeight": 16,
+            "maxHeight": 1920,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 240000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.av1-dav1d.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/av01",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 32768,
+              "profileName": "AV1 Main8",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 32768,
+              "profileName": "AV1 Main10",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 32768,
+              "profileName": "AV1 Main10 HDR10",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 8192,
+              "level": 32768,
+              "profileName": "AV1 Main10 HDR10+",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1920,
+            "minHeight": 2,
+            "maxHeight": 1088,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 40000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.av1.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/av01",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 512,
+              "profileName": "AV1 Main8",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 512,
+              "profileName": "AV1 Main10",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1920,
+            "minHeight": 2,
+            "maxHeight": 1920,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 20000000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR",
+            "CQ"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.avc.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 65536,
+              "profileName": "AVC Baseline",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 65536,
+              "profileName": "AVC Main",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 8,
+              "level": 65536,
+              "profileName": "AVC High",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 65536,
+              "level": 65536,
+              "profileName": "AVC ConstrainedBaseline",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 524288,
+              "level": 65536,
+              "profileName": "AVC ConstrainedHigh",
+              "levelRank": 5.2,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1920,
+            "minHeight": 2,
+            "maxHeight": 1088,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 40000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.h264.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 65536,
+              "profileName": "AVC Baseline",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 65536,
+              "profileName": "AVC Main",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 8,
+              "level": 65536,
+              "profileName": "AVC High",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 65536,
+              "level": 65536,
+              "profileName": "AVC ConstrainedBaseline",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 524288,
+              "level": 65536,
+              "profileName": "AVC ConstrainedHigh",
+              "levelRank": 5.2,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1920,
+            "minHeight": 2,
+            "maxHeight": 1088,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 40000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.avc.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 16384,
+              "profileName": "AVC Baseline",
+              "levelRank": 5,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 16384,
+              "profileName": "AVC Main",
+              "levelRank": 5,
+              "levelTier": 0
+            },
+            {
+              "profile": 65536,
+              "level": 16384,
+              "profileName": "AVC ConstrainedBaseline",
+              "levelRank": 5,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 1808,
+            "minHeight": 16,
+            "maxHeight": 1808,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 12000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.h264.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/avc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 16384,
+              "profileName": "AVC Baseline",
+              "levelRank": 5,
+              "levelTier": 0
+            },
+            {
+              "profile": 2,
+              "level": 16384,
+              "profileName": "AVC Main",
+              "levelRank": 5,
+              "levelTier": 0
+            },
+            {
+              "profile": 65536,
+              "level": 16384,
+              "profileName": "AVC ConstrainedBaseline",
+              "levelRank": 5,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 1808,
+            "minHeight": 16,
+            "maxHeight": 1808,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 12000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.h263.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/3gpp",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 1,
+              "level": 16,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 8,
+              "level": 8,
+              "profileName": "0x8",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 8,
+              "level": 16,
+              "profileName": "0x8",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 4,
+            "maxWidth": 352,
+            "minHeight": 4,
+            "maxHeight": 288,
+            "minFrameRate": 1,
+            "maxFrameRate": 30,
+            "minBitrate": 1,
+            "maxBitrate": 384000,
+            "widthAlignment": 4,
+            "heightAlignment": 4
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.h263.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/3gpp",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 1,
+              "level": 16,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 8,
+              "level": 8,
+              "profileName": "0x8",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 8,
+              "level": 16,
+              "profileName": "0x8",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 4,
+            "maxWidth": 352,
+            "minHeight": 4,
+            "maxHeight": 288,
+            "minFrameRate": 1,
+            "maxFrameRate": 30,
+            "minBitrate": 1,
+            "maxBitrate": 384000,
+            "widthAlignment": 4,
+            "heightAlignment": 4
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.h263.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/3gpp",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 1,
+              "level": 16,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 176,
+            "maxWidth": 176,
+            "minHeight": 144,
+            "maxHeight": 144,
+            "minFrameRate": 1,
+            "maxFrameRate": 30,
+            "minBitrate": 1,
+            "maxBitrate": 128000,
+            "widthAlignment": 16,
+            "heightAlignment": 16
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.h263.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/3gpp",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 1,
+              "level": 16,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 176,
+            "maxWidth": 176,
+            "minHeight": 144,
+            "maxHeight": 144,
+            "minFrameRate": 1,
+            "maxFrameRate": 30,
+            "minBitrate": 1,
+            "maxBitrate": 128000,
+            "widthAlignment": 16,
+            "heightAlignment": 16
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.hevc.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/hevc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 524288,
+              "profileName": "HEVC Main",
+              "levelRank": 5.2,
+              "levelTier": 1
+            },
+            {
+              "profile": 4,
+              "level": 524288,
+              "profileName": "HEVC MainStill",
+              "levelRank": 5.2,
+              "levelTier": 1
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1920,
+            "minHeight": 2,
+            "maxHeight": 1088,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 5000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.hevc.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/hevc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 524288,
+              "profileName": "HEVC Main",
+              "levelRank": 5.2,
+              "levelTier": 1
+            },
+            {
+              "profile": 4,
+              "level": 524288,
+              "profileName": "HEVC MainStill",
+              "levelRank": 5.2,
+              "levelTier": 1
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1920,
+            "minHeight": 2,
+            "maxHeight": 1088,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 5000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.hevc.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/hevc",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 262144,
+              "profileName": "HEVC Main",
+              "levelRank": 5.2,
+              "levelTier": 0
+            },
+            {
+              "profile": 4,
+              "level": 262144,
+              "profileName": "HEVC MainStill",
+              "levelRank": 5.2,
+              "levelTier": 0
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 512,
+            "minHeight": 2,
+            "maxHeight": 512,
+            "minFrameRate": 1,
+            "maxFrameRate": 300,
+            "minBitrate": 1,
+            "maxBitrate": 10000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR",
+            "CQ"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.mpeg4.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/mp4v-es",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 256,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1344,
+            "minHeight": 2,
+            "maxHeight": 1344,
+            "minFrameRate": 12,
+            "maxFrameRate": 60,
+            "minBitrate": 1,
+            "maxBitrate": 12000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.mpeg4.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/mp4v-es",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 256,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1344,
+            "minHeight": 2,
+            "maxHeight": 1344,
+            "minFrameRate": 12,
+            "maxFrameRate": 60,
+            "minBitrate": 1,
+            "maxBitrate": 12000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.mpeg4.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/mp4v-es",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 176,
+            "minHeight": 16,
+            "maxHeight": 144,
+            "minFrameRate": 12,
+            "maxFrameRate": 60,
+            "minBitrate": 1,
+            "maxBitrate": 64000,
+            "widthAlignment": 16,
+            "heightAlignment": 16
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.mpeg4.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/mp4v-es",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 8,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 16,
+            "maxWidth": 176,
+            "minHeight": 16,
+            "maxHeight": 144,
+            "minFrameRate": 12,
+            "maxFrameRate": 60,
+            "minBitrate": 1,
+            "maxBitrate": 64000,
+            "widthAlignment": 16,
+            "heightAlignment": 16
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.vp8.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp8",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 1,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 2048,
+            "minHeight": 2,
+            "maxHeight": 2048,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 40000000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.vp8.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp8",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 1,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 2048,
+            "minHeight": 2,
+            "maxHeight": 2048,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 40000000,
+            "widthAlignment": 1,
+            "heightAlignment": 1
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.vp8.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp8",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 1,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 720,
+            "minHeight": 2,
+            "maxHeight": 720,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 20000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.vp8.encoder",
+      "isEncoder": true,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp8",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 1,
+              "profileName": "0x1",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 720,
+            "minHeight": 2,
+            "maxHeight": 720,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 20000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [
+            "CBR",
+            "VBR"
+          ],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.vp9.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp9",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 256,
+              "profileName": "VP9 Profile0",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4,
+              "level": 256,
+              "profileName": "VP9 Profile2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 256,
+              "profileName": "VP9 Profile2 HDR",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 16384,
+              "level": 256,
+              "profileName": "VP9 Profile2 HDR10+",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1280,
+            "minHeight": 2,
+            "maxHeight": 1280,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 5000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "OMX.google.vp9.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": true,
+      "types": [
+        {
+          "mime": "video\/x-vnd.on2.vp9",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 256,
+              "profileName": "VP9 Profile0",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4,
+              "level": 256,
+              "profileName": "VP9 Profile2",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 256,
+              "profileName": "VP9 Profile2 HDR",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 16384,
+              "level": 256,
+              "profileName": "VP9 Profile2 HDR10+",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1280,
+            "minHeight": 2,
+            "maxHeight": 1280,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 5000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361,
+            54
+          ]
+        }
+      ]
+    },
+    {
+      "name": "c2.android.av1.decoder",
+      "isEncoder": false,
+      "isHardwareAccelerated": false,
+      "isSoftwareOnly": true,
+      "isVendor": false,
+      "isAlias": false,
+      "types": [
+        {
+          "mime": "video\/av01",
+          "profileLevels": [
+            {
+              "profile": 1,
+              "level": 32768,
+              "profileName": "AV1 Main8",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 2,
+              "level": 32768,
+              "profileName": "AV1 Main10",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 4096,
+              "level": 32768,
+              "profileName": "AV1 Main10 HDR10",
+              "levelRank": null,
+              "levelTier": null
+            },
+            {
+              "profile": 8192,
+              "level": 32768,
+              "profileName": "AV1 Main10 HDR10+",
+              "levelRank": null,
+              "levelTier": null
+            }
+          ],
+          "video": {
+            "minWidth": 2,
+            "maxWidth": 1920,
+            "minHeight": 2,
+            "maxHeight": 1072,
+            "minFrameRate": 0,
+            "maxFrameRate": 960,
+            "minBitrate": 1,
+            "maxBitrate": 60000000,
+            "widthAlignment": 2,
+            "heightAlignment": 2
+          },
+          "maxInstances": 32,
+          "surfaceColorFormat": true,
+          "bitrateModes": [],
+          "colorFormats": [
+            2135033992,
+            19,
+            21,
+            20,
+            39,
+            2130708361,
+            54
+          ]
+        }
+      ]
+    }
+  ],
+  "errors": []
+}

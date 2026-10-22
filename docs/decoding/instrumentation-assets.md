@@ -4,7 +4,7 @@
 > 约束：不下载新依赖或素材；小型合成夹具可入库，私有大媒体只留匿名清单；素材不齐时明确标 blocked。
 > 校验脚本：`docs/verify-instrumentation-assets.ps1`（默认把缺失记为 BLOCKED，加 `-RequireAll` 才在缺失时退出非 0）。
 
-## 1. 源集与用例（7 类 / 23 项）
+## 1. 源集与用例（9 类 / 29 项）
 
 | 模块 | 测试类 | 项数 | 覆盖 |
 | --- | --- | --- | --- |
@@ -13,10 +13,16 @@
 | `core/media-android` | `FormatProbeDecisionTest` | 3 | MJPEG / WMV2 / Xvid 探测判定 |
 | `core/media-android` | `Mpeg4ProfileProbeTest` | 3 | ASP/SP 解析与探测 |
 | `core/media-android` | `QpelCodecProbeTest` | 3 | 解码器枚举、QPel 试探、SP 基线 |
+| `core/media-android` | `CodecCapabilitySnapshotTest` | 3 | 整机能力快照 / HEVC Main10 证据 / 编码器 Surface·CQ·VBR（**不需要媒体素材**） |
 | `plugins/plugin-player-exo` | `LegacyPlaybackTest` | 8 | WMV2 / QPel / Xvid / MJPEG 出帧、H264 互切 |
+| `plugins/plugin-player-exo` | `NpFfmpegVideoRendererTest` | 3 | FFmpeg 渲染器的 Surface 克隆复用/释放/null 透传（**不需要媒体素材**） |
 | `plugins/plugin-player-exo` | `SubtitleQueueTest` | 4 | 队列身份、探测期挂字幕、裁剪不泄漏、清队列 |
 
-测试从 `instrumentation.context.assets` 读测试 APK 自带素材，复制到 `targetContext.cacheDir` 后使用；不依赖 `/sdcard` 或 `Movies`。`SubtitleQueueTest` 的 SRT 在代码内联生成，不需要字幕文件。
+前五类与 `LegacyPlaybackTest` 从 `instrumentation.context.assets` 读测试 APK 自带素材，复制到
+`targetContext.cacheDir` 后使用；不依赖 `/sdcard` 或 `Movies`。`SubtitleQueueTest` 的 SRT 在代码内联生成。
+`CodecCapabilitySnapshotTest` 不读素材，产出写到
+`targetContext.getExternalFilesDir(null)/codec-capability-snapshot.json`。
+`NpFfmpegVideoRendererTest` 只用 `SurfaceTexture` 构造 Surface，不需要媒体文件。
 
 ## 2. 素材清单
 
@@ -54,15 +60,36 @@ cd "D:\Code\Player\None Player"
 
 已从 APK 抽出资产复核：`np-wmv2.avi` 与 `subtitle-queue.mp4` 的 SHA-256 与本地文件一致（其余同上表）。因此 **compiled = yes（仅本机素材存在时）**；干净检出仍是 blocked。
 
-## 4. executed（本轮未执行）
+## 4. executed（2026-10-22 R0/T1）
 
-- 本轮没有运行 `connectedDebugAndroidTest`：设备未唤醒/未准备，且 `FfmpegNativeLoadTest` 的 `.so` 与推送脚本缺失。
-- 具备条件后的命令（按模块单独跑，避免一个类的失败拖住另一个）：
+- `CodecCapabilitySnapshotTest` 已在两台基线设备各执行 **3 项 / 0 失败**：
+  - 骁龙平板 `60dd2f94`（`23043RP34C`，Android 14 / API 34）：`OK (3 tests)`；
+    产物 `docs/decoding/snapshots/codec-capability-23043RP34C-2026-10-22.json`。
+  - 天玑手机 `HUBQRGI7B6VGVGY9`（`2407FRK8EC`，Android 16 / API 36）：`OK (3 tests)`；
+    产物 `docs/decoding/snapshots/codec-capability-2407FRK8EC-2026-10-22.json`。
+  - 命令：先 `assembleDebugAndroidTest`，`adb -s <serial> install -r -t`，再
+    `am instrument -w -e class com.noneplayer.core.media.probe.CodecCapabilitySnapshotTest
+    com.noneplayer.core.media.android.test/androidx.test.runner.AndroidJUnitRunner`。
+  - 两机快照均为 0 查询错误；能力结论见
+    [`codec-capability-matrix-2026-10-22.md`](codec-capability-matrix-2026-10-22.md)。
+- `NpFfmpegVideoRendererTest`（E172）在两台设备各执行 **3 项 / 0 失败**（骁龙 0.057s、天玑 0.03s），
+  验证 Surface 克隆复用、disable 后重建、null 透传。天玑首次安装 `plugin-player-exo-debug-androidTest.apk`
+  会弹 MIUI「USB 安装提示」并返回 `INSTALL_FAILED_USER_RESTRICTED`；在设备上点「继续安装」
+  （本轮 1220x2712 屏幕上按钮中心约 `(325,2458)`；系统布局变化需重新截屏定位）后安装成功。
+  后续同类安装需预留这一步。
+- `LegacyPlaybackTest`（E172）在两台设备各跑相关 6 项：`legacyRendererFactoryBuildsTwice`、
+  `wmv2RendersFrames`、`wmv2PictureSample`、`switchBetweenH264AndWmv2DoesNotFail`、
+  `switchBetweenH264AndMjpegDoesNotFail`、`mjpegStaysOnBitmapRenderer` → **骁龙 6/6、天玑 6/6**。
+  未跑的 `qpelRendersFramesInSyncWithAudio` / `xvidClipStaysOnPlatformDecoder` 仍撞设备
+  mp4v 解码缺陷与 ImageReader 格式不匹配（E170 已记），不是本轮回归。
+- 其余仪器类本轮未跑：`QpelCodecProbeTest`、`Wmv2PictureTest`、`LegacyPlaybackTest` 等仍按
+  §2 的素材授权状态处理；`FfmpegNativeLoadTest` 仍因设备侧 5 个 `.so` 缺失 **BLOCKED**。
+- 需要完整模块回归时仍用（会一并触发失败类，建议按类单独跑）：
   ```powershell
   ./gradlew :core:media-android:connectedDebugAndroidTest `
             :plugins:plugin-player-exo:connectedDebugAndroidTest --offline
   ```
-- 执行前先恢复素材（放到两个模块的 `src/androidTest/assets/`）并运行：
+- 执行前恢复素材（放到两个模块的 `src/androidTest/assets/`）并运行：
   ```powershell
   ./docs/verify-instrumentation-assets.ps1 -RequireAll
   ```

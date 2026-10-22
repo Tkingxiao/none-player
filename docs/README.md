@@ -1,15 +1,18 @@
 # 文档导航
 
-更新：2026-10-20。阅读顺序：**本页 → 本轮审查附录 → 统一任务 → 对应设计规格/历史证据**。
+更新：2026-10-22。阅读顺序：**本页 → 本轮审查附录 → 统一任务 → 对应设计规格/历史证据**。
 
 | 文档 | 职责 |
 | --- | --- |
+| [编解码与转码优化方案-2026-10-22.md](编解码与转码优化方案-2026-10-22.md) | 编解码能力/转码/格式拓展的最终路线；R0–R5 阶段与 A/B/C 清单 |
+| [decoding/codec-capability-matrix-2026-10-22.md](decoding/codec-capability-matrix-2026-10-22.md) | **R0/T1 实测**：两台基线设备的 decoder/encoder 声明矩阵、快照 schema 与导出命令 |
 | [项目审查与优化路线-2026-10-20.md](项目审查与优化路线-2026-10-20.md) | 本轮代码证据、旧结论订正、REV-01–16、分批实现路径与验收；不是另一套独立任务状态表 |
 | `播放体验与动效审查.md` | A01–A50 历史审计、bug list对照和 E 系执行档案；头部标明快照日期，不当当前全局完成度 |
-| `任务文档.md` | **统一任务入口**：A1–A34 源码/能力条目 + 本轮 REV 补充入口、§9 产品增量、B1–B22 验证范围、D1–D7 裁定。§0 当前施工顺序优先，保留已修项仅供追踪，不重复施工 |
+| `任务文档.md` | **统一任务入口**：A1–A34 源码/能力条目 + 本轮 REV 补充入口、§9 产品增量、B1–B24 验证范围、D1–D7 裁定。§0 当前施工顺序优先，保留已修项仅供追踪，不重复施工 |
 | `审查文档.md` | 历史验收证据、测量纪律；数字不可当本轮复验 |
 | `设计文档.md` | 视觉/组件/动效规格，最新用户需求优先于旧规格 |
 | `decoding/extension-decoder-decision.md` | 实际解码链及依赖合规待核 |
+| `decoding/instrumentation-assets.md` | androidTest 素材/执行清单；R0/T1 能力快照测试已执行 |
 | `buglist-device-test.ps1` | 默认模拟器抓图/点按；显式`-AllowPhysicalDevice`允许已授权真机，不清除数据 |
 | `audit-device-matrix.ps1` | 窗口尺寸模拟，恢复设置，不等于真实铰链 |
 | `playback-regression.ps1` | 后台无自动PiP、缺失文件→正常文件恢复、退播放页回桌面回归 |
@@ -19,6 +22,9 @@
 
 ## 当前验证范围
 
+- **R0/T1 编解码能力快照（2026-10-22，E171）**：两台基线设备都用 `CodecCapabilitySnapshotTest` 导出运行时能力，均 `OK (3 tests)`；骁龙 72 codec（45 解/27 编）、天玑 90 codec（64 解/26 编），查询错误 0。两机 HEVC 硬解均声明 Main10；骁龙 1080p HEVC CQ 无编码器（`.hevc.cq` 上限 512x512），天玑 CQ 可用。矩阵与产物见
+  [decoding/codec-capability-matrix-2026-10-22.md](decoding/codec-capability-matrix-2026-10-22.md)。
+- **R7/A19 余项（2026-10-22，E172）**：NextLib `FfmpegVideoRenderer` 的 Surface 克隆已用 `Renderer` 委托包上；两机 `NpFfmpegVideoRendererTest` 3/3、相关 `LegacyPlaybackTest` 6/6（天玑首次安装时点掉了 MIUI「USB 安装提示」）；全量 test 116/778、lint 15 份 0 issue、release 19,687,445 B。FFmpeg-only 实片端到端与 AVFrame 直接上屏仍欠（B24 / §0 第 10 行）。
 - **R0 收口后（2026-10-20 18:52–18:53）`test` 通过：70 套件 / 439 项 / 0 失败、错误、跳过**；强制重跑且关闭构建缓存，327 个任务 executed（1m33s）。精确离线命令、模块计数、警告与时间见[审查文档 §6.1](审查文档.md) 与[路线 §2](项目审查与优化路线-2026-10-20.md#2-本轮测试基线)。
 - **R1 收口后（2026-10-20 19:24–19:25）`test` 通过：77 套件 / 496 项 / 0 失败、错误、跳过**；337 个任务 executed（46s）。同一工作树补跑 `lint + assembleDebug + assembleRelease`（2m8s，`lintVitalRelease` 通过；模块 lint 0 issue、app release 1 条既有 `UseKtx` 警告），release APK 41,847,947 B（SHA256 `9DF8F0C8…`，装机 19:28:10）；androidTest 未跑。
 - **R0（REV-01/02/03/12/13 + A33）已在平板 `60dd2f94` 用最终包完成 REV-01/REV-13 真机复验**（撤音频权限→不完整扫描不删历史/收藏/快照、横幅与 note、恢复后复原）；REV-02/REV-12 的旧 SDK/第二卷分支只有自动测试背书。证据见[审查文档 §9](审查文档.md)、《任务文档》§11 E151。
