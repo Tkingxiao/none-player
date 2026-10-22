@@ -59,4 +59,59 @@ class MediaComparatorTest {
             listOf(short, long).sortedWith(mediaComparator(SortMode.SIZE, ascending = false)).map { it.title },
         )
     }
+
+    @Test
+    fun `最近播放按 lastPlayedAt 排，未播放条目落到后面`() {
+        val a = item("a", addedAtMs = 1)
+        val b = item("b", addedAtMs = 2)
+        val c = item("c", addedAtMs = 3)
+        val playback = PlaybackSortContext(
+            lastPlayedAt = mapOf("local:a" to 100L, "local:b" to 300L),
+        )
+        assertEquals(
+            listOf("b", "a", "c"),
+            listOf(a, b, c)
+                .sortedWith(mediaComparator(SortMode.RECENT, ascending = false, playback))
+                .map { it.title },
+        )
+        assertEquals(
+            listOf("c", "a", "b"),
+            listOf(a, b, c)
+                .sortedWith(mediaComparator(SortMode.RECENT, ascending = true, playback))
+                .map { it.title },
+        )
+    }
+
+    @Test
+    fun `最常看按 playCount 排，非历史档不受上下文影响`() {
+        val a = item("a", addedAtMs = 1)
+        val b = item("b", addedAtMs = 2)
+        val c = item("c", addedAtMs = 3)
+        val playback = PlaybackSortContext(
+            playCounts = mapOf("local:a" to 3, "local:c" to 5),
+        )
+        assertEquals(
+            listOf("c", "a", "b"),
+            listOf(a, b, c)
+                .sortedWith(mediaComparator(SortMode.MOST_PLAYED, ascending = false, playback))
+                .map { it.title },
+        )
+        assertEquals(
+            listOf("a", "b", "c"),
+            listOf(a, b, c)
+                .sortedWith(mediaComparator(SortMode.ADDED, ascending = true, playback))
+                .map { it.title },
+        )
+    }
+
+    @Test
+    fun `搜索排序不提供历史档，历史档回落为最近添加`() {
+        assertEquals(
+            listOf(SortMode.NAME, SortMode.ADDED, SortMode.DURATION, SortMode.SIZE),
+            SEARCH_SORT_MODES,
+        )
+        assertEquals(SortMode.ADDED, SortMode.RECENT.forSearch())
+        assertEquals(SortMode.ADDED, SortMode.MOST_PLAYED.forSearch())
+        assertEquals(SortMode.NAME, SortMode.NAME.forSearch())
+    }
 }

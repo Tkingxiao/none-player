@@ -89,12 +89,14 @@ private val Context.dataStore: androidx.datastore.core.DataStore<androidx.datast
 )
 
 /** 媒体库排序方式 */
-enum class SortMode(val label: String) {
+enum class SortMode(val label: String, val usesPlaybackHistory: Boolean = false) {
     NAME("名称"),
     // 设计稿 SORTS 的文案是「最近添加」——「最新」是错字级偏差，逐字对齐
     ADDED("最近添加"),
     DURATION("时长"),
     SIZE("大小"),
+    RECENT("最近播放", usesPlaybackHistory = true),
+    MOST_PLAYED("最常看", usesPlaybackHistory = true),
 }
 
 data class LibraryPreferences(
@@ -300,6 +302,8 @@ class AppSettings(private val context: Context) {
             SortMode.NAME.name -> SortMode.NAME
             SortMode.DURATION.name -> SortMode.DURATION
             SortMode.SIZE.name -> SortMode.SIZE
+            SortMode.RECENT.name -> SortMode.RECENT
+            SortMode.MOST_PLAYED.name -> SortMode.MOST_PLAYED
             else -> SortMode.ADDED
         }
     }

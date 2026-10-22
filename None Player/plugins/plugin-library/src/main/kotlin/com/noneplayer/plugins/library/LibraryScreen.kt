@@ -364,7 +364,28 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val mediaLoaded = mediaState != null
     val items = mediaState ?: emptyList()
 
-    val sortedItems = rememberSortedMediaItems(items, sortMode, sortAscending)
+    // D2：播放进度接线——「继续观看 / 已看 x% / 封面进度线 / 未看完筛选」的单一数据源。
+    // §8.3 起来源是 Room 历史（DataStore 断点键随 E11 迁移退役）：会话每 5s/暂停/切集
+    // 写入仓库，这里一次读全量再经 CompositionLocal 下发，卡片与筛选只读
+    // [LocalPlaybackProgress]，不再各开订阅。
+    // 「最近播放 / 最常看」排序要用同一份历史，故在排序前收集；键必须是跨来源唯一键
+    // `sourceId:mediaId`（[HistoryEntry.keyOf]，E73 分命名空间），不能退化成裸 ID：
+    // 不同 MediaSourceProvider 出现相同媒体 ID 时，associate 会互相覆盖同一键。
+    val historyEntries by history.recent.collectAsStateWithLifecycle()
+    val positions = remember(historyEntries) {
+        historyEntries.associate { it.mediaKey to it.positionMs }
+    }
+    val lastAt = remember(historyEntries) {
+        historyEntries.associate { it.mediaKey to it.lastPlayedAt }
+    }
+    val playCounts = remember(historyEntries) {
+        historyEntries.associate { it.mediaKey to it.playCount }
+    }
+    val playbackSort = remember(lastAt, playCounts) {
+        PlaybackSortContext(lastPlayedAt = lastAt, playCounts = playCounts)
+    }
+
+    val sortedItems = rememberSortedMediaItems(items, sortMode, sortAscending, playbackSort)
 
     // 文件夹层级树（根 = 虚拟根；进入子级后展示子文件夹 + 本级视频）
     val folderRoot = remember(sortedItems) { buildFolderTree(sortedItems) }
@@ -567,23 +588,6 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // 倒序取 8 条——排序偏好（名称/大小）不该改写这个区块的语义，所以独立计算。
     val recentItems = remember(items) { items.sortedByDescending { it.addedAtMs }.take(8) }
 
-    // D2：播放进度接线——「继续观看 / 已看 x% / 封面进度线 / 未看完筛选」的单一数据源。
-    // §8.3 起来源是 Room 历史（DataStore 断点键随 E11 迁移退役）：会话每 5s/暂停/切集
-    // 写入仓库，这里一次读全量再经 CompositionLocal 下发，卡片与筛选只读
-    // [LocalPlaybackProgress]，不再各开订阅。
-    val historyEntries by history.recent.collectAsStateWithLifecycle()
-    // 审查批次 A3：键必须是**跨来源唯一键** `sourceId:mediaId`，不能用裸 `mediaId`。
-    // 历史的唯一键本来就是它（[HistoryEntry.keyOf]，E73 分命名空间），但这里退化成裸 ID：
-    // 不同 MediaSourceProvider 出现相同媒体 ID 时，associate 会互相覆盖同一键，
-    // 于是"继续观看"的进度、未看完筛选、最近播放排序可能用到另一来源那条记录。
-    // 建表与查表（[fractionOf] / 聚合页 / 详情续播）必须同口径，故统一走 keyOf。
-    val positions = remember(historyEntries) {
-        historyEntries.associate { it.mediaKey to it.positionMs }
-    }
-    // 「播放历史 / 最近播放」的时间序：进度值排不出时间序，另取一份 lastAt
-    val lastAt = remember(historyEntries) {
-        historyEntries.associate { it.mediaKey to it.lastPlayedAt }
-    }
     // 下拉刷新（A25）：指示器跟随各来源的 scanProgress，不再用本地 refreshing +
     // 15s 超时猜收尾；扫描失败/取消时来源自己回到 idle，指示器随之收起。
     val scanProgress by produceState(ScanProgress(), sources) {
@@ -659,7 +663,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
             subtitle = shown.folder?.takeIf { it.isNotBlank() } ?: "本地视频"
         }
         aggregate != null -> {
-            val meta = aggregateMeta(aggregate!!)
+            val meta = aggregateMeta(aggregate!!, sortMode)
             title = meta.first
             subtitle = meta.second
         }
@@ -2390,18 +2394,25 @@ private fun AggregateList(
     val ink = LocalNpInk.current
     val gutter = if (compact) 14.dp else 20.dp
 
-    val base = remember(all, mode, positions, lastAt, favoriteKeys) {
+    val base = remember(all, mode, sortMode, positions, lastAt, favoriteKeys) {
         when (mode) {
             "continue" ->
                 all.filter { fractionOf(it, positions) in 0.01f..<HistoryRepository.WATCHED_DONE_RATIO }
             // 设计稿 `videos.filter(v => v.prog > 0)`，顺序 = 最近播放时间倒序
-            // 与建表同键（审查批次 A3）
-            "history" -> all.filter { (positions[HistoryEntry.keyOf(it)] ?: 0L) > 0L }
-                .sortedByDescending { lastAt[HistoryEntry.keyOf(it)] ?: 0L }
+            // 与建表同键（审查批次 A3）。默认档（ADDED）保留这个语义；
+            // 用户显式换到其它档时按所选排序，别让排序按钮形同虚设。
+            "history" -> {
+                val played = all.filter { (positions[HistoryEntry.keyOf(it)] ?: 0L) > 0L }
+                if (sortMode == SortMode.ADDED) {
+                    played.sortedByDescending { lastAt[HistoryEntry.keyOf(it)] ?: 0L }
+                } else {
+                    played
+                }
+            }
             "videos" -> all.filter { it.kind == MediaKind.VIDEO }
             "audios" -> all.filter { it.kind == MediaKind.AUDIO }
-            // recent = 按加入时间倒序的全量（首页的 take(8) 只是它的前 8 条）
-            "recent" -> all.sortedByDescending { it.addedAtMs }
+            // recent = 全量的加入时间序；`all` 已按当前排序档排好，不能再强制按 addedAt 重排。
+            "recent" -> all
             // favorites = 我的收藏（按收藏时间倒序；键匹配走 E73 口径的 media_key）
             "favorites" -> {
                 val order = favoriteKeys.withIndex().associate { (i, k) -> k to i }
@@ -2412,7 +2423,7 @@ private fun AggregateList(
         }
     }
     val shown = remember(base, filter, positions) { filterList(base, filter, positions) }
-    val meta = aggregateMeta(mode)
+    val meta = aggregateMeta(mode, sortMode)
     val isLead = mode == "videos" || mode == "audios"
     // 设计稿 listFoot：多集 = 同目录条目数 > 1（跨文件夹聚合时逐条按目录判定）。
     // 目录计数基于**全量** all 而不是当前聚合列表——剧集数与该聚合的筛选无关。
@@ -2559,14 +2570,18 @@ internal enum class FilterKey(val key: String, val label: String) {
     }
 }
 
-/** 聚合列表的标题与副标题（设计稿 `moreTitles`）。 */
-private fun aggregateMeta(mode: String): Pair<String, String> = when (mode) {
+/** 聚合列表的标题与副标题（设计稿 `moreTitles`）。排序可变的聚合把当前排序档带进副标题。 */
+private fun aggregateMeta(mode: String, sortMode: SortMode): Pair<String, String> = when (mode) {
     "continue" -> "继续观看" to "未看完的视频与音频"
-    "history" -> "播放历史" to "按最近播放排序"
+    "history" -> "播放历史" to if (sortMode == SortMode.ADDED) {
+        "按最近播放排序"
+    } else {
+        "按${sortMode.label}排序"
+    }
     "favorites" -> "我的收藏" to "收藏的条目"
     "videos" -> "全部视频" to "本地库中的视频文件"
     "audios" -> "全部音频" to "本地库中的纯音频文件"
-    else -> "最近添加" to "按加入时间排序"
+    else -> "最近添加" to "按${sortMode.label}排序"
 }
 
 
@@ -2659,14 +2674,34 @@ private const val SYNC_SORT_LIMIT = 512
 /** 设计稿 `v.neu`：「新增」角标的时间窗——48 小时内加入的条目才带角标 */
 private const val NEW_BADGE_WINDOW_MS = 48 * 60 * 60 * 1000L
 
-/** E20：排序口径收口为普通函数——组合内外共用，四档比较器不再散在 remember lambda 里 */
-internal fun mediaComparator(sortMode: SortMode, ascending: Boolean): Comparator<MediaItem> {
+/** 播放历史排序的只读快照；只含排序需要的 lastPlayedAt / playCount，不含每 5s 变的进度。 */
+internal data class PlaybackSortContext(
+    val lastPlayedAt: Map<String, Long> = emptyMap(),
+    val playCounts: Map<String, Int> = emptyMap(),
+) {
+    companion object {
+        val EMPTY = PlaybackSortContext()
+    }
+}
+
+/** E20：排序口径收口为普通函数——组合内外共用，六档比较器不再散在 remember lambda 里 */
+internal fun mediaComparator(
+    sortMode: SortMode,
+    ascending: Boolean,
+    playback: PlaybackSortContext = PlaybackSortContext.EMPTY,
+): Comparator<MediaItem> {
     val comparator: Comparator<MediaItem> = when (sortMode) {
         // E42：自然序（E2 排在 E10 前）——共享比较器，与连播队列/详情页列表同一口径
         SortMode.NAME -> MediaNaturalOrder
         SortMode.ADDED -> compareBy { it.addedAtMs }
         SortMode.DURATION -> compareBy { it.durationMs }
         SortMode.SIZE -> compareBy { it.sizeBytes }
+        SortMode.RECENT -> compareBy<MediaItem> {
+            playback.lastPlayedAt[HistoryEntry.keyOf(it)] ?: 0L
+        }.thenByDescending { it.addedAtMs }
+        SortMode.MOST_PLAYED -> compareBy<MediaItem> {
+            playback.playCounts[HistoryEntry.keyOf(it)] ?: 0
+        }.thenByDescending { it.addedAtMs }
     }
     return if (ascending) comparator else comparator.reversed()
 }
@@ -2675,7 +2710,15 @@ private fun sortedMediaItems(
     items: List<MediaItem>,
     sortMode: SortMode,
     ascending: Boolean,
-): List<MediaItem> = items.sortedWith(mediaComparator(sortMode, ascending))
+    playback: PlaybackSortContext = PlaybackSortContext.EMPTY,
+): List<MediaItem> = items.sortedWith(mediaComparator(sortMode, ascending, playback))
+
+/** 搜索页没有播放历史上下文：不提供历史档，当前全局档是历史档时回落到「最近添加」。 */
+internal val SEARCH_SORT_MODES: List<SortMode> =
+    SortMode.entries.filterNot { it.usesPlaybackHistory }
+
+internal fun SortMode.forSearch(): SortMode =
+    if (usesPlaybackHistory) SortMode.ADDED else this
 
 /**
  * 排序结果的**跨重组缓存**（用户实报"每次从其他界面切过来都会出现从默认排序
@@ -2693,15 +2736,32 @@ private object MediaSortCache {
     private var items: List<MediaItem>? = null
     private var mode: SortMode? = null
     private var ascending = false
+    private var playback: PlaybackSortContext = PlaybackSortContext.EMPTY
     private var result: List<MediaItem>? = null
 
-    fun get(items: List<MediaItem>, mode: SortMode, ascending: Boolean): List<MediaItem>? =
-        result?.takeIf { this.items == items && this.mode == mode && this.ascending == ascending }
+    fun get(
+        items: List<MediaItem>,
+        mode: SortMode,
+        ascending: Boolean,
+        playback: PlaybackSortContext,
+    ): List<MediaItem>? = result?.takeIf {
+        this.items == items &&
+            this.mode == mode &&
+            this.ascending == ascending &&
+            this.playback == playback
+    }
 
-    fun put(items: List<MediaItem>, mode: SortMode, ascending: Boolean, result: List<MediaItem>) {
+    fun put(
+        items: List<MediaItem>,
+        mode: SortMode,
+        ascending: Boolean,
+        playback: PlaybackSortContext,
+        result: List<MediaItem>,
+    ) {
         this.items = items
         this.mode = mode
         this.ascending = ascending
+        this.playback = playback
         this.result = result
     }
 }
@@ -2717,25 +2777,28 @@ private fun rememberSortedMediaItems(
     items: List<MediaItem>,
     sortMode: SortMode,
     ascending: Boolean,
+    playback: PlaybackSortContext,
 ): List<MediaItem> {
+    // 只有历史档才把历史快照纳入排序/缓存键；普通档不让播放进度变化触发重排。
+    val effectivePlayback = if (sortMode.usesPlaybackHistory) playback else PlaybackSortContext.EMPTY
     val small = items.size <= SYNC_SORT_LIMIT
     val syncSorted = if (small) {
-        remember(items, sortMode, ascending) {
-            sortedMediaItems(items, sortMode, ascending)
-                .also { MediaSortCache.put(items, sortMode, ascending, it) }
+        remember(items, sortMode, ascending, effectivePlayback) {
+            sortedMediaItems(items, sortMode, ascending, effectivePlayback)
+                .also { MediaSortCache.put(items, sortMode, ascending, effectivePlayback, it) }
         }
     } else {
         items
     }
-    var asyncSorted by remember(items, sortMode, ascending) {
-        mutableStateOf(MediaSortCache.get(items, sortMode, ascending))
+    var asyncSorted by remember(items, sortMode, ascending, effectivePlayback) {
+        mutableStateOf(MediaSortCache.get(items, sortMode, ascending, effectivePlayback))
     }
-    LaunchedEffect(items, sortMode, ascending) {
+    LaunchedEffect(items, sortMode, ascending, effectivePlayback) {
         if (!small) {
             val sorted = withContext(Dispatchers.Default) {
-                sortedMediaItems(items, sortMode, ascending)
+                sortedMediaItems(items, sortMode, ascending, effectivePlayback)
             }
-            MediaSortCache.put(items, sortMode, ascending, sorted)
+            MediaSortCache.put(items, sortMode, ascending, effectivePlayback, sorted)
             asyncSorted = sorted
         }
     }

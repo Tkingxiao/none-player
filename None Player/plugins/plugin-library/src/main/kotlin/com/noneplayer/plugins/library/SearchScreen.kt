@@ -129,6 +129,7 @@ fun SearchScreen(navigator: Navigator) {
     val history by settings.searchHistory.collectAsStateWithLifecycle(initialValue = emptyList())
     val sortMode by settings.sortMode.collectAsStateWithLifecycle(SortMode.ADDED)
     val sortAscending by settings.sortAscending.collectAsStateWithLifecycle(false)
+    val effectiveSortMode = sortMode.forSearch()
     val gridColumns by settings.gridColumns.collectAsStateWithLifecycle(2)
     val viewStyle by settings.listViewStyle.collectAsStateWithLifecycle("grid")
 
@@ -136,7 +137,7 @@ fun SearchScreen(navigator: Navigator) {
     val mediaState = rememberMediaItems()
     val items = mediaState ?: emptyList()
 
-    val results = remember(items, debouncedQuery, sortMode, sortAscending) {
+    val results = remember(items, debouncedQuery, effectiveSortMode, sortAscending) {
         val q = debouncedQuery.trim()
         if (q.isEmpty()) {
             emptyList()
@@ -145,14 +146,7 @@ fun SearchScreen(navigator: Navigator) {
             // 走 `PinyinSearch.matchesAll` 唯一入口——扩展名分支曾在两处各写一遍，
             // 且 `contains("")` 让搜索单个 "." 命中全库（审查批次 A1）。
             val matched = items.filter { item -> PinyinSearch.matchesAll(item, q) }
-            val comparator: Comparator<MediaItem> = when (sortMode) {
-                // E42：自然序（与媒体库/队列同一口径）
-                SortMode.NAME -> MediaNaturalOrder
-                SortMode.ADDED -> compareBy { it.addedAtMs }
-                SortMode.DURATION -> compareBy { it.durationMs }
-                SortMode.SIZE -> compareBy { it.sizeBytes }
-            }
-            if (sortAscending) matched.sortedWith(comparator) else matched.sortedWith(comparator.reversed())
+            matched.sortedWith(mediaComparator(effectiveSortMode, sortAscending))
         }
     }
 
@@ -469,6 +463,7 @@ private fun SearchHead(
     compact: Boolean = false,
 ) {
     val ink = LocalNpInk.current
+    val effectiveSortMode = sortMode.forSearch()
     // 设计稿 `.sec-head{gap:12px}`，控件顺序 `sortMenu → viewToggle → 计数`
     Row(
         modifier = Modifier
@@ -487,12 +482,12 @@ private fun SearchHead(
             modifier = Modifier.weight(1f),
         )
         NpFilterSelect(
-            label = sortMode.label,
+            label = effectiveSortMode.label,
             icon = NpIcon.Sort,
-            options = SortMode.entries.map { it.label },
-            selected = sortMode.label,
+            options = SEARCH_SORT_MODES.map { it.label },
+            selected = effectiveSortMode.label,
             onSelect = { label ->
-                SortMode.entries.firstOrNull { it.label == label }?.let(onSort)
+                SEARCH_SORT_MODES.firstOrNull { it.label == label }?.let(onSort)
             },
             alignEnd = true,
         )
