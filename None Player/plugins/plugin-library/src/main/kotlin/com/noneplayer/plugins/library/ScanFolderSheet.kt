@@ -4,13 +4,18 @@ import android.content.Context
 import android.provider.DocumentsContract
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.noneplayer.core.ui.LocalNpInk
@@ -20,6 +25,7 @@ import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpSheet
+import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.kernel.api.ScanProgress
 
@@ -92,13 +98,16 @@ internal fun ScanFolderSheet(
                 },
             )
             if (scanning) {
+                // 扫描中的阶段 + 进度（契约 §5）：此前只有一句「正在准备扫描…」，
+                // 遍历隐藏目录这种长耗时段的几分钟里界面完全静止，用户以为卡死。
+                // 现在按 phase 报阶段，有总数走确定进度，只有已发现条目数时走
+                // indeterminate + 「已发现 N 项」。
+                ScanProgressBlock(progress = scanProgress)
+                // 取消入口在扫描中常驻可点：onClick 恒非空（NpSettingRow 无 enabled
+                // 概念，传 null 才不可点），文案固定「取消扫描」，点一次即取消。
                 NpSettingRow(
                     title = "取消扫描",
-                    subtitle = if (scanProgress.total > 0) {
-                        "已处理 ${scanProgress.processed} / ${scanProgress.total} 项"
-                    } else {
-                        "正在准备扫描…"
-                    },
+                    subtitle = "点一次即取消当前扫描，已入库的文件保留",
                     icon = NpIcon.Close,
                     onClick = onCancelScan,
                 )
@@ -120,6 +129,110 @@ internal fun ScanFolderSheet(
                 },
             )
         }
+    }
+}
+
+/**
+ * 扫描阶段 + 进度指示（Sheet 与库页顶部紧凑条共用同一套文案口径）。
+ *
+ * - `total > 0`：确定进度条 + 「已处理 x / y 项」。
+ * - `total == 0` 且阶段是 [com.noneplayer.kernel.api.ScanPhase.HIDDEN_WALK]：
+ *   indeterminate + 「已发现 N 项」——目录树深度事先不可知，`processed` 报的是
+ *   已发现条目数，给一个确定百分比就是假精确。
+ * - 阶段未知（老来源）：保持既有「正在准备扫描…」，不引入新状态。
+ */
+@Composable
+internal fun ScanProgressBlock(progress: ScanProgress, modifier: Modifier = Modifier) {
+    val ink = LocalNpInk.current
+    val fraction = scanProgressFraction(progress)
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 4.dp, vertical = 6.dp),
+        verticalArrangement = Arrangement.spacedBy(NpSpace.xs),
+    ) {
+        Text(
+            text = scanProgressHeadline(progress),
+            style = NpTypography.titleSmall,
+            color = ink.fg,
+        )
+        if (fraction != null) {
+            LinearProgressIndicator(
+                progress = { fraction },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(NpDimens.trackLine),
+                color = ink.accent,
+                trackColor = ink.border,
+            )
+        } else {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(NpDimens.trackLine),
+                color = ink.accent,
+                trackColor = ink.border,
+            )
+        }
+        scanProgressDetail(progress)?.let { detail ->
+            Text(text = detail, style = NpMonoSmall, color = ink.muted)
+        }
+    }
+}
+
+/**
+ * 库页顶部的紧凑扫描状态条：阶段文案 + 常驻取消入口。
+ *
+ * 与下拉刷新指示器同处页面顶部（调用方把它排在内容首行），扫描结束
+ * （`active == false`）时由调用方不再渲染，本组件不自行消失。
+ *
+ * 这里不画进度条：顶部已经有下拉刷新指示器承担"有动作在跑"的弱信号，
+ * 再叠一条进度线是两套并行的进度语义。
+ */
+@Composable
+internal fun ScanStatusStrip(
+    progress: ScanProgress,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ink = LocalNpInk.current
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(NpSpace.sm),
+    ) {
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = NpSpace.lg),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                text = scanProgressHeadline(progress),
+                style = NpTypography.bodySmall,
+                color = ink.fg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            scanProgressDetail(progress)?.let { detail ->
+                Text(
+                    text = detail,
+                    style = NpMonoSmall,
+                    color = ink.muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        // 触控目标 44dp（§14）：紧凑条只有文字高，取消键不能跟着缩水
+        NpIconButton(
+            icon = NpIcon.Close,
+            contentDescription = "取消扫描",
+            onClick = onCancel,
+            size = NpDimens.touchTarget,
+            iconSize = 20.dp,
+            tint = ink.danger,
+        )
     }
 }
 

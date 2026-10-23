@@ -38,6 +38,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.foundation.lazy.items
@@ -785,6 +786,17 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                     },
                 ) {
                 Column(modifier = Modifier.fillMaxSize()) {
+                        // 扫描中的紧凑状态（契约 §5）：阶段文案 + 常驻取消入口，紧贴下拉刷新
+                        // 指示器下方一行。不接管 isRefreshing、不重排页面结构，扫描结束自动消失。
+                        if (refreshing) {
+                            ScanStatusStrip(
+                                progress = scanProgress,
+                                onCancel = { sources.forEach { it.cancelScan() } },
+                                modifier = Modifier.padding(
+                                    top = if (topBarInset == Dp.Unspecified) 0.dp else topBarInset,
+                                ),
+                            )
+                        }
                         // 页内态：把上面这串条件**只写一遍**，分支按枚举分派——条件与动效同源，
                         // 不会出现"加了分支忘了动效"（M2 的"其余 fade"与 M13 的"骨架→内容 240"都在这里兑现）。
                         // 有内容时的版式判定（聚合 / 文件夹 / 首页）。提成一份给两处用——
@@ -826,7 +838,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                         // 横幅自己消费了顶栏避让：把子树里的顶栏 inset 下调为 0，否则
                         // Home/Folder/Aggregate 列表的 contentPadding 会再避让一次，
                         // 横幅与首行之间空出一整条顶栏高度。
-                        val contentTopInset = if (showPartialPermission) 0.dp else topBarInset
+                        // 扫描状态条同理：它自己也避让了一次顶栏（padding top = topBarInset），
+                        // 若不再把子树 inset 归零，状态条与首行之间会空出第二条顶栏高度。
+                        val contentTopInset = if (showPartialPermission || refreshing) 0.dp else topBarInset
                         val stageFadeMs = npDuration(Motion.NavFade)
                         val stageExitMs = npDuration(Motion.NavExit)
                         val stageShiftPx = with(LocalDensity.current) { 8.dp.roundToPx() }
@@ -968,6 +982,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                 onToggleAscending = { scope.launch { settings.setSortAscending(it) } },
                                 onOpen = openDetailOrPlayer,
                                 onOpenEpisodes = { episodeSheet = it },
+                                sources = sources,
                             )
 
                         LibraryStage.Folder -> FolderBrowser(
@@ -988,6 +1003,7 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                                 onOpenFolder = { selectedFolder = it.path },
                                 onOpenVideo = openDetailOrPlayer,
                                 onOpenEpisodes = { episodeSheet = it },
+                                sources = sources,
                             )
 
                         LibraryStage.Home -> HomeView(
@@ -1832,6 +1848,7 @@ private fun FolderBrowser(
     onOpenFolder: (FolderNode) -> Unit,
     onOpenVideo: (MediaItem) -> Unit,
     onOpenEpisodes: (List<MediaItem>) -> Unit,
+    sources: List<MediaSourceProvider>,
 ) {
     val ink = LocalNpInk.current
     val node = selected ?: root
@@ -1845,11 +1862,20 @@ private fun FolderBrowser(
     }
     val staggerWindow = npStaggerWindow(node.path)
     val itemFade = npItemFadeSpec()
+    // E203-C（契约 §8.5）：网格槽位 → 条目序号的基准。内容项之前是：无子目录提示（可选）/
+    // 控件行 / 选集入口（可选）/ 子文件夹（可选，每个占一槽）。
+    // 在内容项之前增删 item 必须同步改下面这个式子，清单见 CoverWindow.kt 顶部「维护提示」段。
+    val coverLeaderSlots = (if (noSubfolders) 1 else 0) + 1 +
+        (if (node.directVideos.size > 1 && shownVideos.isNotEmpty()) 1 else 0) +
+        node.children.size
+    val gridState = rememberLazyGridState()
+    CoverDemandEffect(items = shownVideos, leaderSlots = coverLeaderSlots, sources = sources, state = gridState)
 
     LazyVerticalGrid(
         // 设计稿 compact 档媒体网格恒 2 列（`.tier-compact .grid.v` 607）：
         // Adaptive(176dp) 在 360dp 窗口 floor 出 1 列，比设计稿更稀
         columns = gridColumnsFor(compact, gridColumns),
+        state = gridState,
         contentPadding = PaddingValues(
             top = LocalNpTopBarInset.current,
             start = gutter,
@@ -2390,6 +2416,7 @@ private fun AggregateList(
     onToggleAscending: (Boolean) -> Unit,
     onOpen: (MediaItem) -> Unit,
     onOpenEpisodes: (List<MediaItem>) -> Unit,
+    sources: List<MediaSourceProvider>,
 ) {
     val ink = LocalNpInk.current
     val gutter = if (compact) 14.dp else 20.dp
@@ -2434,9 +2461,16 @@ private fun AggregateList(
     }
     val staggerWindow = npStaggerWindow(mode)
     val itemFade = npItemFadeSpec()
+    // E203-C（契约 §8.5）：把网格可见区换算成条目区间，再按方向扩一/两屏，交给来源预热封面。
+    // 内容项之前的槽位：标题 / 控件行 / 副标题，外加可能出现的空态与选集入口。
+    // 在内容项之前增删 item 必须同步改下面这个式子，清单见 CoverWindow.kt 顶部「维护提示」段。
+    val coverLeaderSlots = 3 + (if (shown.isEmpty()) 1 else 0) + (if (multi.isNotEmpty()) 1 else 0)
+    val gridState = rememberLazyGridState()
+    CoverDemandEffect(items = shown, leaderSlots = coverLeaderSlots, sources = sources, state = gridState)
 
     LazyVerticalGrid(
         columns = gridColumnsFor(compact, gridColumns),
+        state = gridState,
         contentPadding = PaddingValues(
             top = LocalNpTopBarInset.current,
             start = gutter,

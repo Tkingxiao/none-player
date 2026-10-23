@@ -444,6 +444,22 @@ internal class FakeDocumentsProvider(
     /** 只返回前 N 个子项（模拟预算耗尽/部分结果）；null = 全部返回。 */
     var maxChildren: Int? = null
 
+    /**
+     * 每次 children 查询前的注入延迟（毫秒）。
+     *
+     * 取消用例靠它把「隐藏目录遍历」拉长到可观测的量级：walk 改成多车道后每条车道都在
+     * 真实 I/O 里，没有延迟就无法在 walk 进行中按下取消。
+     */
+    var queryDelayMs: Long = 0
+
+    /**
+     * 动态子项（优先于 [setChildren] 的静态表）：按 docId 现场生成子项。
+     *
+     * 用来造「无底洞」目录链——静态表只能铺有限层，验不了 MAX_WALK_DEPTH（64）上限；
+     * 返回 null 表示该 docId 交给静态表处理。
+     */
+    var dynamicChildren: ((treeDocId: String) -> List<DocEntry>?)? = null
+
     var queryCount: Int = 0
         private set
 
@@ -471,12 +487,13 @@ internal class FakeDocumentsProvider(
         sortOrder: String?,
     ): Cursor? {
         queryCount++
+        if (queryDelayMs > 0L) Thread.sleep(queryDelayMs)
         val columns = projection?.takeIf { it.isNotEmpty() }?.map { it } ?: DEFAULT_PROJECTION.toList()
         val docId = parentDocId(uri) ?: return MatrixCursor(columns.toTypedArray())
         if (docId == failForDocId) {
             throw IllegalStateException("注入故障：SAF children 查询失败（$docId）")
         }
-        val all = childrenByDocId[docId].orEmpty()
+        val all = dynamicChildren?.invoke(docId) ?: childrenByDocId[docId].orEmpty()
         val limited = maxChildren?.let { all.take(it) } ?: all
         val cursor = MatrixCursor(columns.toTypedArray())
         limited.forEach { entry ->
@@ -629,6 +646,12 @@ internal class ScanHarness(
     sdkInt: Int = 34,
     // LocalMediaSource.HIDDEN_WALK_BUDGET 是文件私有常量，测试侧用同值字面量（20_000）。
     hiddenWalkBudget: Int = 20_000,
+    // 目录级增量索引默认**关闭**：既有用例断言的是「每轮都完整走一遍」的 IPC 计数与结果，
+    // 索引默认开会把那些断言从「IPC 次数」维度上打乱。接线用例显式传 true 并给独立临时文件。
+    val walkIndexEnabled: Boolean = false,
+    val walkIndexTtlMs: Long = ScanWalkIndex.DEFAULT_TTL_MS,
+    // 默认文件名与生产一致（LocalMediaSource.walkIndexFile / scan-contract §3）：scan_walk_index.json。
+    val walkIndexFile: File = File(context.filesDir, "scan_walk_index.json"),
 ) {
 
     val eventBus = RecordingEventBus()
@@ -644,6 +667,9 @@ internal class ScanHarness(
         processLifecycle = null,
         sdkInt = sdkInt,
         hiddenWalkBudget = hiddenWalkBudget,
+        walkIndexEnabled = walkIndexEnabled,
+        walkIndexFile = walkIndexFile,
+        walkIndexTtlMs = walkIndexTtlMs,
     )
 
     init {
@@ -739,6 +765,15 @@ internal class ScanHarness(
             org.json.JSONObject(file.readText()).getJSONArray("items").length()
         }.getOrNull()
     }
+
+    /** 真机/单测共用的扫描时间线文件（ScanTrace 落盘于 filesDir）。 */
+    fun scanTraceFile(): File = File(context.filesDir, "scan_trace.log")
+
+    /** 目录遍历索引文件（用例里应给独立临时路径，避免跨用例串味）。 */
+    fun walkIndexFileOnDisk(): File = walkIndexFile
+
+    /** 索引文件是否已落盘（取消/预算耗尽时应当为 false）。 */
+    fun walkIndexSaved(): Boolean = walkIndexFile.isFile && walkIndexFile.length() > 0
 
     fun thumbsDir(): File = File(context.cacheDir, "video_thumbs")
 

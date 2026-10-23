@@ -37,6 +37,7 @@ import com.noneplayer.kernel.api.MediaSourceProvider
 import com.noneplayer.kernel.api.MetadataEnricher
 import com.noneplayer.kernel.api.ProcessLifecycle
 import com.noneplayer.kernel.api.ScanFolderController
+import com.noneplayer.kernel.api.ScanPhase
 import com.noneplayer.kernel.api.ScanProgress
 import com.noneplayer.kernel.api.ScanResult
 import com.noneplayer.kernel.api.query
@@ -56,11 +57,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.Locale
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 /** 一次本地扫描的摘要（供设置页展示） */
 data class LocalScanSummary(
@@ -83,6 +91,163 @@ private data class QuerySlice<T>(
     val items: List<T>,
     val warnings: List<String> = emptyList(),
 )
+
+/**
+ * 隐藏目录遍历的一个「目录任务」：一条车道取一个，处理完把子目录回灌队列。
+ *
+ * [inheritedHidden] 是 E198 下钻判据的传递值（该目录是否已位于用户显式选中的隐藏分支内）。
+ */
+private data class WalkTask(
+    val treeUri: Uri,
+    val docId: String,
+    val inheritedHidden: Boolean,
+    /** 父目录列表里看到的 LAST_MODIFIED（毫秒；tree 根没有父列表，给 0）。W5 复用时当 mtime 判据 */
+    val lastModifiedMs: Long = 0L,
+    /** 目录深度（tree 根 = 0）：provider 把父/自身当子目录返回时会成环，靠它设上限兜底 */
+    val depth: Int = 0,
+)
+
+/**
+ * `MediaStore.Files` 里「无扩展名/未知类型」的一行。
+ *
+ * 游标段只物化数据、不做 I/O，读文件头（最贵的一半）留到按车道并发的第二段。
+ * [mimeByName] 非 null 表示扩展名已能判定容器，不需要开流嗅探（needsSniff 收窄）。
+ */
+private data class UnknownRow(
+    val id: String,
+    val name: String,
+    val title: String,
+    val size: Long,
+    val addedAt: Long,
+    val uri: String,
+    val folder: String?,
+    val mimeByName: String?,
+)
+
+/**
+ * 一次扫描的车道预算：设备拓扑（[ScanCpuTopology]）+ 上一轮调好的起跑许可（[ScanLanePresets]）。
+ *
+ * 为什么把「起跑值」和「上限」分开：起跑值来自上一轮的 [ScanLaneTuner.Summary.bestPermits]，
+ * 让第二轮直接站在 knee 上（省掉几个窗口的试探）；上限按设备能力给——walk 是 I/O 型负载，
+ * 许可能涨到 2 倍起跑值仍值得试；封面/时长是解码型，过量车道只会换来 GC 抖动。
+ */
+/**
+ * [CoverNegativeSink] → [ScanCoverNegativeCache] 的薄适配器。
+ *
+ * 泵只认 `isFailed/markFailed/flush`（这样泵能脱离具体缓存类单测）；时间口径由这里统一为
+ * 墙钟毫秒，泵自己不造时间源。
+ */
+private class NegativeCacheSink(private val cache: ScanCoverNegativeCache) : CoverNegativeSink {
+    override fun isFailed(key: String, nowMs: Long): Boolean = cache.isFailed(key, nowMs)
+
+    override fun markFailed(key: String, nowMs: Long): Boolean = cache.markFailed(key, nowMs)
+
+    override fun flush() {
+        cache.flush()
+    }
+}
+
+private class LaneBudget(
+    val topology: ScanCpuTopology.Topology,
+    val presets: Map<LaneKind, Int>,
+) {
+    val cores: Int = topology.cores
+
+    /** 本轮各阶段的收尾快照；扫描成功后落盘成下一轮的起跑许可。 */
+    val summaries = java.util.concurrent.ConcurrentHashMap<LaneKind, ScanLaneTuner.Summary>()
+
+    fun initial(kind: LaneKind, fallback: Int): Int = (presets[kind] ?: fallback).coerceAtLeast(1)
+
+    fun capOf(kind: LaneKind, initial: Int): Int = when (kind) {
+        // 目录遍历与嗅探都是「binder/文件 IO 密集、CPU 轻」的负载：加车道收益直接，
+        // 上限给到 24 够覆盖 8 核设备（ioWorkers 的 2 倍）仍有富余，同时挡住无限膨胀。
+        LaneKind.WALK, LaneKind.SNIFF -> (initial * 2).coerceAtLeast(8).coerceAtMost(WALK_LANE_CAP_MAX)
+        // 解码型（抽帧/读时长）：+2 档足够，上限 8 是「过量车道触发 GC 抖动」的经验边界。
+        LaneKind.COVER, LaneKind.DURATION -> (initial + 2).coerceAtLeast(4).coerceAtMost(ITEM_LANE_CAP_MAX)
+    }
+
+    fun remember(kind: LaneKind, summary: ScanLaneTuner.Summary) {
+        summaries[kind] = summary
+    }
+}
+
+/**
+ * 逐窗口取证：把「车道数 → 吞吐」曲线打成一串 `lane tick` 行。
+ *
+ * 为什么调用方自己采一份样本：窗口吞吐/利用率是 [ScanLaneTuner] 的**内部**数据（它只在
+ * 加档/锁死/降档时自己打日志），而它是 task-6 的交付、不为取证改它。这里并行采一份自己的
+ * 窗口样本（完成数差分 + [ScanProcCpu] tick 差分），只在三种时刻打一行：许可数变了 /
+ * 吞吐创新高 / 每 [HEARTBEAT_WINDOWS] 个窗口心跳一次——一轮扫描几十行，真机上足以读出曲线
+ * 又不会把 logcat 刷满。
+ */
+private class LaneWindowSampler(
+    private val kind: LaneKind,
+    private val cores: Int,
+    private val tuner: ScanLaneTuner,
+    private val log: (String) -> Unit,
+) {
+    private val done = AtomicLong(0L)
+    private var lastDone = 0L
+    private var lastAtNs = System.nanoTime()
+    private var lastTicks = ScanProcCpu.ticks()
+    private var peakThr = 0.0
+    private var lastLoggedPermits = -1
+
+    /** 每干完一件活调一次（与 [ScanLaneTuner.onItemDone] 成对调用）。 */
+    fun onItemDone() {
+        done.incrementAndGet()
+    }
+
+    /** 监视协程每窗口调一次：`window` 是 1 起的窗口序号。 */
+    fun tick(window: Int) {
+        val nowNs = System.nanoTime()
+        val elapsedMs = (nowNs - lastAtNs) / 1_000_000L
+        val total = done.get()
+        val inWindow = total - lastDone
+        lastDone = total
+        lastAtNs = nowNs
+        val ticksNow = ScanProcCpu.ticks()
+        val util = ScanProcCpu.utilization(lastTicks, ticksNow, elapsedMs, cores)
+        lastTicks = ticksNow
+        if (elapsedMs <= 0L || inWindow <= 0L) return
+        val thr = inWindow * 1000.0 / elapsedMs
+        val newPeak = thr > peakThr
+        if (newPeak) peakThr = thr
+        val permits = tuner.permits
+        val permitsChanged = lastLoggedPermits >= 0 && permits != lastLoggedPermits
+        val heartbeat = window % HEARTBEAT_WINDOWS == 0
+        if (!newPeak && !permitsChanged && !heartbeat) return
+        val reason = when {
+            permitsChanged && permits > lastLoggedPermits -> "grow"
+            permitsChanged -> "degrade"
+            newPeak -> tuner.finish().ceilingReason
+            else -> "heartbeat"
+        }
+        lastLoggedPermits = permits
+        log(
+            "lane tick kind=" + kind + " w=" + window + " permits=" + permits +
+                " thr=" + String.format(Locale.US, "%.1f", thr) + "/s" +
+                " util=" + (if (util < 0.0) "n/a" else String.format(Locale.US, "%.2f", util)) +
+                " win=" + elapsedMs + "ms reason=" + reason,
+        )
+    }
+
+    /** 阶段收尾一行：`lane tune kind=… permits=… best=… thr=…/s util=… target=… reached=… ceiling=…` */
+    fun finishLine(summary: ScanLaneTuner.Summary): String =
+        "lane tune kind=" + kind +
+            " permits=" + summary.permits +
+            " best=" + summary.bestPermits +
+            " thr=" + String.format(Locale.US, "%.1f", summary.bestThr) + "/s" +
+            " util=" + String.format(Locale.US, "%.2f", summary.utilAvg) +
+            " target=" + (if (summary.reachedTarget) "reached" else "unreached") +
+            " reached=" + summary.reachedTarget +
+            " ceiling=" + summary.ceilingReason
+
+    companion object {
+        /** 心跳间隔：300ms 窗口 × 10 ≈ 3s 一行，扫描全程仍能看到曲线走势。 */
+        const val HEARTBEAT_WINDOWS = 10
+    }
+}
 
 /**
  * 本地媒体来源——基于 MediaStore 的设备媒体扫描（视频 + 音频）。
@@ -111,6 +276,23 @@ class LocalMediaSource(
     private val sdkInt: Int = Build.VERSION.SDK_INT,
     /** R0/REV-01 测试 seam：隐藏目录遍历预算（默认 [HIDDEN_WALK_BUDGET]；注入以便测预算耗尽） */
     private val hiddenWalkBudget: Int = HIDDEN_WALK_BUDGET,
+    /** 目录级增量索引开关（生产默认开；测试默认关，见 ScanTestSupport 的 ScanHarness） */
+    private val walkIndexEnabled: Boolean = true,
+    /** 索引文件（默认 filesDir/scan_walk_index.json，见 scan-contract §3；测试可注入临时文件，避免用例间串味） */
+    private val walkIndexFile: File = File(context.filesDir, "scan_walk_index.json"),
+    /**
+     * 索引 TTL：**叶子目录不复查的最长保鲜期**，超过就别复用。
+     *
+     * 复用判据是「父列表里该子目录的 mtime」（见 [queryHiddenDocuments] 的 walk 目录分支）：
+     * 在已索引的叶子目录里**同名覆盖写**一个文件不会改动父目录 mtime，因此该文件的新 size/
+     * mtime/mime 在 TTL 到期前不会被发现——这就是保鲜期的含义。
+     *
+     * 为什么 30 分钟够用：一次叶子复检只有 1 次 provider IPC + 逐项 size/mtime 比对，读头由基线
+     * 复用挡掉（不会重新嗅探），代价远小于信息陈旧；同时 30 分钟也足够把隐藏目录重复遍历的开销摊薄。
+     *
+     * 默认值统一在 [ScanWalkIndex.DEFAULT_TTL_MS]：改这里会让两处口径脱钩，要调请改 ScanWalkIndex。
+     */
+    private val walkIndexTtlMs: Long = ScanWalkIndex.DEFAULT_TTL_MS,
 ) : MediaSourceProvider, CacheProvider, ScanFolderController {
 
     override val sourceId: String = LOCAL_MEDIA_SOURCE_ID
@@ -153,6 +335,14 @@ class LocalMediaSource(
     /** R0/REV-03：扫描提交代际门（目录集变化使在途扫描的结果整体作废） */
     private val commitGate = ScanCommitGate()
 
+    /**
+     * 目录级增量索引（[ScanWalkIndex]）。
+     *
+     * `by lazy`：关闭索引时（[walkIndexEnabled] = false）连对象都不建、更不读盘——
+     * 既有用例与「用户关掉加速」路径零成本。
+     */
+    private val walkIndex by lazy { ScanWalkIndex(walkIndexFile, walkIndexTtlMs, dispatchers.io) }
+
     /** 快照/本进程扫描是否已产出过一次数据——`mediaSnapshot()` 的判据（区分"还没扫"与"确实空"） */
     @Volatile
     private var hasSnapshot = false
@@ -171,8 +361,44 @@ class LocalMediaSource(
     @Volatile
     private var activeScanJob: Job? = null
 
+    /**
+     * 取消哨兵。
+     *
+     * 只靠 [Job.cancel] 收不住：SAF 遍历与游标循环里存在**没有挂起点**的长段
+     * （一次 `contentResolver.query` 拿回几千行后逐行处理），挂起式取消要等到
+     * 下一个挂起点才生效——用户看到的就是"点了取消没反应"（实报）。这里再置一个
+     * 显式标志，让这些同步长循环在每次迭代开头用 [ensureNotCancelled] 主动退出。
+     */
+    @Volatile
+    private var cancelRequested = false
+
     override fun cancelScan() {
+        // 顺序不能反：先置标志再取消 job。反过来时，同步长循环可能在
+        // 「job 已取消、标志尚未置位」的窗口里又跑完一整段（几万次 IPC）
+        cancelRequested = true
         activeScanJob?.cancel()
+        // 封面泵跟着一起停：队列里全是这份列表的条目，取消后继续抽只会白占许可
+        coverPump.cancel()
+    }
+
+    /**
+     * 封面按需优先（kernel API [MediaSourceProvider.requestCovers]，E203-B §8.2）。
+     *
+     * 约定：幂等、不阻塞、**不在调用线程做 IO**——这里只把 id 插进内存队列，文件是否存在、
+     * 有没有否定结论，全部留到泵的工作协程里判定。
+     */
+    override fun requestCovers(itemIds: List<String>) {
+        coverPump.request(itemIds)
+    }
+
+    /** E203-B 测试 seam：等封面泵排空（生产代码不调用）。 */
+    internal suspend fun awaitCoverPumpIdle(timeoutMs: Long = 10_000L) {
+        coverPump.awaitIdle(timeoutMs)
+    }
+
+    /** 取消点（非挂起路径）：[cancelScan] 置位后立刻抛 [CancellationException]，由 scan() 收口。 */
+    private fun ensureNotCancelled() {
+        if (cancelRequested) throw CancellationException("扫描已取消")
     }
 
     private val _lastScan = MutableStateFlow<LocalScanSummary?>(null)
@@ -192,6 +418,51 @@ class LocalMediaSource(
     private val coverFailures = ScanFailureMemo()
     private val aviDurationFailures = ScanFailureMemo()
 
+    /**
+     * 封面否定缓存（E203-A）：记住「这个文件抽不出封面」，跨扫描/跨重启都别再重复付费。
+     *
+     * 落盘 `filesDir/cover_negative.json`；key 是文件指纹（`id|size|mtime`），文件被替换后
+     * 指纹跟着变、缓存自然失效，不需要任何失效钩子。
+     */
+    private val coverNegativeCache = ScanCoverNegativeCache(
+        File(context.filesDir, ScanCoverNegativeCache.FILE_NAME),
+    )
+    private val coverNegativeSink: CoverNegativeSink = NegativeCacheSink(coverNegativeCache)
+
+    /**
+     * 封面后台泵（E203-B）：封面从此**不在扫描关键路径上**。
+     *
+     * 旧实现（attachCovers）在提交段之前逐项抽帧：真机 1283 项 ≈ 9.8s，用户感知就是
+     * 「扫描慢」，而这一段的产物只是列表里的 coverUri。现在扫描只负责遍历 + 提交，封面交给这个泵：
+     *  - 扫描期许可 `max(2, decodeWorkers/2)`，不跟遍历抢 IPC；扫描收尾自动放开到
+     *    `decodeWorkers()`（放开时机由泵的监视协程按 [scanning] 判断，见 CoverPump）；
+     *  - UI 调 [requestCovers] 的 id 插到队首（急速滚动时先出可见项的封面）；
+     *  - 抽到的封面按 250ms 节流批量回写 [_media]，排空/静默后落一次快照；
+     *  - 取消扫描只清队列、不写否定结论（被取消 ≠ 抽不出来）。
+     */
+    private val coverPump = CoverPump(
+        dispatchers = dispatchers,
+        workers = ScanParallelism.decodeWorkers(),
+        produceCover = { item ->
+            val cover = coverFor(item)
+            if (cover != null) coverFailures.markOk(item.uri) else coverFailures.markFailed(item.uri)
+            cover
+        },
+        applyCovers = { covers ->
+            // 只按 id 覆盖 coverUri，其余字段用当前列表里的实例：泵写入与扫描提交可能并发，
+            // 整表替换会用旧列表覆盖掉新一轮扫描的结果
+            val current = _media.value
+            val merged = current.map { item -> covers[item.id]?.let { item.copy(coverUri = it) } ?: item }
+            if (merged != current) _media.value = merged
+        },
+        currentItems = { _media.value },
+        saveSnapshot = { items -> saveSnapshot(items) },
+        isScanning = { _scanning.value },
+        isCoverFailed = { item -> coverFailures.hasFailed(item.uri) },
+        negative = coverNegativeSink,
+        // requestCovers 只给 id：在当前列表里找条目，找不到说明已被删，自然丢弃
+        resolveItem = { id -> _media.value.firstOrNull { it.id == id } },
+    )
     /**
      * 扫描互斥闸门。
      *
@@ -224,14 +495,24 @@ class LocalMediaSource(
     // 已有 SAF 目录授权时即便没有媒体权限，来源依然可用（隐藏目录走 SAF 遍历）。
     override suspend fun isAvailable(): Boolean = MediaAccessPolicy.current(context, sdkInt).isAvailable
 
+    init {
+        // 取证落盘（filesDir/scan_trace.log）：真机上 logcat 抓不到时还能 adb pull 回来看
+        ScanTrace.install(context.filesDir)
+    }
+
     override suspend fun scan(): ScanResult = withContext(dispatchers.io) {
         if (!acquireScanGate()) {
             return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
         }
         val scanJob = currentCoroutineContext()[Job]
         activeScanJob = scanJob
+        // 新一轮扫描重置取消哨兵：上一轮可能被取消过
+        cancelRequested = false
         _scanning.value = true
-        _scanProgress.value = ScanProgress(active = true)
+        // 新扫描顶掉上一轮的封面泵：旧队列针对的是旧列表，继续抽只会浪费许可
+        coverPump.cancel()
+        // 阶段 1/6（PREPARING）：等闸门 + 解析授权目录 + 算增量基线
+        _scanProgress.value = ScanProgress(active = true, phase = ScanPhase.PREPARING)
         try {
             val folderUriStrs = settings.scanFolderUris.first()
             if (folderUriStrs.isEmpty()) {
@@ -243,23 +524,69 @@ class LocalMediaSource(
             // R0/REV-03：记下本次扫描开始时的提交代际；目录集在扫描期间变化时
             // 本次结果整体作废（提交段复核，见 scanInternal）
             val generation = commitGate.currentGeneration()
-            runCatching { scanInternal(folderUriStrs, generation) }
+            val startedAt = SystemClock.elapsedRealtime()
+            ScanTrace.log(
+                "scan enter " + ScanParallelism.describe() + " folders=" + folderUriStrs.size +
+                    " generation=" + generation,
+            )
+            // 成功/取消/失败三分支只有成功才打耗时收尾行（真机对比基线用）
+            var succeeded = true
+            val result = runCatching { scanInternal(folderUriStrs, generation) }
                 .getOrElse { t ->
-                    if (t is CancellationException) throw t
-                    Log.w(TAG, "扫描异常，已降级为失败摘要而非崩溃", t)
-                    val failSummary = LocalScanSummary(
-                        added = 0,
-                        removed = 0,
-                        total = _media.value.size,
-                        durationMs = 0,
-                        note = "扫描失败：${t.message ?: t.javaClass.simpleName}",
-                    )
-                    _lastScan.value = failSummary
-                    ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
+                    if (t is CancellationException) {
+                        // 取消**不是失败**：不给失败摘要、不留错误 note，只写一条「已取消」
+                        // 说明并交回 0 计数结果。旧实现把 CancellationException 原样抛给
+                        // 调用方，UI 侧那层 runCatching 会把它记成"重扫失败"（脏提示）。
+                        val elapsed = SystemClock.elapsedRealtime() - startedAt
+                        Log.i(TAG, "扫描已取消：在取消点退出，本轮不提交任何结果（${elapsed}ms）")
+                        ScanTrace.log("scan cancelled elapsedMs=" + elapsed + "，本轮不提交任何结果")
+                        succeeded = false
+                        _lastScan.value = LocalScanSummary(
+                            added = 0,
+                            removed = 0,
+                            total = _media.value.size,
+                            durationMs = elapsed,
+                            note = "已取消",
+                        )
+                        ScanResult(
+                            sourceId,
+                            added = 0,
+                            updated = 0,
+                            removed = 0,
+                            durationMs = elapsed,
+                        )
+                    } else {
+                        Log.w(TAG, "扫描异常，已降级为失败摘要而非崩溃", t)
+                        ScanTrace.log("scan failed " + t.javaClass.simpleName + ": " + t.message)
+                        succeeded = false
+                        val failSummary = LocalScanSummary(
+                            added = 0,
+                            removed = 0,
+                            total = _media.value.size,
+                            durationMs = 0,
+                            note = "扫描失败：${t.message ?: t.javaClass.simpleName}",
+                        )
+                        _lastScan.value = failSummary
+                        ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
+                    }
                 }
+            // 封面泵收尾：成功才放开到全速（scanFinished 只打日志，真正的放开在扫描复位后
+            // 由泵的监视协程做），失败/取消直接清队列——旧列表可能已经作废
+            if (succeeded) coverPump.scanFinished() else coverPump.cancel()
+            val elapsedTotal = SystemClock.elapsedRealtime() - startedAt
+            if (succeeded) {
+                // 真机取证的最终口径：一行可 grep 的总耗时（与取消行共用同一个起始时刻）
+                Log.i(TAG, "scan done elapsed=" + elapsedTotal + "ms items=" + _media.value.size)
+                ScanTrace.log("scan done elapsed=" + elapsedTotal + "ms items=" + _media.value.size)
+            } else {
+                ScanTrace.log("scan exit elapsedMs=" + elapsedTotal + " media=" + _media.value.size)
+            }
+            result
         } finally {
             _scanning.value = false
             _scanProgress.value = ScanProgress()
+            // 哨兵随本轮一起复位：下一轮 scan() 开头还会再置一次，两道都留着
+            cancelRequested = false
             if (activeScanJob === scanJob) activeScanJob = null
             scanGate.set(false)
             // A5/P2-2：记下「这次扫描完成于何时」，回前台的补扫据此去重
@@ -290,6 +617,35 @@ class LocalMediaSource(
 
     private suspend fun scanInternal(folderUriStrs: List<String>, generation: Long): ScanResult {
         val startedAt = System.currentTimeMillis()
+        // 并发预算取证（真机 logcat 一行定位"这台机器到底开了几条车道、起跑几条、上限几条"）：
+        // 起跑值优先用上一轮调好的（ScanLanePresets），没有就用按核数推的默认值（ScanParallelism）。
+        // cover 的 floor 取大核数：抽帧是 CPU 重活，小核扛不住，起跑值再低也不该低于大核数。
+        val topology = ScanCpuTopology.detect()
+        val lanes = LaneBudget(topology, ScanLanePresets.load(context.filesDir))
+        val walkStart = lanes.initial(LaneKind.WALK, ScanParallelism.ioWorkers(topology.cores))
+        val coverStart = lanes.initial(
+            LaneKind.COVER,
+            ScanParallelism.decodeWorkers(topology.cores)
+                .coerceAtLeast(topology.bigCores.coerceIn(2, 6)),
+        )
+        val laneDescribe = "cores=" + topology.cores +
+            " big=" + topology.bigCores +
+            " soc=" + topology.socModel +
+            " io=" + ScanParallelism.ioWorkers(topology.cores) +
+            " decode=" + ScanParallelism.decodeWorkers(topology.cores) +
+            " walkCap=" + lanes.capOf(LaneKind.WALK, walkStart) +
+            " coverCap=" + lanes.capOf(LaneKind.COVER, coverStart) +
+            " walkStart=" + walkStart +
+            " coverStart=" + coverStart
+        Log.i(TAG, "scan prepare " + laneDescribe + " folders=" + folderUriStrs.size)
+        ScanTrace.log("scan prepare " + laneDescribe + " folders=" + folderUriStrs.size)
+        // 取证：六阶段的进入/离开与耗时。真机上 logcat 抓不到时，adb pull filesDir/scan_trace.log 即可
+        var phaseMark = System.currentTimeMillis()
+        fun tracePhase(msg: String) {
+            val now = System.currentTimeMillis()
+            ScanTrace.log("phase=" + msg + " elapsedMs=" + (now - phaseMark))
+            phaseMark = now
+        }
         // E24：无法解析的目录绝不回退"全量扫描整机"；全部无法解析时拒绝扫描
         // E68 修复：先剔除已被系统撤销持久化授权的目录，摘要里与"docId 畸形"区分开
         val revoked = revokedFolders(folderUriStrs)
@@ -311,6 +667,7 @@ class LocalMediaSource(
             )
             return ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
         }
+        tracePhase("PREPARING done validFolders=" + validScopes.size + " revoked=" + revoked.size)
         val previousList = _media.value
         // 增量基线：上次发布（或本进程从快照恢复）的列表。按 id 复用未变项——
         // 富化 / 容器嗅探 / 封面生成只对新增与变更项跑；未变项连无扩展名文件的
@@ -325,6 +682,9 @@ class LocalMediaSource(
         // 只查询当前可见的类别；未授权的类别按"本次未覆盖"处理（见 incompleteReasons）。
         val access = MediaAccessPolicy.current(context, sdkInt)
         val warnings = mutableListOf<String>()
+        // 阶段 2/6（MEDIA_STORE）：视频/音频集合查询（README：这一段的耗时由 Provider 决定）
+        _scanProgress.value = ScanProgress(active = true, phase = ScanPhase.MEDIA_STORE)
+        tracePhase("MEDIA_STORE enter")
         val rawStore = queryMediaStore(validScopes, access)
         warnings += rawStore.warnings
         val storeItems = rawStore.items
@@ -342,10 +702,12 @@ class LocalMediaSource(
                     sniffMimeCorrection(enrichAll(fresh))
                 }
             }
+        tracePhase("MEDIA_STORE done storeItems=" + storeItems.size)
         // 无扩展名文件拾取（Files 集合查询 + 文件头嗅探）——同样支持基线复用
-        val unknownSlice = sniffUnknownFiles(validScopes, baseline)
+        val unknownSlice = sniffUnknownFiles(validScopes, baseline, lanes)
         warnings += unknownSlice.warnings
         val unknownItems = unknownSlice.items
+        tracePhase("MEDIA_STORE sniff done unknownItems=" + unknownItems.size)
         // L14：MediaStore 跳过隐藏目录（`.` 前缀），这里用 SAF 遍历把其中的媒体补齐。
         // 只补 MediaStore 看不到的那部分——按「相对路径 + 文件名」与已收项去重，
         // 非隐藏文件仍以 MediaStore 为唯一来源，不重复采集。
@@ -357,7 +719,8 @@ class LocalMediaSource(
         val storePaths = (storeItems + unknownItems).asSequence()
             .mapNotNull(::dedupKey)
             .toHashSet()
-        val hiddenSlice = queryHiddenDocuments(liveFolders, baseline)
+        tracePhase("HIDDEN_WALK enter folders=" + liveFolders.size)
+        val hiddenSlice = queryHiddenDocuments(liveFolders, baseline, lanes)
         warnings += hiddenSlice.warnings
         val hiddenItems = hiddenSlice.items
             .filterNot { item ->
@@ -367,22 +730,34 @@ class LocalMediaSource(
             // 富化与 MediaStore 项同链路（短标题/集号对隐藏目录里的剧集一样有用）；
             // 复用项是基线**同一实例**（=== 判定），跳过；新增/变更项才走富化
             .map { item -> if (item === baseline[item.id]) item else enrichAll(item) }
-        // 封面并发补齐放在**发布之前**：UI 侧拿到的列表永远是"封面已就绪"的那一份，
-        // 不需要两段式刷新，也不会因为某一项封面慢而整页停在占位图。
+        tracePhase("HIDDEN_WALK done hiddenItems=" + hiddenItems.size)
         val baseItems = (storeItems + unknownItems + hiddenItems).distinctBy { it.id }
-        _scanProgress.value = ScanProgress(active = true, total = baseItems.size)
+        // 阶段 4/6（COVERS）：本阶段**不再同步抽帧**（E203-B）——封面已转后台 [coverPump]。
+        // 仍上报一帧：一是 UI 的阶段文案要连贯，二是 `processed=0/total=N` 恰好表达
+        // 「N 项待后台补封面」，与旧语义（这里是抽帧进度）不会混淆。
+        _scanProgress.value = ScanProgress(active = true, total = baseItems.size, phase = ScanPhase.COVERS)
+        Log.i(TAG, "scan start ${ScanParallelism.describe()} items=${baseItems.size}")
+        ScanTrace.log("scan start " + ScanParallelism.describe() + " items=" + baseItems.size)
+        tracePhase("COVERS enter items=" + baseItems.size + " handedOff=1")
         // A25：**首扫**先发布基础列表（富化/嗅探已完成、封面待补），UI 不再等全库
         // 抽帧。只在 previousList 为空时做——增量扫描已有旧列表可见，提前发布反而
         // 会和 REV-03 的“提交段整份复核”抢时序。这里同样过代际门；目录集在首扫
         // 期间变化时这次发布会被拒绝，最终提交也会丢弃（新扫描会重发）。
         if (previousList.isEmpty()) {
             commitGate.commitIfCurrent(generation) { _media.value = baseItems }
+            // 首帧已发布：封面泵立刻对这批条目开工（不阻塞扫描，并发由泵自己管）
+            coverPump.publish(baseItems)
         }
         beforeCoversHook?.invoke()
-        val items = attachCovers(baseItems) { processed, total ->
-            _scanProgress.value = ScanProgress(active = true, processed = processed, total = total)
-        }.map { it.withAviDuration() }
-        _scanProgress.value = ScanProgress(active = true, processed = items.size, total = items.size)
+        // 阶段 5/6（DURATION）：AVI 时长补读。此前是 `.map { withAviDuration() }` 串行段
+        val items = fillAviDurations(baseItems, lanes)
+        tracePhase("DURATION done items=" + items.size)
+        _scanProgress.value = ScanProgress(
+            active = true,
+            processed = items.size,
+            total = items.size,
+            phase = ScanPhase.DURATION,
+        )
         // [诊断] 发布前自检：同 id 重复会以 Lazy 重复 key 直接打崩 UI（实报闪退），
         // 这里留一行日志把缺陷暴露在数据层，而不是让它到界面上炸（正常应为零输出）
         run {
@@ -418,6 +793,14 @@ class LocalMediaSource(
             if (!access.canQueryAudio) add("audio/")
         }
 
+        // 阶段 6/6（COMMIT）：发布列表 / 清理历史与缩略图 / 写快照
+        _scanProgress.value = ScanProgress(
+            active = true,
+            processed = items.size,
+            total = items.size,
+            phase = ScanPhase.COMMIT,
+        )
+        tracePhase("COMMIT enter items=" + items.size + " complete=" + complete)
         // R0/REV-03 测试 seam：提交段之前的挂起点（生产为 null）
         beforeCommitHook?.invoke()
 
@@ -466,7 +849,10 @@ class LocalMediaSource(
             eventBus.publish(KernelEvent.MediaScanned(sourceId = sourceId, count = items.size))
             // 落盘基线：只在完整扫描时写（内容有变化才写——列表相等是 O(n) 比较，
             // 比一次几 MB 的 JSON 写便宜得多）；不完整时保留旧快照，绝不半量覆盖。
-            if (complete && items != previousList) saveSnapshot(items)
+            // 顺序稳定性前提：queryHiddenDocuments 已对结果做稳定排序（快照比较是**保序**的，
+            // 车道完成顺序不定会让每轮都判定「变了」→ 每轮重写几 MB 快照）
+            val snapshotChanged = complete && items != previousList
+            if (snapshotChanged) saveSnapshot(items)
             ScanResult(
                 sourceId = sourceId,
                 added = summary.added,
@@ -475,8 +861,18 @@ class LocalMediaSource(
                 durationMs = summary.durationMs,
             )
         }
-        if (committed != null) return committed
+        if (committed != null) {
+            tracePhase("COMMIT done items=" + items.size)
+            // 车道数沉淀：只有完整扫描的调参结果才值得复用（取消/不完整时覆盖范围不全，
+            // 吞吐曲线天然偏低，拿它当下一轮起跑值只会把并发越调越小）。写失败只记 trace。
+            if (complete) saveLanePresets(lanes)
+            // 最终列表已发布：交给封面泵补齐（首扫在首帧发布时已交过一次，publish 幂等；
+            // 增量扫描只有这里会交）
+            coverPump.publish(items)
+            return committed
+        }
         Log.i(TAG, "扫描结果已过期（扫描期间目录集发生变化），丢弃本次结果")
+        ScanTrace.log("scan discarded 扫描期间目录集发生变化，本次结果作废")
         return ScanResult(
             sourceId = sourceId,
             added = 0,
@@ -497,11 +893,7 @@ class LocalMediaSource(
      * MediaStore 经常给 AVI 填 0 时长。只在缺时长、且看起来是 AVI 时读文件头。
      */
     private fun MediaItem.withAviDuration(): MediaItem {
-        if (durationMs > 0L) return this
-        val avi = title.endsWith(".avi", ignoreCase = true) ||
-            mimeType.contains("avi", ignoreCase = true) ||
-            mimeType.equals("video/x-msvideo", ignoreCase = true)
-        if (!avi) return this
+        if (!needsAviDuration()) return this
         if (aviDurationFailures.hasFailed(uri)) return this
         val ms = runCatching {
             context.contentResolver.openInputStream(uri.toUri())?.use { AviDuration.read(it) }
@@ -512,6 +904,64 @@ class LocalMediaSource(
         }
         aviDurationFailures.markOk(uri)
         return copy(durationMs = ms)
+    }
+
+    /**
+     * [withAviDuration] 的前置判据（抽出来供分车道前置筛选）。
+     *
+     * 判据与旧实现逐条一致：缺时长 + 看起来是 AVI + 不在失败短 TTL 里。
+     */
+    private fun MediaItem.needsAviDuration(): Boolean {
+        if (durationMs > 0L) return false
+        val avi = title.endsWith(".avi", ignoreCase = true) ||
+            mimeType.contains("avi", ignoreCase = true) ||
+            mimeType.equals("video/x-msvideo", ignoreCase = true)
+        return avi && !aviDurationFailures.hasFailed(uri)
+    }
+
+    /**
+     * AVI 时长补读（原先是 `.map { withAviDuration() }` 串行段）。
+     *
+     * MediaStore 对 AVI 常填 0 时长，只能逐文件 `openInputStream` 读头部——几百个 AVI
+     * 就是几百次阻塞读排在扫描尾段。这里与封面共用同一份解码预算
+     * （[ScanParallelism.decodeWorkers]）：抢同一批解码器的两段工作不该各开一份线程数。
+     *
+     * 调度用**动态许可**而不是按大小分车道：读头成本 ≈ 每项常数（打开文件 + 解析帧头），
+     * 与字节数弱相关；按字节数静态分车道会让一个大文件独占一条车道，其余小项挤在剩下的
+     * 车道里，空转的那条车道等于白白丢掉并发度（真机实测封面段因此慢 1.55×，见 [coverPump] 的类注释）。
+     * 结果按索引回填（每项只碰自己的下标，不共享可变表）。
+     */
+    private suspend fun fillAviDurations(items: List<MediaItem>, lanes: LaneBudget): List<MediaItem> {
+        val candidates = items.withIndex().filter { (_, item) -> item.needsAviDuration() }
+        val done = AtomicInteger(items.size - candidates.size)
+        if (candidates.isEmpty()) return items
+        // 先报一次：这段没有可预知的进度增量，但 UI 不能停在 COVERS 的尾值
+        _scanProgress.value = ScanProgress(
+            active = true,
+            processed = done.get(),
+            total = items.size,
+            phase = ScanPhase.DURATION,
+        )
+        val result = items.toTypedArray()
+        // 许可数 = 解码预算的起跑值；每个候选项一个协程，抢到许可才真正读头
+        val durationStart = lanes.initial(LaneKind.DURATION, ScanParallelism.decodeWorkers(lanes.cores))
+        val durationStartedAt = System.nanoTime()
+        val summary = runTunedItems(lanes, LaneKind.DURATION, candidates, durationStart) { (index, item) ->
+            result[index] = item.withAviDuration()
+            _scanProgress.value = ScanProgress(
+                active = true,
+                processed = done.incrementAndGet(),
+                total = items.size,
+                phase = ScanPhase.DURATION,
+            )
+        }
+        lanes.remember(LaneKind.DURATION, summary)
+        ScanTrace.log(
+            "phase=DURATION done candidates=" + candidates.size + " lanes=" + summary.bestPermits +
+                " items=" + items.size +
+                " elapsedMs=" + (System.nanoTime() - durationStartedAt) / 1_000_000,
+        )
+        return result.toList()
     }
 
     private fun isJunkFile(name: String, sizeBytes: Long): Boolean {
@@ -594,59 +1044,106 @@ class LocalMediaSource(
     }
 
     /**
-     * 缩略图并发生成（性能批次）。
+     * 一段「按项并发 + 闭环调参」的执行器（封面 / 时长 / 嗅探共用）。
      *
-     * 此前 `thumbnailFor(...)` 直接写在游标遍历里，于是整库视频**串行**等
-     * `ContentResolver.loadThumbnail` / `MediaMetadataRetriever`：单片 1080p 就要几十毫秒，
-     * 几百部叠起来是分钟级的首扫时间。而这一步排在 `_media.value = items` **之前**，
-     * 挡住的正是"主页什么时候能出封面"。
+     * 调度用**动态许可**而不是按大小分组：抽帧、读时长、读 64 字节头的成本都≈每项常数，
+     * 与字节数弱相关；按字节数静态分组会让一个大文件独占一组，其余小项挤在剩下的组里，
+     * 空转的那组等于白白丢掉并发度（真机实测封面段因此慢 1.55×，见 [coverPump] 的类注释）。
      *
-     * 现在把它挪到发布前并发跑：缓存命中的项只是几次 `File.exists()`（几乎零成本），
-     * 未命中的项最多 [THUMB_PARALLELISM] 个同时抽帧。语义不变——仍然在发布前把封面
-     * 全部备好，UI 不需要任何两段式刷新。
+     * 许可数由 [ScanLaneTuner] 每 [ScanLaneTuner.DEFAULT_WINDOW_MS] 按「吞吐涨幅」增减：
+     * 涨得动就加，加档没收益就回落到历史最佳并锁死，避免在 knee 附近震荡。
+     *
+     * 返回本段收尾快照，供 trace 与 [ScanLanePresets] 落盘（下一轮起跑直接用）。
      */
-    private suspend fun attachCovers(
-        items: List<MediaItem>,
-        onProgress: ((processed: Int, total: Int) -> Unit)? = null,
-    ): List<MediaItem> {
-        // 音频（`msa-`，含 .cue 分轨）走相册封面 URI，没有可生成的帧缩略图；
-        // 其余项（MediaStore 视频 `ms-` / 隐藏目录文档 `saf-`）缺封面、或封面的
-        // 缓存文件已被清掉（清缓存/系统清 cacheDir）时才补——只信 `coverUri != null`
-        // 会让指向已删文件的旧地址永远不重生成。
-        val pending = items.filter {
-            // 先落成本地 val 再判：直接写 `File(it.coverUri)` 时属性链上的可空性
-            // 跨模块（:core:media）不进 Smart Cast，Java 构造器会收到 String? 告警
-            val cover = it.coverUri
-            !it.id.startsWith(AUDIO_ID_PREFIX) &&
-                (cover == null || !File(cover).isFile) &&
-                !coverFailures.hasFailed(it.uri)
+    private suspend fun <T> runTunedItems(
+        lanes: LaneBudget,
+        kind: LaneKind,
+        items: List<T>,
+        initial: Int,
+        body: suspend (T) -> Unit,
+    ): ScanLaneTuner.Summary = coroutineScope {
+        val cap = lanes.capOf(kind, initial)
+        // 起跑值可能来自上一轮落盘（ScanLanePresets），必须再钳一次：上限可能因设备变化而变小
+        val start = initial.coerceIn(1, cap)
+        // 令牌桶许可器（不是 kotlinx 的 Semaphore）：它允许运行中「凭空上调」许可，
+        // 而 kotlinx 的 release 只能归还自己 acquire 过的数量，上调即抛 ISE（真机已撞过）。
+        val limiter = ScanLimiter(cap, start)
+        // 收回许可必须**异步**：onPermitsChanged 在监视协程里被调用，同步 acquire 会把 tick 卡住，
+        // 甚至与正在等许可的工作协程互锁（谁都不放行）。这里只投递「稍后收 n 个」的协程，
+        // 阶段收尾统一取消——收不回来的许可随本段作废，不影响下一次扫描。
+        val shrinkJobs = java.util.Collections.synchronizedList(mutableListOf<Job>())
+        val tuner = ScanLaneTuner(
+            kind = kind,
+            initialPermits = start,
+            cap = cap,
+            cores = lanes.cores,
+            onPermitsChanged = { delta ->
+                if (delta > 0) {
+                    repeat(delta) { limiter.release() }
+                } else if (delta < 0) {
+                    shrinkJobs += launch(dispatchers.io) { repeat(-delta) { limiter.acquire() } }
+                }
+            },
+            log = { line -> ScanTrace.log(line) },
+        )
+        val sampler = LaneWindowSampler(kind, lanes.cores, tuner) { line -> ScanTrace.log(line) }
+        val startedAt = System.nanoTime()
+        val monitor = launch(dispatchers.default) {
+            var window = 0
+            while (isActive) {
+                delay(ScanLaneTuner.DEFAULT_WINDOW_MS)
+                tuner.tick()
+                window++
+                sampler.tick(window)
+            }
         }
-        if (pending.isEmpty()) {
-            onProgress?.invoke(items.size, items.size)
-            return items
-        }
-        val covers = java.util.concurrent.ConcurrentHashMap<String, String>()
-        val gate = Semaphore(THUMB_PARALLELISM)
-        val done = java.util.concurrent.atomic.AtomicInteger(items.size - pending.size)
-        onProgress?.invoke(done.get(), items.size)
-        coroutineScope {
-            pending.map { item ->
+        try {
+            items.map { item ->
                 async(dispatchers.io) {
-                    gate.withPermit {
-                        val cover = coverFor(item)
-                        if (cover != null) {
-                            coverFailures.markOk(item.uri)
-                            covers[item.id] = cover
-                        } else {
-                            coverFailures.markFailed(item.uri)
-                        }
-                        onProgress?.invoke(done.incrementAndGet(), items.size)
+                    limiter.withPermit {
+                        // 取消点：抽帧/读头都是长阻塞调用，取消后不再接着干下一项
+                        ensureNotCancelled()
+                        currentCoroutineContext().ensureActive()
+                        body(item)
+                        sampler.onItemDone()
+                        tuner.onItemDone()
                     }
                 }
             }.awaitAll()
+        } finally {
+            monitor.cancel()
+            shrinkJobs.toList().forEach { it.cancel() }
         }
-        if (covers.isEmpty()) return items
-        return items.map { item -> covers[item.id]?.let { item.copy(coverUri = it) } ?: item }
+        val summary = tuner.finish()
+        val achieved = if (summary.utilAvg > 0.0) summary.permits * summary.utilAvg else -1.0
+        ScanTrace.log(sampler.finishLine(summary))
+        ScanTrace.log(
+            "phase=" + kind + " perf util=" +
+                (if (summary.utilAvg < 0.0) "n/a" else String.format(Locale.US, "%.2f", summary.utilAvg)) +
+                " achievedParallelism=" + fmtParallelism(achieved) +
+                " items=" + items.size +
+                " elapsedMs=" + (System.nanoTime() - startedAt) / 1_000_000,
+        )
+        summary
+    }
+
+    /** 并发度展示：`n/a` 表示这次没采到 CPU 样本（真机上 /proc 被限制时会出现）。 */
+    private fun fmtParallelism(v: Double): String =
+        if (v < 0.0) "n/a" else String.format(Locale.US, "%.1fx", v)
+
+    /**
+     * 把本轮各阶段的 [ScanLaneTuner.Summary.bestPermits] 落盘，作为下一轮的起跑许可。
+     *
+     * 只在**完整扫描**后调用：取消/不完整遍历调出来的车道数没有参考价值（覆盖范围都不是全的，
+     * 吞吐曲线自然偏低）。落盘失败只记 trace，绝不影响扫描结果——车道数只是性能参数。
+     */
+    private fun saveLanePresets(lanes: LaneBudget) {
+        val map = lanes.summaries.mapValues { (_, summary) -> summary.bestPermits }
+        if (map.isEmpty()) return
+        val ok = runCatching { ScanLanePresets.save(context.filesDir, map) }.getOrDefault(false)
+        val text = map.entries.sortedBy { it.key.name }
+            .joinToString(",") { it.key.name + "=" + it.value }
+        ScanTrace.log("lane presets saved=" + ok + " " + text)
     }
 
     /**
@@ -965,7 +1462,7 @@ class LocalMediaSource(
                     lastModifiedSec = if (modifiedCol >= 0) cursor.getLong(modifiedCol) else 0L,
                     addedAtMs = if (addedCol >= 0) cursor.getLong(addedCol) * 1000 else 0L,
                     // 封面不在这里生成：游标里逐项抽帧是**串行**的，几百部片子会把首扫
-                    // 拖到分钟级。统一交给扫描末尾的 attachCovers 并发补齐（见该方法）。
+                    // 拖到分钟级。统一交给后台封面泵（[coverPump]）：扫描只发布列表，封面补在后台。
                     coverUri = null,
                     folder = folderOf(
                         dataPath = dataPath,
@@ -1111,130 +1608,467 @@ class LocalMediaSource(
      * 遍历有 [HIDDEN_WALK_BUDGET] 硬预算：目录树里混进 `node_modules`/`.git` 这类巨型结构
      * 时，不把一次扫描拖成分钟级；超预算即停（fail-open，宁可少收也不卡死）。
      */
-    private fun queryHiddenDocuments(
+    private suspend fun queryHiddenDocuments(
         treeUriStrs: List<String>,
         baseline: Map<String, MediaItem>,
+        lanes: LaneBudget,
     ): QuerySlice<MediaItem> {
-        val out = mutableListOf<MediaItem>()
-        // R0/REV-01：遍历预算可注入（测试用）；耗尽 = 结果不完整，禁止后续清理
-        var budget = hiddenWalkBudget
-        var exhausted = false
-        val warnings = mutableListOf<String>()
+        // 预算用原子量：车道并发消费时 `var budget` 会跑成负数，让「是否耗尽」的判定失真
+        val budget = AtomicInteger(hiddenWalkBudget)
+        val exhausted = AtomicBoolean(false)
         // 去重：tree 根重叠（父/子目录各自授权）时同一文档会被走到两次——
         // 此前无判重，同一文件以同一 `saf-` id 进列表两次（双份文件的来源之一）
         val seen = HashSet<String>()
+        val seenLock = Any()
+        // 并发容器：车道各自 append，顺序不再重要（下游按 id 去重/富化，与顺序无关）
+        val found = ConcurrentLinkedQueue<MediaItem>()
+        val warnings: MutableList<String> = java.util.Collections.synchronizedList(mutableListOf())
+        val discovered = AtomicInteger(0)
+        val dirsDone = AtomicInteger(0)
+        // 节流用真实单调时钟：SystemClock 在单元测试（Robolectric）里不随真实时间推进，
+        // 拿它做节流会让「每 100ms 报一次」在测试里永远不触发（也让真机上被系统时钟调整带偏）
+        val lastReportAt = AtomicLong(System.nanoTime())
+        // 目录去重：同一个目录可能被重复入队（父子 tree 重叠授权 / 同一 tree 的不同 URI 形态 /
+        // provider 把父目录或自身当 child 返回而成环）。重复入队不会重复入库（文件有 seen 去重），
+        // 但会白吃遍历预算（逐行 budget.getAndDecrement）→ 提前 exhausted，静默漏文件。
+        // key 必须带 inheritedHidden：同一 docId 在不同 hidden 上下文下的下钻许可不同（E198 判据依赖它）
+        val dirSeen = HashSet<String>()
+        val dirSeenLock = Any()
+        val dupSkipped = AtomicInteger(0)
+        val skipDepth = AtomicInteger(0)
+        val maxDepth = AtomicInteger(0)
 
-        fun walk(treeUri: Uri, docId: String, inheritedHidden: Boolean) {
-            if (budget <= 0) {
-                exhausted = true
-                return
-            }
-            val childrenUri = runCatching {
-                DocumentsContract.buildChildDocumentsUriUsingTree(treeUri, docId)
-            }.getOrNull() ?: run {
-                warnings += "隐藏目录遍历失败，本次扫描不完整"
-                return
-            }
-            runCatching {
-                context.contentResolver.query(
-                    childrenUri,
-                    arrayOf(
-                        DocumentsContract.Document.COLUMN_DOCUMENT_ID,
-                        DocumentsContract.Document.COLUMN_DISPLAY_NAME,
-                        DocumentsContract.Document.COLUMN_MIME_TYPE,
-                        DocumentsContract.Document.COLUMN_SIZE,
-                        DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+        // ——目录级增量索引（W1）——
+        // 关闭时 walkIndex 走 lazy 分支根本不会被创建、更不读盘。
+        // load() 内部先 clear() 再 putAll(磁盘)：上一轮取消/预算耗尽残留在**内存**里的条目
+        // 每轮开头被自动洗掉——这也是「取消/不完整时不 save」仍然安全的原因。
+        if (walkIndexEnabled) walkIndex.load()
+        // 复用判据里的「现在」取一次就够：一轮 walk 内的时钟漂移没意义，且省掉每目录一次系统调用
+        val walkNowMs = System.currentTimeMillis()
+        val reusedDirs = AtomicInteger(0)
+        val recordedDirs = AtomicInteger(0)
+
+        ScanTrace.log("hidden walk enter trees=" + treeUriStrs.size + " budget=" + hiddenWalkBudget)
+
+        // 阶段 3/6（HIDDEN_WALK）：入口先报一次。带点号目录多的机器上这一段能跑很久，
+        // 旧实现整段没有任何进度，UI 只能一直停在 MEDIA_STORE 的尾值。
+        _scanProgress.value = ScanProgress(active = true, total = 0, phase = ScanPhase.HIDDEN_WALK)
+
+        /** 已上报过的 processed 值（0 = 还没报过真实数量），用于「首次发现必报一次」的判定 */
+        val reportedProcessed = AtomicInteger(0)
+
+        /** 上报节奏：首次发现条目必报一次，之后每 [PROGRESS_DIR_EVERY] 个目录或 [PROGRESS_EVERY_MS] 一次；total 恒 0（树深未知） */
+        fun maybeReport() {
+            val dirs = dirsDone.incrementAndGet()
+            val found = discovered.get()
+            val now = System.nanoTime()
+            val sinceLastMs = (now - lastReportAt.get()) / 1_000_000
+            // 只有几个目录的小隐藏树，整段既走不到 [PROGRESS_DIR_EVERY] 个目录、也常常不到 [PROGRESS_EVERY_MS] 毫秒，
+            // 按纯节流就只剩入口那帧 processed=0——界面上依然是「一直 0」的观感。所以首次真的发现条目时立刻上报一次。
+            val firstRealReport = reportedProcessed.get() == 0 && found > 0
+            if (!firstRealReport && dirs % PROGRESS_DIR_EVERY != 0 && sinceLastMs < PROGRESS_EVERY_MS) return
+            lastReportAt.set(now)
+            reportedProcessed.set(found)
+            _scanProgress.value = ScanProgress(
+                active = true,
+                processed = discovered.get(),
+                total = 0,
+                phase = ScanPhase.HIDDEN_WALK,
+            )
+        }
+
+        /**
+         * 索引命中复用：把缓存条目并入本轮 [found]。
+         *
+         * **不是**「把缓存内容直接 add 了事」——契约 §4.5 要求复用项仍过与首扫同一条流水线
+         * （垃圾后缀 → 0 字节 → id 生成 → seen 去重 → 基线复用）。索引可能是旧版本规则写下的，
+         * 少走一步就会把垃圾文件带进库，或者让 id/富化结果与首扫不一致。
+         */
+        fun mergeIndexedItems(indexed: List<ScanWalkIndex.Indexed>, treeUri: Uri) {
+            for (entry in indexed) {
+                val name = entry.name
+                if (isJunkSuffix(name)) continue
+                if (entry.sizeBytes <= 0L) continue
+                val id = hiddenDocumentId(entry.docId)
+                if (!synchronized(seenLock) { seen.add(id) }) continue
+                val lmSec = entry.lastModifiedSec
+                val prev = baseline[id]
+                if (prev != null && prev.sizeBytes == entry.sizeBytes &&
+                    prev.lastModifiedSec == lmSec && prev.title == name
+                ) {
+                    // 基线同实例复用：富化与封面都不用重跑（与首扫分支完全同一口径）
+                    found.add(prev)
+                    discovered.incrementAndGet()
+                    continue
+                }
+                // mime 为 null = 首扫当时也没嗅出来（进不了库），复用同样跳过，绝不重新 readHead
+                val mime = entry.mime ?: continue
+                val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, entry.docId)
+                // 坑①（毫秒 vs 秒）：Indexed 只有秒级 lastModifiedSec，addedAtMs 的毫秒精度只能
+                // 从基线兜底——unchangedFrom() 恰好比较 addedAtMs，兜错会让基线复用整批失效
+                // （每轮重新富化 + 重抽封面，比不接索引还慢）。
+                val addedAtMs = prev?.takeIf { it.lastModifiedSec == lmSec }?.addedAtMs
+                    ?: (lmSec * 1000L)
+                found.add(
+                    MediaItem(
+                        id = id,
+                        sourceId = sourceId,
+                        title = name,
+                        uri = docUri.toString(),
+                        mimeType = mime,
+                        sizeBytes = entry.sizeBytes,
+                        lastModifiedSec = lmSec,
+                        addedAtMs = addedAtMs,
+                        coverUri = null,
+                        folder = folderOfDocument(entry.docId),
                     ),
-                    null,
-                    null,
-                    null,
-                )?.use { cursor ->
-                    val idCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
-                    val nameCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
-                    val mimeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
-                    val sizeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
-                    val lmCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
-                    while (cursor.moveToNext()) {
-                        if (budget-- <= 0) {
-                            exhausted = true
-                            return
+                )
+                discovered.incrementAndGet()
+            }
+        }
+
+        coroutineScope {
+            // 车道工作队列：每条车道串行处理「一个目录任务」，子目录回灌同一条队列。
+            // 收敛条件是 pending 计数（入队 +1 / 处理完 -1，归零即 close），不是轮询空队列。
+            val tasks = Channel<WalkTask>(Channel.UNLIMITED)
+            val pending = AtomicInteger(0)
+
+            fun enqueue(task: WalkTask) {
+                pending.incrementAndGet()
+                tasks.trySend(task)
+            }
+
+            /**
+             * 处理一个目录：查 children、拾取隐藏文件、下钻子目录。
+             *
+             * E198（数据保护）判定逐条沿用旧实现：[shouldDescendDirectory] 决定普通根
+             * 下的隐藏子目录**不下钻**，[treeRootEntersHiddenPath] 决定整支是否显式选中。
+             */
+            suspend fun processTask(task: WalkTask) {
+                // 每个目录任务开头先过取消点：取消后不再发起任何 IPC
+                currentCoroutineContext().ensureActive()
+                ensureNotCancelled()
+                if (budget.get() <= 0) {
+                    exhausted.set(true)
+                    return
+                }
+                // 目录级索引采集（W3）：本目录下「能进库的条目」与直接子目录数。
+                // childDirs **每个目录行都计，包括被 E198 拒掉不下钻的**：leaf 判定必须保守——
+                // 把非叶误判成叶子会让深层新增永久不可见（复用命中后不再下钻），比不复用严重得多。
+                val dirItems = ArrayList<ScanWalkIndex.Indexed>()
+                var childDirs = 0
+                // partial = 本目录没走完整（预算耗尽 / childrenUri 构建失败 / query 抛错）：
+                // 此时 dirItems 是残缺的，写进索引会让下一轮把残缺当完整结果复用 → 漏文件。
+                var partial = false
+                val childrenUri = runCatching {
+                    DocumentsContract.buildChildDocumentsUriUsingTree(task.treeUri, task.docId)
+                }.getOrNull() ?: run {
+                    partial = true
+                    warnings.add(WARN_HIDDEN_WALK_FAILED)
+                    return
+                }
+                runCatching {
+                    context.contentResolver.query(
+                        childrenUri,
+                        HIDDEN_PROJECTION,
+                        null,
+                        null,
+                        null,
+                    )?.use { cursor ->
+                        val idCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
+                        val nameCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
+                        val mimeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
+                        val sizeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_SIZE)
+                        val lmCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+                        while (cursor.moveToNext()) {
+                            // 逐行取消点：一次 children 查询可能几千行，取消必须在这里立刻生效
+                            currentCoroutineContext().ensureActive()
+                            ensureNotCancelled()
+                            if (budget.getAndDecrement() <= 0) {
+                                exhausted.set(true)
+                                partial = true
+                                return
+                            }
+                            if (idCol < 0) continue
+                            val childDocId = cursor.getString(idCol) ?: continue
+                            val name = if (nameCol >= 0) cursor.getString(nameCol).orEmpty() else ""
+                            if (name.isEmpty()) continue
+                            val mime = if (mimeCol >= 0) cursor.getString(mimeCol).orEmpty() else ""
+                            val hidden = task.inheritedHidden || name.startsWith(".")
+                            if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
+                                childDirs++
+                                // 数据保护（E198）：普通授权根下的隐藏子目录不下钻，只有显式选中的隐藏分支才继续深入
+                                if (!shouldDescendDirectory(name, task.inheritedHidden, HIDDEN_DENY_DIRS)) continue
+                                // 成环防护：provider 把父/自身当 child 返回时深度会无限涨，只靠
+                                // HIDDEN_WALK_BUDGET 兜底是「2 万次 IPC」级别的等待
+                                val childDepth = task.depth + 1
+                                if (childDepth > MAX_WALK_DEPTH) {
+                                    skipDepth.incrementAndGet()
+                                    ScanTrace.log("walk skip depth doc=" + childDocId + " depth=" + childDepth)
+                                    continue
+                                }
+                                val dirKey = childDocId + "|" + hidden
+                                if (!synchronized(dirSeenLock) { dirSeen.add(dirKey) }) {
+                                    dupSkipped.incrementAndGet()
+                                    continue
+                                }
+                                if (childDepth > maxDepth.get()) maxDepth.set(childDepth)
+                                // 父列表里看到的 LAST_MODIFIED（毫秒）是子目录 mtime 的唯一来源，
+                                // 目录级增量索引（W5）就靠它与父列表比对判「目录没变」
+                                val childLmMs = if (lmCol >= 0) cursor.getLong(lmCol) else 0L
+                                // 增量索引（W2）：这个子目录上次被判定为叶子、且父列表里的 mtime 与本轮
+                                // 看到的一致、hidden 上下文也一致 → 内容没变，直接合并缓存条目，省掉一次 IPC。
+                                // 判据全部由 ScanWalkIndex.reusable() 复核（含 TTL 与 payloadDropped）。
+                                if (walkIndexEnabled) {
+                                    val hit = walkIndex.reusable(
+                                        task.treeUri.toString(),
+                                        childDocId,
+                                        childLmMs,
+                                        hidden,
+                                        walkNowMs,
+                                    )
+                                    if (hit != null) {
+                                        mergeIndexedItems(hit.items, task.treeUri)
+                                        reusedDirs.incrementAndGet()
+                                        // 复用命中不下钻、也**不递减遍历预算**：这一层没发生任何 IPC
+                                        continue
+                                    }
+                                }
+                                enqueue(
+                                    WalkTask(
+                                        treeUri = task.treeUri,
+                                        docId = childDocId,
+                                        inheritedHidden = hidden,
+                                        lastModifiedMs = childLmMs,
+                                        depth = childDepth,
+                                    ),
+                                )
+                            } else if (hidden) {
+                                if (isJunkSuffix(name)) continue
+                                val size = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
+                                if (sizeCol >= 0 && size <= 0L) continue
+                                val id = hiddenDocumentId(childDocId)
+                                if (!synchronized(seenLock) { seen.add(id) }) continue
+                                // 未变项复用基线：跳过文件头嗅探（逐文件 I/O）
+                                val lmSec = if (lmCol >= 0) cursor.getLong(lmCol) / 1000 else 0L
+                                val prev = baseline[id]
+                                if (prev != null && prev.sizeBytes == size && prev.lastModifiedSec == lmSec && prev.title == name) {
+                                    // 未变项也进索引：它的 mime 只能取基线（首扫时嗅出来/MediaStore 给的），
+                                    // 否则下一轮复用命中后又要重新 readHead 一遍——索引就白接了
+                                    dirItems.add(indexedOf(childDocId, name, prev.mimeType, size, lmSec))
+                                    found.add(prev)
+                                    discovered.incrementAndGet()
+                                    continue
+                                }
+                                val docUri = DocumentsContract.buildDocumentUriUsingTree(task.treeUri, childDocId)
+                                // mime 已是 video/*、audio/* 就用它；否则（application/octet-stream
+                                // 之类）按文件头嗅探——认不出的直接跳过，不往库里塞"点开必失败"的项
+                                val effectiveMime = if (mime.startsWith("video/") || mime.startsWith("audio/")) {
+                                    mime
+                                } else {
+                                    // 开流读头之前再过一次取消点：这才是真正的长 I/O
+                                    ensureNotCancelled()
+                                    readHead(docUri, ContainerSniffer.HEAD_BYTES)
+                                        ?.let { ContainerSniffer.sniff(it) }
+                                        ?: continue
+                                }
+                                // 索引只存**已判定**的 mime：下一轮复用就不会再为它开流读头
+                                dirItems.add(indexedOf(childDocId, name, effectiveMime, size, lmSec))
+                                found.add(
+                                    MediaItem(
+                                        id = id,
+                                        sourceId = sourceId,
+                                        title = name,
+                                        uri = docUri.toString(),
+                                        mimeType = effectiveMime,
+                                        sizeBytes = size,
+                                        // SAF 的 LAST_MODIFIED 是毫秒；断点指纹统一按秒（与 MediaStore 同单位）
+                                        lastModifiedSec = lmSec,
+                                        addedAtMs = if (lmCol >= 0) cursor.getLong(lmCol) else 0L,
+                                        // 同 queryScope：封面统一由后台封面泵 coverPump 补齐
+                                        coverUri = null,
+                                        folder = folderOfDocument(childDocId),
+                                    ),
+                                )
+                                discovered.incrementAndGet()
+                            }
                         }
-                        if (idCol < 0) continue
-                        val childDocId = cursor.getString(idCol) ?: continue
-                        val name = if (nameCol >= 0) cursor.getString(nameCol).orEmpty() else ""
-                        if (name.isEmpty()) continue
-                        val mime = if (mimeCol >= 0) cursor.getString(mimeCol).orEmpty() else ""
-                        val hidden = inheritedHidden || name.startsWith(".")
-                        if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                            // 数据保护（E198）：普通授权根下的隐藏子目录不下钻，只有显式选中的隐藏分支才继续深入
-                            if (!shouldDescendDirectory(name, inheritedHidden, HIDDEN_DENY_DIRS)) continue
-                            walk(treeUri, childDocId, hidden)
-                        } else if (hidden) {
-                            if (isJunkSuffix(name)) continue
-                            val size = if (sizeCol >= 0) cursor.getLong(sizeCol) else 0L
-                            if (sizeCol >= 0 && size <= 0L) continue
-                            val id = hiddenDocumentId(childDocId)
-                            if (!seen.add(id)) continue
-                            // 未变项复用基线：跳过文件头嗅探（逐文件 I/O）
-                            val lmSec = if (lmCol >= 0) cursor.getLong(lmCol) / 1000 else 0L
-                            val prev = baseline[id]
-                            if (prev != null && prev.sizeBytes == size && prev.lastModifiedSec == lmSec && prev.title == name) {
-                                out += prev
-                                continue
+                    }
+                }.onFailure { t ->
+                    partial = true
+                    if (t is CancellationException) throw t
+                    Log.w(TAG, "隐藏目录遍历失败（本次扫描不完整）", t)
+                    warnings.add(WARN_HIDDEN_WALK_FAILED)
+                }
+                // W3：只 record「走完整、且没被取消」的目录。leaf = 没有直接子目录（含被 E198 拒的），
+                // 依据是契约 §3 的正确性边界：非叶目录的深层新增只改子目录 mtime、祖先自身 mtime 不动，
+                // 所以非叶目录一律不给复用（下一轮照常下钻）。
+                if (walkIndexEnabled && !partial && !cancelRequested) {
+                    walkIndex.record(
+                        ScanWalkIndex.Entry(
+                            docId = task.docId,
+                            treeUri = task.treeUri.toString(),
+                            lastModifiedMs = task.lastModifiedMs,
+                            inheritedHidden = task.inheritedHidden,
+                            leaf = childDirs == 0,
+                            items = dirItems,
+                            walkedAtMs = walkNowMs,
+                        ),
+                    )
+                    recordedDirs.incrementAndGet()
+                }
+            }
+
+            // tree 根预解析（顺序、无 IPC）。E198：只有用户显式选到隐藏目录
+            // （tree 根路径含 `.` 分段）时整支才算显式选中、允许下钻隐藏子目录。
+            treeUriStrs.forEachIndexed { index, treeStr ->
+                if (budget.get() <= 0) {
+                    if (index < treeUriStrs.lastIndex) exhausted.set(true)
+                    return@forEachIndexed
+                }
+                val treeUri = runCatching { treeStr.toUri() }.getOrNull() ?: run {
+                    warnings.add(WARN_HIDDEN_WALK_FAILED)
+                    return@forEachIndexed
+                }
+                val treeDocId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
+                    ?: run {
+                        warnings.add(WARN_HIDDEN_WALK_FAILED)
+                        return@forEachIndexed
+                    }
+                val rootHidden = treeRootEntersHiddenPath(treeDocId)
+                // 父子 tree 重叠授权时同一个根会来两次，这里与子目录走同一份 dirSeen
+                val rootKey = treeDocId + "|" + rootHidden
+                if (!synchronized(dirSeenLock) { dirSeen.add(rootKey) }) {
+                    dupSkipped.incrementAndGet()
+                    return@forEachIndexed
+                }
+                enqueue(WalkTask(treeUri, treeDocId, rootHidden, lastModifiedMs = 0L, depth = 0))
+            }
+            if (pending.get() == 0) {
+                tasks.close()
+            } else {
+                // 车道数走**闭环调参**（此前是固定 ioWorkers()）：起跑值来自上一轮落盘的
+                // presets（缺失时用 ioWorkers()），上限见 LaneBudget.capOf。这里起 cap 条常驻
+                // worker，每处理一个目录先申请一个许可——「线程数」与「实际并发度」解耦：
+                // 存储/Provider 慢的时候靠许可把并发压回去，不会一堆线程空转抢锁
+                // （真机 1200 次串行 readHead 时多开车道确实毫无增益）。
+                val walkStart = lanes.initial(LaneKind.WALK, ScanParallelism.ioWorkers(lanes.cores))
+                val walkCap = lanes.capOf(LaneKind.WALK, walkStart)
+                val startPermits = walkStart.coerceIn(1, walkCap)
+                // 同 runTunedItems：令牌桶许可器，许可数可由调参在运行中增减
+                val walkLimiter = ScanLimiter(walkCap, startPermits)
+                // 收回许可必须异步：onPermitsChanged 在监视协程里被调用，同步 acquire 会把
+                // tick 卡住甚至与等工作协程互锁；收不回来的许可随本段作废，不影响下次扫描。
+                val walkShrink = java.util.Collections.synchronizedList(mutableListOf<Job>())
+                val walkTuner = ScanLaneTuner(
+                    kind = LaneKind.WALK,
+                    initialPermits = startPermits,
+                    cap = walkCap,
+                    cores = lanes.cores,
+                    onPermitsChanged = { delta ->
+                        if (delta > 0) {
+                            repeat(delta) { walkLimiter.release() }
+                        } else if (delta < 0) {
+                            walkShrink += launch(dispatchers.io) { repeat(-delta) { walkLimiter.acquire() } }
+                        }
+                    },
+                    log = { line -> ScanTrace.log(line) },
+                )
+                val walkSampler = LaneWindowSampler(LaneKind.WALK, lanes.cores, walkTuner) { line ->
+                    ScanTrace.log(line)
+                }
+                val walkStartedAt = System.nanoTime()
+                // 忙时累加：「实际并发度」按 串行单位耗时 ÷ 墙钟 算（IPC 型负载，CPU util 不代表并发）。
+                // 只累加**拿到许可后真正干活**的时间，排队等许可不算——否则并发度会虚高到 worker 数。
+                val busyNs = AtomicLong(0L)
+                val walkMonitor = launch(dispatchers.default) {
+                    var window = 0
+                    while (isActive) {
+                        delay(ScanLaneTuner.DEFAULT_WINDOW_MS)
+                        walkTuner.tick()
+                        window++
+                        walkSampler.tick(window)
+                    }
+                }
+                val workers = List(walkCap) {
+                    launch(dispatchers.io) {
+                        while (true) {
+                            currentCoroutineContext().ensureActive()
+                            val task = tasks.receiveCatching().getOrNull() ?: break
+                            try {
+                                walkLimiter.withPermit {
+                                    // 计时必须**在许可内**：taskStart 若在 withPermit 之前取，排队等许可
+                                    // 的时间也会被算成忙时，achievedParallelism 就会虚高到接近 worker 数
+                                    // （cap），把「实际吃满几个许可」这个结论直接毁掉。
+                                    val taskStart = System.nanoTime()
+                                    try {
+                                        processTask(task)
+                                    } finally {
+                                        busyNs.addAndGet(System.nanoTime() - taskStart)
+                                    }
+                                }
+                            } finally {
+                                walkSampler.onItemDone()
+                                walkTuner.onItemDone()
+                                if (pending.decrementAndGet() == 0) tasks.close()
+                                maybeReport()
                             }
-                            val docUri = DocumentsContract.buildDocumentUriUsingTree(treeUri, childDocId)
-                            // mime 已是 video/*、audio/* 就用它；否则（application/octet-stream
-                            // 之类）按文件头嗅探——认不出的直接跳过，不往库里塞"点开必失败"的项
-                            val effectiveMime = if (mime.startsWith("video/") || mime.startsWith("audio/")) {
-                                mime
-                            } else {
-                                readHead(docUri, ContainerSniffer.HEAD_BYTES)
-                                    ?.let { ContainerSniffer.sniff(it) }
-                                    ?: continue
-                            }
-                            out += MediaItem(
-                                id = id,
-                                sourceId = sourceId,
-                                title = name,
-                                uri = docUri.toString(),
-                                mimeType = effectiveMime,
-                                sizeBytes = size,
-                                // SAF 的 LAST_MODIFIED 是毫秒；断点指纹统一按秒（与 MediaStore 同单位）
-                                lastModifiedSec = lmSec,
-                                addedAtMs = if (lmCol >= 0) cursor.getLong(lmCol) else 0L,
-                                // 同 queryScope：封面统一由 attachCovers 并发补齐
-                                coverUri = null,
-                                folder = folderOfDocument(childDocId),
-                            )
                         }
                     }
                 }
-            }.onFailure { t ->
-                if (t is CancellationException) throw t
-                Log.w(TAG, "隐藏目录遍历失败（本次扫描不完整）", t)
-                warnings += "隐藏目录遍历失败，本次扫描不完整"
-            }
-        }
-
-        treeUriStrs.forEachIndexed { index, treeStr ->
-            if (budget <= 0) {
-                if (index < treeUriStrs.lastIndex) exhausted = true
-                return@forEachIndexed
-            }
-            val treeUri = runCatching { treeStr.toUri() }.getOrNull() ?: run {
-                warnings += "隐藏目录遍历失败，本次扫描不完整"
-                return@forEachIndexed
-            }
-            val treeDocId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
-                ?: run {
-                    warnings += "隐藏目录遍历失败，本次扫描不完整"
-                    return@forEachIndexed
+                // 收尾顺序：队列已关 → worker 全部 join → 才取消监视协程（否则最后一窗样本丢失）
+                try {
+                    workers.joinAll()
+                } finally {
+                    walkMonitor.cancel()
+                    walkShrink.toList().forEach { it.cancel() }
                 }
-            // 数据保护（E198）：只有用户显式选到隐藏目录（tree 根路径含 `.` 分段）时，整支才算显式选中、允许下钻隐藏子目录
-            walk(treeUri, treeDocId, treeRootEntersHiddenPath(treeDocId))
+                val walkSummary = walkTuner.finish()
+                lanes.remember(LaneKind.WALK, walkSummary)
+                val wallNs = (System.nanoTime() - walkStartedAt).coerceAtLeast(1L)
+                ScanTrace.log(walkSampler.finishLine(walkSummary))
+                ScanTrace.log(
+                    "phase=WALK perf util=" +
+                        (if (walkSummary.utilAvg < 0.0) "n/a" else String.format(Locale.US, "%.2f", walkSummary.utilAvg)) +
+                        " achievedParallelism=" + fmtParallelism(busyNs.get().toDouble() / wallNs) +
+                        // 上界互证：achievedParallelism 不该超过收尾许可数。两个数对不上（明显更小）
+                        // → 这一轮大部分时间在等许可排队，扩容没换来吞吐，看 tuner 的 ceiling 即可。
+                        " permits=" + walkSummary.permits +
+                        " dirs=" + dirsDone.get() +
+                        " elapsedMs=" + wallNs / 1_000_000,
+                )
+            }
         }
-        if (exhausted) warnings += "隐藏目录遍历预算耗尽，本次扫描不完整"
-        return QuerySlice(out, warnings.distinct())
+        if (exhausted.get()) warnings.add("隐藏目录遍历预算耗尽，本次扫描不完整")
+        // W4：只有「完整走完 + 无警告 + 未取消」才落盘。取消/预算耗尽时索引残缺或没覆盖全树，
+        // 落盘等于让下一轮把残缺当完整结果复用（漏文件）；不落盘的代价只是下一轮重走一遍。
+        // 反过来说，取消也不要 retainOnly：load() 每轮先 clear() 再 putAll(磁盘)，内存残留自有去处。
+        val completeWalk = !exhausted.get() && warnings.isEmpty() && !cancelRequested
+        if (walkIndexEnabled && completeWalk) walkIndex.save()
+        // 真机判据：dirs 应≈实际目录数；是它的整数倍且 dupSkipped>0 → 重叠/重复入队；
+        // dirs≈预算上限且 budgetLeft≈0 → provider 成环（深度/去重没兜住）
+        ScanTrace.log(
+            "hidden walk done dirs=" + dirsDone.get() +
+                " entries=" + discovered.get() +
+                " dupSkipped=" + dupSkipped.get() +
+                " skipDepth=" + skipDepth.get() +
+                " maxDepth=" + maxDepth.get() +
+                " budgetLeft=" + budget.get() +
+                " exhausted=" + exhausted.get() +
+                " index=" + (if (walkIndexEnabled) "on" else "off") +
+                " reused=" + reusedDirs.get() +
+                " recorded=" + recordedDirs.get() +
+                " saved=" + completeWalk +
+                " ttlMin=" + (walkIndexTtlMs / 60_000L),
+        )
+        // 稳定排序：walk 用多条车道并发收集，`found` 的顺序由完成时序决定——而提交段的
+        // `items != previousList` 是**保序**比较（见 scanInternal 的快照重写判定）。不排序 →
+        // 每轮顺序都不同 → 每轮都判定「变了」→ 每轮重写几 MB 快照 JSON，增量反而更慢。
+        // 按 addedAtMs 降序 + id 升序：id 唯一，排序结果完全确定。
+        val sorted = found.sortedWith(
+            compareByDescending<MediaItem> { it.addedAtMs }.thenBy { it.id },
+        )
+        return QuerySlice(sorted, warnings.toList().distinct())
     }
 
     /** 缩略图缓存：扫描时落盘为 JPEG，之后封面直接读文件 */
@@ -1381,18 +2215,25 @@ private fun allFilesAccessGranted(): Boolean =
 // VOLUME_EXTERNAL 是 API 29 常量（String，会被内联）；本函数先过 sdkInt < R 门控，
 // 旧系统不会执行到用它的那行，运行时安全。
 @SuppressLint("InlinedApi")
-private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, MediaItem>): QuerySlice<MediaItem> {
+private suspend fun sniffUnknownFiles(
+    scopes: List<ScanScope>,
+    baseline: Map<String, MediaItem>,
+    lanes: LaneBudget,
+): QuerySlice<MediaItem> {
     // 能力门控（不是失败）：旧系统 / 无「所有文件访问」时这条分支本就不该覆盖任何范围
     if (sdkInt < Build.VERSION_CODES.R) return QuerySlice(emptyList())
     if (!allFilesAccessGranted()) {
         return QuerySlice(emptyList())
     }
     val collection = MediaStore.Files.getContentUri(MediaStore.VOLUME_EXTERNAL)
-    val out = mutableListOf<MediaItem>()
+    val found: MutableList<MediaItem> = java.util.Collections.synchronizedList(mutableListOf())
     val warnings = mutableListOf<String>()
     // 去重：目录范围父子重叠（同时授权父目录与子目录）时，同一行会被逐 scope 查两次——
     // 此前 `out +=` 无判重，同一文件以同一 id 进列表两次（用户实报"扫描会出现双份文件"）
     val seen = HashSet<String>()
+    // 第一段：只做游标遍历（MediaStore IPC），把需要读文件头的行物化到内存。
+    // 逐行 readHead 才是这条分支最贵的一半，交给第二段按车道并发。
+    val sniffRows = mutableListOf<UnknownRow>()
     scopes.forEach { scope ->
         // Unresolvable 一律跳过（与 [queryScope] 同一道闸）：scopeSelection 对它返回
         // (null, null)，而 (null, null) 与"用户选的就是主存储根目录＝全量扫描"同形，
@@ -1428,6 +2269,8 @@ private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, Med
                 val dataCol = cursor.getColumnIndex(MediaStore.Files.FileColumns.DATA)
                 val relCol = cursor.getColumnIndex(MediaStore.MediaColumns.RELATIVE_PATH)
                 while (cursor.moveToNext()) {
+                    // 游标段也是长循环（大库上千行）：取消在这里就要见效，不必等第二段
+                    ensureNotCancelled()
                     if (idCol < 0 || nameCol < 0) continue
                     val id = "msf-${cursor.getLong(idCol)}"
                     if (!seen.add(id)) continue
@@ -1438,24 +2281,25 @@ private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, Med
                     // 未变项（改名/改大小/改加入时间之外都不变）复用基线：跳过文件头读取
                     val prev = baseline[id]
                     if (prev != null && prev.title == title && prev.sizeBytes == size && prev.addedAtMs == addedAt) {
-                        out += prev
+                        found.add(prev)
                         continue
                     }
                     val uri = ContentUris.withAppendedId(collection, cursor.getLong(idCol)).toString()
-                    val head = readHead(uri.toUri(), ContainerSniffer.HEAD_BYTES)
-                    val mime = head?.let { ContainerSniffer.sniff(it) } ?: continue
                     val dataPath = if (dataCol >= 0) cursor.getString(dataCol).orEmpty() else ""
-                    out += MediaItem(
-                        id = id,
-                        sourceId = sourceId,
-                        title = title,
-                        uri = uri,
-                        mimeType = mime,
-                        sizeBytes = size,
-                        addedAtMs = addedAt,
-                        folder = folderOf(
-                            dataPath = dataPath,
-                            relativePath = if (relCol >= 0) cursor.getString(relCol) else null,
+                    sniffRows.add(
+                        UnknownRow(
+                            id = id,
+                            name = name,
+                            title = title,
+                            size = size,
+                            addedAt = addedAt,
+                            uri = uri,
+                            folder = folderOf(
+                                dataPath = dataPath,
+                                relativePath = if (relCol >= 0) cursor.getString(relCol) else null,
+                            ),
+                            // needsSniff 收窄：扩展名已能判定容器时不必开流读头
+                            mimeByName = mimeOfFileName(name),
                         ),
                     )
                 }
@@ -1466,7 +2310,31 @@ private fun sniffUnknownFiles(scopes: List<ScanScope>, baseline: Map<String, Med
             warnings += "无扩展名文件扫描不完整"
         }
     }
-    return QuerySlice(out, warnings.distinct())
+    // 第二段：动态许可并发（读 64 字节头与文件大小无关，等权调度即可，不按字节数装填）。
+    // 起跑值/上限/许可增减都由闭环调参决定：Provider 读头快就自动多开，撞上内核串行化自动收回。
+    if (sniffRows.isNotEmpty()) {
+        val sniffStart = lanes.initial(LaneKind.SNIFF, ScanParallelism.ioWorkers(lanes.cores))
+        val summary = runTunedItems(lanes, LaneKind.SNIFF, sniffRows, sniffStart) { row ->
+            // 扩展名能定容器的直接采用；否则读 64 字节头嗅探，认不出即跳过（认不出的不进库）
+            val mime = row.mimeByName ?: ContainerSniffer.sniff(
+                readHead(row.uri.toUri(), ContainerSniffer.HEAD_BYTES) ?: return@runTunedItems,
+            ) ?: return@runTunedItems
+            found.add(
+                MediaItem(
+                    id = row.id,
+                    sourceId = sourceId,
+                    title = row.title,
+                    uri = row.uri,
+                    mimeType = mime,
+                    sizeBytes = row.size,
+                    addedAtMs = row.addedAt,
+                    folder = row.folder,
+                ),
+            )
+        }
+        lanes.remember(LaneKind.SNIFF, summary)
+    }
+    return QuerySlice(found.toList(), warnings.distinct())
 }
 
 /**
@@ -1520,10 +2388,38 @@ private val JUNK_SUFFIXES = listOf(".part", ".tmp", ".crdownload", ".!qb", ".dow
 /** L14 遍历预算：单次扫描最多访问的文档数上限（防巨型目录把扫描拖成分钟级） */
 private const val HIDDEN_WALK_BUDGET = 20_000
 
+/** I/O 型车道（遍历/嗅探）的许可上限：8 核设备的 ioWorkers() 是 12，翻倍后 24 已足够覆盖富余。 */
+private const val WALK_LANE_CAP_MAX = 24
+
+/** 解码型车道（抽帧/读时长）的许可上限：再往上只会换来 GC 抖动。 */
+private const val ITEM_LANE_CAP_MAX = 8
+
+/**
+ * 目录递归深度上限。
+ *
+ * 正常用户目录树深不过十几层；超过这个数只可能是 provider 把父目录/自身当 child 返回
+ * （成环）或恶意构造的极深路径。没有这道闸时唯一兜底是 [HIDDEN_WALK_BUDGET] ——
+ * 那意味着 2 万次 binder IPC 之后才停，一次扫描被拖到分钟级。
+ */
+private const val MAX_WALK_DEPTH = 64
+
 /** L14 下钻黑名单：这些隐藏目录只装系统缓存 / 回收站，不可能有用户媒体 */
 private val HIDDEN_DENY_DIRS = setOf(
     ".thumbnails", ".trash", ".Trash", ".recycle", ".trashbin", ".cache", ".temp",
 )
+
+/**
+ * 文件名 → 容器 mime（无扩展名拾取分支的 needsSniff 收窄用）。
+ *
+ * 认出扩展名（表内）时直接给 mime，调用方省掉一次 openInputStream 读头；
+ * 认不出（含无扩展名、点号开头的隐藏名）返回 null，仍走文件头嗅探——与旧实现一致。
+ */
+private fun mimeOfFileName(name: String): String? {
+    // 点号开头的文件名（".mp4"）不以扩展名论：那不是扩展名，宁可读头确认
+    if (name.startsWith('.')) return null
+    val ext = name.substringAfterLast('.', "").lowercase()
+    return if (ext.isEmpty()) null else UNKNOWN_FILE_EXT_MIME[ext]
+}
 
 /** 半成品后缀（与 `isJunkFile` 共用 [JUNK_SUFFIXES]）：隐藏目录里的 .part 之类不该进库 */
 private fun isJunkSuffix(name: String): Boolean {
@@ -1536,8 +2432,57 @@ private const val VIDEO_ID_PREFIX = "ms-"
 private const val AUDIO_ID_PREFIX = "msa-"
 private const val HIDDEN_ID_PREFIX = "saf-"
 
-/** 首次扫描时同时抽帧的缩略图数量上限：再高只会在低端机上抢 I/O 与解码器，不会更快 */
-private const val THUMB_PARALLELISM = 4
+/**
+ * HIDDEN_WALK 阶段的上报节奏：每 16 个目录或 100ms，谁先到就报一次。
+ *
+ * 上限决定了 UI 抖动的上限；大目录树上不按条数报（一次 children 查询可能几千行，
+ * 按行报会把 StateFlow 刷成噪音）。
+ */
+private const val PROGRESS_DIR_EVERY = 16
+private const val PROGRESS_EVERY_MS = 100L
+
+/** 隐藏目录遍历失败的统一告警文案（完整性判定按字面量透传到扫描摘要，勿改） */
+private const val WARN_HIDDEN_WALK_FAILED = "隐藏目录遍历失败，本次扫描不完整"
+
+/** 隐藏目录遍历的 projection（SAF children 查询的固定五列） */
+private val HIDDEN_PROJECTION = arrayOf(
+    DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+    DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+    DocumentsContract.Document.COLUMN_MIME_TYPE,
+    DocumentsContract.Document.COLUMN_SIZE,
+    DocumentsContract.Document.COLUMN_LAST_MODIFIED,
+)
+
+/**
+ * 扩展名 → 容器 mime（无扩展名拾取分支的 needsSniff 收窄用）。
+ *
+ * 该分支原本对**每一行** `openInputStream` 读 64 字节头。扩展名已能判定容器时
+ * （`movie.mp4` 这类被 MediaStore 漏判成 `media_type = 0` 的行）直接定容器，
+ * 省掉一次开流；认不出的扩展名（含无扩展名）仍走文件头嗅探，与旧实现一致。
+ * 只收"扩展名等于容器"的项，别名/有歧义的不收。
+ */
+private val UNKNOWN_FILE_EXT_MIME = mapOf(
+    "mp4" to "video/mp4",
+    "m4v" to "video/mp4",
+    "mov" to "video/quicktime",
+    "mkv" to "video/x-matroska",
+    "webm" to "video/webm",
+    "avi" to "video/avi",
+    "ts" to "video/mp2t",
+    "m2ts" to "video/mp2t",
+    "flv" to "video/x-flv",
+    "3gp" to "video/3gpp",
+    "wmv" to "video/x-ms-wmv",
+    "mp3" to "audio/mpeg",
+    "m4a" to "audio/mp4",
+    "aac" to "audio/aac",
+    "flac" to "audio/flac",
+    "wav" to "audio/wav",
+    "ogg" to "audio/ogg",
+    "opus" to "audio/opus",
+    "amr" to "audio/amr",
+    "mid" to "audio/midi",
+)
 
 /** 缩略图文件名键：MediaStore 项剥 `ms-`（沿用既有缓存名），SAF 项直接用整 id */
 private fun thumbKeyOf(id: String): String? = when {
@@ -1558,6 +2503,29 @@ internal fun folderOfDocument(docId: String): String? =
         .substringBeforeLast('/', "")
         .trim('/')
         .ifEmpty { null }
+
+/**
+ * 建一条目录遍历索引条目。
+ *
+ * 两个字段必须注意：`mime` 只传**已判定**的值（video/audio 的具体类型），下一轮复用命中后
+ * 才能免掉一次开流读头；`lastModifiedSec` 是 SAF 毫秒时间戳整除 1000 的秒值（与 MediaStore 同单位，
+ * 断点指纹也按秒比较）。
+ */
+private fun indexedOf(
+    docId: String,
+    name: String,
+    mime: String?,
+    sizeBytes: Long,
+    lastModifiedSec: Long,
+): ScanWalkIndex.Indexed = ScanWalkIndex.Indexed(
+    docId = docId,
+    name = name,
+    mime = mime,
+    sizeBytes = sizeBytes,
+    lastModifiedSec = lastModifiedSec,
+    // walk 只收「路径含 . 前缀分段」的条目，到这里的都是隐藏项
+    hidden = true,
+)
 
 /**
  * L14：SAF docId → 稳定短 id（`saf-` + SHA-1 截断 16 位十六进制）。
