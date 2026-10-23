@@ -11,6 +11,12 @@ class PipPolicyTest {
     }
 
     @Test
+    fun `portrait speed chips also reach 3x`() {
+        assertEquals(SPEED_PRESETS, SPEED_PORTRAIT_PRESETS)
+        assertEquals(3f, SPEED_PORTRAIT_PRESETS.last(), 0f)
+    }
+
+    @Test
     fun `ordinary portrait and landscape ratios are preserved`() {
         assertEquals(16f / 9f, pipAspectRatio(16f / 9f), 0f)
         assertEquals(9f / 16f, pipAspectRatio(9f / 16f), 0f)

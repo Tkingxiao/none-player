@@ -1166,7 +1166,8 @@ class LocalMediaSource(
                         val mime = if (mimeCol >= 0) cursor.getString(mimeCol).orEmpty() else ""
                         val hidden = inheritedHidden || name.startsWith(".")
                         if (mime == DocumentsContract.Document.MIME_TYPE_DIR) {
-                            if (name in HIDDEN_DENY_DIRS) continue
+                            // 数据保护（E198）：普通授权根下的隐藏子目录不下钻，只有显式选中的隐藏分支才继续深入
+                            if (!shouldDescendDirectory(name, inheritedHidden, HIDDEN_DENY_DIRS)) continue
                             walk(treeUri, childDocId, hidden)
                         } else if (hidden) {
                             if (isJunkSuffix(name)) continue
@@ -1229,9 +1230,8 @@ class LocalMediaSource(
                     warnings += "隐藏目录遍历失败，本次扫描不完整"
                     return@forEachIndexed
                 }
-            // tree 根自身就是隐藏目录（用户直接选了 `.foo`）时，其子项整支都算隐藏
-            val rootName = treeDocId.substringAfter(':', treeDocId).substringAfterLast('/')
-            walk(treeUri, treeDocId, rootName.startsWith("."))
+            // 数据保护（E198）：只有用户显式选到隐藏目录（tree 根路径含 `.` 分段）时，整支才算显式选中、允许下钻隐藏子目录
+            walk(treeUri, treeDocId, treeRootEntersHiddenPath(treeDocId))
         }
         if (exhausted) warnings += "隐藏目录遍历预算耗尽，本次扫描不完整"
         return QuerySlice(out, warnings.distinct())
@@ -1568,6 +1568,33 @@ internal fun folderOfDocument(docId: String): String? =
 internal fun hiddenDocumentId(docId: String): String {
     val digest = java.security.MessageDigest.getInstance("SHA-1").digest(docId.toByteArray())
     return HIDDEN_ID_PREFIX + digest.joinToString("") { "%02x".format(it) }.take(16)
+}
+
+/**
+ * 数据保护（E198）：用户显式选择的 SAF tree 根路径是否进入隐藏目录（`.` 前缀分段）。
+ *
+ * 只有把 tree 直接选到 `.foo`（或其下，如 `Movies/.nphidden/series`）时，整支才算
+ * "显式选择"，允许下钻隐藏子目录；选的是 `Movies` 这类普通根，其下 `.xxx` 子目录不越权遍历。
+ */
+internal fun treeRootEntersHiddenPath(treeDocId: String): Boolean =
+    treeDocId.substringAfter(':', treeDocId)
+        .split('/')
+        .any { it.startsWith(".") }
+
+/**
+ * 数据保护（E198）：是否下钻一个子目录。
+ *
+ * 命中黑名单不下钻；`.` 前缀目录**仅当已处于显式选中的隐藏分支内**（[inheritedHidden]）才下钻——
+ * 普通授权根（如 `Movies`）下的隐藏子目录一律不进（MediaStore 本就跳过它们，越权遍历违背数据保护）。
+ */
+internal fun shouldDescendDirectory(
+    name: String,
+    inheritedHidden: Boolean,
+    denyDirs: Set<String>,
+): Boolean {
+    if (name in denyDirs) return false
+    if (name.startsWith(".")) return inheritedHidden
+    return true
 }
 
 private const val TAG = "LocalMediaSource"

@@ -62,6 +62,7 @@ internal fun Modifier.npStageGestures(
     onDoubleTap: (zone: StageTapZone) -> Unit = {},
     onLongPressStart: () -> Unit = {},
     onLongPressEnd: () -> Unit = {},
+    seekSpanMs: () -> Float = { STAGE_SEEK_FULL_SPAN_MS },
     onSeekStart: () -> Unit = {},
     onSeekDelta: (deltaMs: Float) -> Unit = {},
     onSeekEnd: () -> Unit = {},
@@ -80,6 +81,7 @@ internal fun Modifier.npStageGestures(
             onDoubleTap = onDoubleTap,
             onLongPressStart = onLongPressStart,
             onLongPressEnd = onLongPressEnd,
+            seekSpanMs = seekSpanMs,
             onSeekStart = onSeekStart,
             onSeekDelta = onSeekDelta,
             onSeekEnd = onSeekEnd,
@@ -111,6 +113,7 @@ private class StageGestureCallbacks(
     val onDoubleTap: (StageTapZone) -> Unit,
     val onLongPressStart: () -> Unit,
     val onLongPressEnd: () -> Unit,
+    val seekSpanMs: () -> Float,
     val onSeekStart: () -> Unit,
     val onSeekDelta: (Float) -> Unit,
     val onSeekEnd: () -> Unit,
@@ -371,7 +374,9 @@ private suspend fun PointerInputScope.detectStageDragFamily(
                 val delta = change.positionChange()
                 when (dragKind) {
                     StageDragKind.Seek ->
-                        current().onSeekDelta(seekDeltaMs(delta.x, width))
+                        current().onSeekDelta(
+                            seekDeltaMs(delta.x, width, current().seekSpanMs()),
+                        )
                     StageDragKind.Brightness ->
                         current().onVerticalDelta(
                             StageVerticalMode.Brightness,

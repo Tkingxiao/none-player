@@ -42,7 +42,6 @@ import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatFileSize
 import com.noneplayer.core.ui.npGlassSurface
-import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
@@ -356,7 +355,6 @@ internal fun AudioPane(
 ) {
     val services = LocalKernel.current.services
     val history = remember(services) { services.get<HistoryRepository>() }
-    val settings = remember(services) { services.get<AppSettings>() }
     val scope = rememberCoroutineScope()
     val snapshot by session.nowPlayingSummary.collectAsStateWithLifecycle()
     val item = snapshot?.item ?: return
@@ -383,8 +381,8 @@ internal fun AudioPane(
             speedText = "${speed}x",
             speedPickerVisible = speedPickerVisible,
             onPickSpeed = { next ->
+                // D4/E198：倍速会话内生效、不持久化（见 PlayerScreen.pickSpeed）
                 player.setSpeed(next)
-                scope.launch { settings.setPlaybackSpeed(next) }
                 speedPickerVisible = false
             },
             onOpenEpisodes = { queueVisible = true },

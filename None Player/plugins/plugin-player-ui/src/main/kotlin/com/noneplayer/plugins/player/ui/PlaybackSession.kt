@@ -654,6 +654,10 @@ class PlaybackSession(
         loadGeneration++
         // 无引擎：会话保持干净（不动队列/下标），原因已写入 engineError 由 UI 呈现
         val player = acquire(item.mimeType) ?: return
+        // 新队列 = 新会话语义：循环/擦洗/裁剪复位，避免上一条媒体/上一次页面的状态残留
+        setLoopMode(NpLoopMode.OFF)
+        player.setScrubbing(false)
+        player.setVideoCrop(false)
         val (list, index) = resolveQueueStart(queueOfFolder, item)
         _queue.value = list
         _index.value = index
@@ -756,6 +760,10 @@ class PlaybackSession(
         startingIntent = null
         val p = _player.value
         p?.pause()
+        // 停止是会话级复位：循环/擦洗/裁剪都不该跨到下一次播放
+        p?.setScrubbing(false)
+        p?.setVideoCrop(false)
+        setLoopMode(NpLoopMode.OFF)
         // 清队列前先把当前项断点落盘：周期落点最多差 15s，显式关闭不该丢掉这一截
         // （persistPosition 自行短路，队列已空/引擎未就绪时是空操作）。
         persistPosition()

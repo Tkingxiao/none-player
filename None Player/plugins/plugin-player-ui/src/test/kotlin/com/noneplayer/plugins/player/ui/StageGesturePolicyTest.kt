@@ -7,11 +7,13 @@ import com.noneplayer.plugins.player.ui.gesture.StageTapZone
 import com.noneplayer.plugins.player.ui.gesture.StageVerticalMode
 import com.noneplayer.plugins.player.ui.gesture.clampSeekTargetMs
 import com.noneplayer.plugins.player.ui.gesture.decideDragKind
+import com.noneplayer.plugins.player.ui.gesture.doubleTapSeekTargetMs
 import com.noneplayer.plugins.player.ui.gesture.isDragDeadZone
 import com.noneplayer.plugins.player.ui.gesture.isSecondTapValid
 import com.noneplayer.plugins.player.ui.gesture.isTapDeadZone
 import com.noneplayer.plugins.player.ui.gesture.movementCancelsLongPress
 import com.noneplayer.plugins.player.ui.gesture.seekDeltaMs
+import com.noneplayer.plugins.player.ui.gesture.seekSpanForDurationMs
 import com.noneplayer.plugins.player.ui.gesture.stageDpAtLeast
 import com.noneplayer.plugins.player.ui.gesture.tapZoneForX
 import com.noneplayer.plugins.player.ui.gesture.verticalDeltaPercent
@@ -198,6 +200,45 @@ class StageGesturePolicyTest {
         assertEquals(STAGE_SEEK_FULL_SPAN_MS / 2f, seekDeltaMs(500f, 1000f), 0f)
         assertEquals(-STAGE_SEEK_FULL_SPAN_MS, seekDeltaMs(-1000f, 1000f), 0f)
         assertEquals(0f, seekDeltaMs(500f, 0f), 0f)
+    }
+
+    @Test
+    fun `seek full span follows duration`() {
+        // 时长未知：退回 90s 默认值。
+        assertEquals(90_000f, seekSpanForDurationMs(0L), 0f)
+        assertEquals(90_000f, seekSpanForDurationMs(-1L), 0f)
+        // ≤30s：满幅就是整片，一滑到底。
+        assertEquals(20_000f, seekSpanForDurationMs(20_000L), 0f)
+        assertEquals(30_000f, seekSpanForDurationMs(30_000L), 0f)
+        // >30s 且 <180s：按片长 1:1。
+        assertEquals(31_000f, seekSpanForDurationMs(31_000L), 0f)
+        assertEquals(90_000f, seekSpanForDurationMs(90_000L), 0f)
+        assertEquals(180_000f, seekSpanForDurationMs(180_000L), 0f)
+        // 超过 3 分钟：封顶 180s。
+        assertEquals(180_000f, seekSpanForDurationMs(600_000L), 0f)
+        assertEquals(180_000f, seekSpanForDurationMs(7_200_000L), 0f)
+    }
+
+    @Test
+    fun `seek delta uses duration derived span`() {
+        assertEquals(20_000f, seekDeltaMs(1000f, 1000f, seekSpanForDurationMs(20_000L)), 0f)
+        assertEquals(90_000f, seekDeltaMs(1000f, 1000f, seekSpanForDurationMs(90_000L)), 0f)
+        assertEquals(180_000f, seekDeltaMs(1000f, 1000f, seekSpanForDurationMs(7_200_000L)), 0f)
+        assertEquals(-90_000f, seekDeltaMs(-500f, 1000f, seekSpanForDurationMs(7_200_000L)), 0f)
+    }
+
+    @Test
+    fun `double tap does not seek when duration unknown`() {
+        assertNull(doubleTapSeekTargetMs(30_000L, 10_000L, forward = true, durationMs = 0L))
+        assertNull(doubleTapSeekTargetMs(30_000L, 10_000L, forward = false, durationMs = -1L))
+    }
+
+    @Test
+    fun `double tap target clamps to known duration`() {
+        assertEquals(40_000L, doubleTapSeekTargetMs(30_000L, 10_000L, true, 60_000L))
+        assertEquals(20_000L, doubleTapSeekTargetMs(30_000L, 10_000L, false, 60_000L))
+        assertEquals(0L, doubleTapSeekTargetMs(5_000L, 10_000L, false, 60_000L))
+        assertEquals(60_000L, doubleTapSeekTargetMs(55_000L, 10_000L, true, 60_000L))
     }
 
     @Test

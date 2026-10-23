@@ -256,7 +256,9 @@ import com.noneplayer.plugins.player.ui.gesture.StageVerticalMode
 import com.noneplayer.plugins.player.ui.gesture.VerticalAdjustIndicator
 import com.noneplayer.plugins.player.ui.gesture.VerticalSwipeAccumulator
 import com.noneplayer.plugins.player.ui.gesture.clampSeekTargetMs
+import com.noneplayer.plugins.player.ui.gesture.doubleTapSeekTargetMs
 import com.noneplayer.plugins.player.ui.gesture.npStageGestures
+import com.noneplayer.plugins.player.ui.gesture.seekSpanForDurationMs
 import com.noneplayer.plugins.player.ui.gesture.stageDpAtLeast
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -302,6 +304,16 @@ private val BAR_EXIT_SLIDE = 8.dp
 
 /** 「已为您定位到 xx:xx」续播提示的停留时长（B 站同款：亮一下即收，不挡住看片） */
 private const val RESUME_NOTICE_MS = 3_200L
+
+/** 手势反馈胶囊（「已静音」/「快进 10 秒」）的停留时长 */
+private const val GESTURE_HINT_HOLD_MS = 1_200L
+
+/** 手势反馈胶囊的一次触发；[seq] 保证同文案重触发也能拿到新的计时 key。 */
+internal data class GestureHint(val text: String, val seq: Long)
+
+/** 同文案重触发时 seq 必须递增——相等的数据类不会重启 `LaunchedEffect`。 */
+internal fun nextGestureHint(previous: GestureHint?, text: String): GestureHint =
+    GestureHint(text, (previous?.seq ?: 0L) + 1L)
 
 /** 舞台双击的 seek 步长（§4.3：左右 1/3 = ∓/±10 秒） */
 private const val GESTURE_SEEK_STEP_MS = 10_000L
@@ -495,11 +507,16 @@ fun PlayerScreen(
     val keepScreenOn by settings.keepScreenOn.collectAsStateWithLifecycle(initialValue = true)
     val gesturesEnabled by settings.gesturesEnabled.collectAsStateWithLifecycle(initialValue = true)
     val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
-    // 手势反馈胶囊（"亮度 62%" / "音量 40%" / "快进 10 秒"）
-    var gestureHint by remember { mutableStateOf<String?>(null) }
+    // 手势反馈胶囊（"亮度 62%" / "音量 40%" / "快进 10 秒"）。
+    // seq 是必需的：同一文案在停留期内再次触发时，字符串相等不会重启
+    // `LaunchedEffect`，第二次反馈会被上一次的计时提前收掉。
+    var gestureHint by remember { mutableStateOf<GestureHint?>(null) }
+    fun showGestureHint(text: String) {
+        gestureHint = nextGestureHint(gestureHint, text)
+    }
     LaunchedEffect(gestureHint) {
         if (gestureHint != null) {
-            delay(1_200)
+            delay(GESTURE_HINT_HOLD_MS)
             gestureHint = null
         }
     }
@@ -809,6 +826,7 @@ fun PlayerScreen(
     // **全屏 ≡ 沉浸**（2026-10-07 用户裁定：假全屏整组删除）：横向窗口一律隐藏系统栏，
     // 不再有"横窗版式 + 系统栏可见"的中间态。竖窗（手机竖持 / 平板竖持 / 窗口化）
     // 是普通的竖屏播放页，不叫全屏，也就没有"看得见小白条的全屏"。
+    // A28 曾建议平板/类 PC 横窗保留状态栏；2026-10-23 复核仍选择本裁定（不区分形态）。
     val isImmersive = isFullscreen
     var orientationLock by rememberSaveable { mutableStateOf(OrientationLock.FollowSensor) }
 
@@ -935,6 +953,7 @@ fun PlayerScreen(
     DisposableEffect(isImmersive) {
         val window = activity?.window
         val controller = window?.let { WindowCompat.getInsetsController(it, it.decorView) }
+        val previousBehavior = controller?.systemBarsBehavior
         if (isImmersive) {
             controller?.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
@@ -942,7 +961,12 @@ fun PlayerScreen(
         } else {
             controller?.show(WindowInsetsCompat.Type.systemBars())
         }
-        onDispose { controller?.show(WindowInsetsCompat.Type.systemBars()) }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            // A28：行为是窗口级状态，不随页面销毁自动复位；不写回会让此后的
+            // 页面沿用「滑动只呼出临时栏」的沉浸手势。
+            if (previousBehavior != null) controller?.systemBarsBehavior = previousBehavior
+        }
     }
 
     // 前台播放时保持屏幕常亮；暂停/退后台时窗口不可见，系统照常息屏。
@@ -960,6 +984,26 @@ fun PlayerScreen(
     }
 
     var controlsVisible by remember { mutableStateOf(true) }
+    // A28：沉浸控制层隐藏后系统栏也没了，时钟不能跟着顶栏一起消失。
+    // 常驻实例留在组合里（接收器跟着它），控制层出来时让顶栏那份显示、这份淡出。
+    var persistentClockBright by remember { mutableStateOf(false) }
+    LaunchedEffect(controlsVisible, isImmersive, inPipMode, stageLocked) {
+        persistentClockBright = false
+        if (isImmersive && !controlsVisible && !inPipMode && !stageLocked) {
+            persistentClockBright = true
+            delay(3_000)
+            persistentClockBright = false
+        }
+    }
+    val persistentClockAlpha by animateFloatAsState(
+        targetValue = when {
+            !isImmersive || inPipMode || stageLocked -> 0f
+            controlsVisible -> 0f
+            persistentClockBright -> 0.9f
+            else -> 0.55f
+        },
+        label = "persistentClockAlpha",
+    )
     /**
      * 「全屏切换」钮（控制层右下角，与 §8.4 的 `F` 共用）——按当前语境给唯一解：
      * 竖窗 = 进全屏（请求横向）；手机横窗全屏 = 锁竖屏退全屏、留在播放页；
@@ -1082,6 +1126,11 @@ fun PlayerScreen(
                     "&mime=${encodeRouteParam(mime)}",
             )
         }
+    }
+
+    // 页面退出时兜底清擦洗态：拖动中断/系统返回不会走 onScrubEnd/Cancel。
+    DisposableEffect(player) {
+        onDispose { player.setScrubbing(false) }
     }
 
     // 拖动进度条：暂停 + 关键帧预览（限流），松手精确 seek 后恢复播放。
@@ -1245,10 +1294,11 @@ fun PlayerScreen(
     var pictureSheetVisible by remember { mutableStateOf(false) }
     var chaptersPanelVisible by remember { mutableStateOf(false) }
 
-    /** 选倍速：落到播放器 + 持久化 + 回执，并收起选择条 */
+    /** 选倍速：只落到播放器（会话内生效，D4/E198 不持久化）+ 回执，并收起选择条 */
     fun pickSpeed(preset: Float) {
         player.setSpeed(preset)
-        scope.launch { settings.setPlaybackSpeed(preset) }
+        // D4/E198：实时倍速只在当前会话生效，不写回设置——写回会让倍速跨视频/跨会话
+        // 全局持久。「默认播放倍速」仅设置页可改，起播时由 SessionBootstrap 播种。
         toast.show("倍速：" + speedLabel(preset))
         speedPickerVisible = false
     }
@@ -1356,10 +1406,10 @@ fun PlayerScreen(
         if (volumePercent > 0) {
             lastAudiblePercent = volumePercent
             setVolumePercent(0)
-            gestureHint = "已静音"
+            showGestureHint("已静音")
         } else {
             setVolumePercent(if (lastAudiblePercent > 0) lastAudiblePercent else SessionKeySteps.VOLUME_RESTORE_PERCENT)
-            gestureHint = "已取消静音"
+            showGestureHint("已取消静音")
         }
         controlsVisible = true
     }
@@ -1380,14 +1430,20 @@ fun PlayerScreen(
      * 边界/触觉/提示逻辑——步长是唯一差异，别在这里再开一份 if。
      */
     fun seekByGesture(forward: Boolean, stepMs: Long = GESTURE_SEEK_STEP_MS) {
-        val raw = player.positionMs.value + if (forward) stepMs else -stepMs
+        val position = player.positionMs.value
         // A7#7：上限读**回调执行时**的时长——`durationMs` 是组合期快照，AVI 时长回填、
         // 切集之后旧值会把目标夹进旧片长（甚至为 0）。
-        val target = raw.coerceIn(0L, durationState.value.coerceAtLeast(0L))
+        val target = doubleTapSeekTargetMs(position, stepMs, forward, durationState.value)
+        if (target == null) {
+            // 装载瞬间时长还是 0：此时夹取只会落到 0（等于"双击回片头"）。
+            rejectHaptic()
+            return
+        }
+        val raw = position + if (forward) stepMs else -stepMs
         if (target != raw) rejectHaptic() else haptics.performHaptic(NpHaptic.Tick)
         player.seekTo(target)
         val seconds = (stepMs / 1000L).toInt()
-        gestureHint = if (forward) "快进 $seconds 秒" else "快退 $seconds 秒"
+        showGestureHint(if (forward) "快进 $seconds 秒" else "快退 $seconds 秒")
     }
 
     // M8 半屏水波（§6/§9.6）：双击快进/快退时从**点的那一侧**扩散到半屏。
@@ -1733,6 +1789,8 @@ fun PlayerScreen(
                 haptics.performHaptic(NpHaptic.Long)
             },
             onLongPressEnd = { endSpeedBoost(withHaptic = true) },
+            // 满幅按片长：读当前时长（AVI 回填/切集后立刻生效），不是组合期快照。
+            seekSpanMs = { seekSpanForDurationMs(durationState.value) },
             onSeekStart = ::onSeekGestureStart,
             onSeekDelta = ::onSeekGestureDelta,
             onSeekEnd = ::onSeekGestureEnd,
@@ -2256,7 +2314,7 @@ fun PlayerScreen(
                         )
                     }
                     GestureHintPill(
-                        text = gestureHint,
+                        text = gestureHint?.text,
                         modifier = Modifier.align(Alignment.Center),
                     )
                     // 横滑 seek 气泡（§4.3）：拖动中视频照常播放，这里只呈现"松手会去哪"
@@ -2317,6 +2375,20 @@ fun PlayerScreen(
                                 modifier = Modifier.onGloballyPositioned { episodesAnchor = it.boundsInWindow() },
                             )
                         }
+                    }
+                    if (isImmersive) {
+                        StatusClockBattery(
+                            tint = Color.White,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .windowInsetsPadding(
+                                    WindowInsets.safeDrawing.only(
+                                        WindowInsetsSides.Top + WindowInsetsSides.End,
+                                    ),
+                                )
+                                .padding(top = NpSpace.sm, end = NpSpace.md)
+                                .graphicsLayer { alpha = persistentClockAlpha },
+                        )
                     }
                     PlayerTopBar(
                         // 锁定态里顶/底控制层整体不出——锁定后舞台上只剩解锁钮
@@ -2391,6 +2463,9 @@ fun PlayerScreen(
                         // 横向全屏是"单一全屏形态"，竖屏那条快捷排不在这里——
                         // 入口必须在这一排里给一个，否则横过来就切不到只听模式
                         onToggleAudioOnly = { toggleAudioOnlyWithMemory() },
+                        // 2026-10-23 用户裁定：窄屏全屏也不拆行——进度条与操作键同排，
+                        // 放不下时先省总时长，不再退回两行。
+                        preferSingleRow = true,
                         // 全屏形态恒处于全屏，但**出口不是同一个**（E129 / 审查 #10）：
                         // 手机横窗是退出沉浸、留在播放页；类 PC 横窗走 popBackStack 回浏览。
                         // 两种结果给两枚不同的形状与名称，一个展开折角不再暗示两件事。
@@ -2663,7 +2738,7 @@ fun PlayerScreen(
                                 modifier = Modifier.align(Alignment.TopStart),
                             )
                             GestureHintPill(
-                                text = gestureHint,
+                                text = gestureHint?.text,
                                 modifier = Modifier.align(Alignment.Center),
                             )
                             // 长按 3x 提示胶囊（§4.3：中心胶囊"3x 快进中"，松手恢复原速）
@@ -4508,9 +4583,9 @@ private fun ResumePositionNotice(
  * 形态（2026-10-12 用户裁定两条）：**横跨屏幕的完整横条、单行紧凑**——
  * 不做圆角浮动小窗；进度条与按钮共线一行，比原两行版省近一半高度。
  *
- * 排不下时按 [playerBarLayout] 的三档退让（2026-10-13 用户裁定）：先省掉总时长换回
- * 单行，两档都塞不下才把进度拆成单独一行。此前只有"塞不下就拆两行"一档，
- * 360dp 手机上预算 356dp 对 328dp 的可用宽，竖屏 215dp 高的画面被白白再吃掉一行。
+ * 排不下时按 [playerBarLayout] 的档位退让：先省掉总时长换回单行。
+ * 2026-10-23 用户再裁定：**窄屏全屏也不拆行**，全屏路径一律 `preferSingleRow = true`；
+ * 只有系统字号 > 1.3 或连"省掉总时长的一行"都放不下时才兜底拆行（极端窄窗）。
  */
 
 /** 底部控制条的排版档位，见 [playerBarLayout]。 */

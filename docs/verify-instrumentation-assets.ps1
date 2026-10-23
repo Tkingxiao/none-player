@@ -6,17 +6,17 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 
 $assets = @(
-    @{ Path = "None Player/core/media-android/src/androidTest/assets/np-wmv2.avi"; Sha = "467d7d9254ce14231a8163761f57fdcf885bb7d6d2c5bf72af15e0fe8368c757"; Bytes = 262762 },
-    @{ Path = "None Player/core/media-android/src/androidTest/assets/np-mjpeg.avi"; Sha = "808555559e6ef5ce7daf94eddc2d0ad99139042d64e8e867a57b4ac300d5504a"; Bytes = 968652 },
-    @{ Path = "None Player/core/media-android/src/androidTest/assets/xvid-clip.avi"; Sha = "5afb47beef3733f8a81f477f9d4d1fad7628422199bd9e669898c0061c96332e"; Bytes = 425782 },
-    @{ Path = "None Player/core/media-android/src/androidTest/assets/xvid-qpel.avi"; Sha = "4347561301efdb950ac2f3b53867fab3d21a4c9545e063a56f9657062d93bdfd"; Bytes = 427318 },
-    @{ Path = "None Player/core/media-android/src/androidTest/assets/np-h264.mp4"; Sha = "1bfca7774df0c2949e99ac2b60f3a15659e5d99861672db58931522554528231"; Bytes = 618989 },
-    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/np-wmv2.avi"; Sha = "467d7d9254ce14231a8163761f57fdcf885bb7d6d2c5bf72af15e0fe8368c757"; Bytes = 262762 },
-    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/np-mjpeg.avi"; Sha = "808555559e6ef5ce7daf94eddc2d0ad99139042d64e8e867a57b4ac300d5504a"; Bytes = 968652 },
-    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/xvid-clip.avi"; Sha = "5afb47beef3733f8a81f477f9d4d1fad7628422199bd9e669898c0061c96332e"; Bytes = 425782 },
-    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/xvid-qpel.avi"; Sha = "4347561301efdb950ac2f3b53867fab3d21a4c9545e063a56f9657062d93bdfd"; Bytes = 427318 },
-    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/np-h264.mp4"; Sha = "1bfca7774df0c2949e99ac2b60f3a15659e5d99861672db58931522554528231"; Bytes = 618989 },
-    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/subtitle-queue.mp4"; Sha = "cd6d61959f336da8aaa3da0c94484edf32918b486f314e7c3b802f72c2a26e8d"; Bytes = 449594 }
+    @{ Path = "None Player/core/media-android/src/androidTest/assets/np-wmv2.avi"; Sha = "97bd108fcfad92e007b677b5bf5a2e17a523661f8cfff87f1cf1b8455c8cf9f1"; Bytes = 32458 },
+    @{ Path = "None Player/core/media-android/src/androidTest/assets/np-mjpeg.avi"; Sha = "8612e5d8fc58922d33d8c59c7bfcde01e99685c79f6ca97a0efa7d9a0246df2b"; Bytes = 1228608 },
+    @{ Path = "None Player/core/media-android/src/androidTest/assets/xvid-clip.avi"; Sha = "5462d72253352c486edf61ce1a9ac93e9f7db9fa8955aa9c94889a225d309ede"; Bytes = 195980 },
+    @{ Path = "None Player/core/media-android/src/androidTest/assets/xvid-qpel.avi"; Sha = "12c87b0f70dde722455bc6631740e0827d0f494b96c877d436a90918cb6676b4"; Bytes = 195926 },
+    @{ Path = "None Player/core/media-android/src/androidTest/assets/np-h264.mp4"; Sha = "e2137690a24c68d8ace9e9eec0b9b1ef426e855de248816c6b34f512c5583058"; Bytes = 616217 },
+    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/np-wmv2.avi"; Sha = "97bd108fcfad92e007b677b5bf5a2e17a523661f8cfff87f1cf1b8455c8cf9f1"; Bytes = 32458 },
+    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/np-mjpeg.avi"; Sha = "8612e5d8fc58922d33d8c59c7bfcde01e99685c79f6ca97a0efa7d9a0246df2b"; Bytes = 1228608 },
+    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/xvid-clip.avi"; Sha = "5462d72253352c486edf61ce1a9ac93e9f7db9fa8955aa9c94889a225d309ede"; Bytes = 195980 },
+    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/xvid-qpel.avi"; Sha = "12c87b0f70dde722455bc6631740e0827d0f494b96c877d436a90918cb6676b4"; Bytes = 195926 },
+    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/np-h264.mp4"; Sha = "e2137690a24c68d8ace9e9eec0b9b1ef426e855de248816c6b34f512c5583058"; Bytes = 616217 },
+    @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/subtitle-queue.mp4"; Sha = "bc3f36850de4297207bb4ba478f566c4e154d117ae6683d67569717cd02488c2"; Bytes = 1195854 }
 )
 
 $ok = 0
@@ -47,7 +47,7 @@ if ($bad -gt 0) {
     exit 1
 }
 if ($RequireAll -and $missing -gt 0) {
-    Write-Host "BLOCKED: restore the missing private assets above before running instrumentation tests."
+    Write-Host "BLOCKED: run None Player/tools/gen-androidtest-assets.py, then re-check."
     exit 2
 }
 exit 0

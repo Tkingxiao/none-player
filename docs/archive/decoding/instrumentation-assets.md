@@ -1,5 +1,7 @@
 # 仪器测试素材清单（REV-15）
 
+> 2026-10-23：6 个合成夹具已改为由 `None Player/tools/gen-androidtest-assets.py` 用 ffmpeg 生成，`docs/verify-instrumentation-assets.ps1` 的哈希/字节已同步更新；下文旧哈希与 blocked 状态为历史记录。
+
 > 目的：把 `androidTest` 依赖的媒体素材列成可复核清单，区分 **compiled / executed / blocked**，避免拿 JVM 单测全绿推断字幕/native 集成全绿。
 > 约束：不下载新依赖或素材；小型合成夹具可入库，私有大媒体只留匿名清单；素材不齐时明确标 blocked。
 > 校验脚本：`docs/verify-instrumentation-assets.ps1`（默认把缺失记为 BLOCKED，加 `-RequireAll` 才在缺失时退出非 0）。

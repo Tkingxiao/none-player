@@ -33,6 +33,11 @@ internal class OwnedSurfaceCloner(private val tag: String) {
         val clone = clone(surface)
         source = surface
         owned = clone
+        if (clone != null) {
+            Log.d("NpPerf", "$tag surface clone ok src=${System.identityHashCode(surface)} clone=${System.identityHashCode(clone)}")
+        } else {
+            Log.d("NpPerf", "$tag surface clone fallback src=${System.identityHashCode(surface)}")
+        }
         return clone ?: surface
     }
 

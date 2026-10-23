@@ -2,6 +2,7 @@ package com.noneplayer.plugins.player.ui
 
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.kernel.api.PlaybackState
+import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.PlayerConnection
 import com.noneplayer.kernel.api.VideoPlayer
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -243,6 +244,18 @@ internal class FakeVideoPlayer(
         calls += PlayerCall.PlayPrevious
     }
 
+    override fun setLoopMode(mode: NpLoopMode) {
+        calls += PlayerCall.LoopMode(mode)
+    }
+
+    override fun setScrubbing(active: Boolean) {
+        calls += PlayerCall.Scrubbing(active)
+    }
+
+    override fun setVideoCrop(crop: Boolean) {
+        calls += PlayerCall.VideoCrop(crop)
+    }
+
     override fun clearQueue() {
         calls += PlayerCall.ClearQueue
         _queue.value = emptyList()
@@ -322,6 +335,9 @@ internal sealed interface PlayerCall {
     data object Pause : PlayerCall
     data object PlayNext : PlayerCall
     data object PlayPrevious : PlayerCall
+    data class LoopMode(val mode: NpLoopMode) : PlayerCall
+    data class Scrubbing(val active: Boolean) : PlayerCall
+    data class VideoCrop(val crop: Boolean) : PlayerCall
     data object ClearQueue : PlayerCall
     data object Reconnect : PlayerCall
     data object Release : PlayerCall
@@ -337,6 +353,9 @@ internal fun PlayerCall.describe(): String = when (this) {
     PlayerCall.Pause -> "pause"
     PlayerCall.PlayNext -> "playNext"
     PlayerCall.PlayPrevious -> "playPrevious"
+    is PlayerCall.LoopMode -> "loopMode($mode)"
+    is PlayerCall.Scrubbing -> "scrubbing($active)"
+    is PlayerCall.VideoCrop -> "videoCrop($crop)"
     PlayerCall.ClearQueue -> "clearQueue"
     PlayerCall.Reconnect -> "reconnect"
     PlayerCall.Release -> "release"

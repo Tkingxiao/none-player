@@ -1,6 +1,5 @@
 package com.noneplayer.core.ui
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.FiniteAnimationSpec
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.animateFloatAsState
@@ -226,8 +225,6 @@ fun NpSheet(
             if (dragPx != 0f) settle(0f)
         }
     }
-    BackHandler(enabled = true) { close() }
-
     val progress = animateFloatAsState(
         targetValue = if (visible) 1f else 0f,
         animationSpec = tween(durationMillis = sheetDuration, easing = NpEasing.Sheet),

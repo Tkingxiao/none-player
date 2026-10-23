@@ -345,8 +345,8 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
         }
         fun pickSpeed(value: Float) {
             val next = value.coerceIn(SPEED_FINE_RANGE)
+            // D4/E198：倍速会话内生效、不持久化（见 PlayerScreen.pickSpeed）
             player.setSpeed(next)
-            scope.launch { settings.setPlaybackSpeed(next) }
         }
         val subtitlePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
             session.setPickerOpen(false)

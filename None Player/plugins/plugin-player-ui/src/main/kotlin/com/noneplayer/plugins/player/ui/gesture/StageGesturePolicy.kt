@@ -44,8 +44,12 @@ internal const val STAGE_BOTTOM_DEAD_ZONE_DP = 48f
 /** 起手判定阈值：位移超过它才分派轴。 */
 internal const val STAGE_SLOP_DP = 10f
 
-/** 横滑 seek 满幅基准：整屏宽 = ±90s。 */
+/** 横滑 seek 的满幅默认值：时长未知（或暂未回填）时，整屏宽 = ±90s。 */
 internal const val STAGE_SEEK_FULL_SPAN_MS = 90_000f
+
+/** 横滑满幅的下限/上限（片长超过 30s 后按片长，但夹在这个区间）。 */
+internal const val STAGE_SEEK_MIN_SPAN_MS = 30_000f
+internal const val STAGE_SEEK_MAX_SPAN_MS = 180_000f
 
 /** 拖动族实际执行的轴。 */
 internal enum class StageDragKind { Seek, Brightness, Volume }
@@ -139,9 +143,36 @@ internal fun isSecondTapValid(
  */
 internal fun movementCancelsLongPress(distancePx: Float, slopPx: Float): Boolean = distancePx > slopPx
 
-/** 横滑增量 → seek 增量（满幅 ±90s）。 */
-internal fun seekDeltaMs(deltaX: Float, width: Float): Float =
-    if (width <= 0f) 0f else deltaX / width * STAGE_SEEK_FULL_SPAN_MS
+/**
+ * 横滑满幅随片长：≤30s 的片子整屏宽就是整片（一滑到底），
+ * 更长的片子按片长 1:1 映射但夹在 30–180s；时长未知时退回 90s 默认值。
+ */
+internal fun seekSpanForDurationMs(durationMs: Long): Float = when {
+    durationMs <= 0L -> STAGE_SEEK_FULL_SPAN_MS
+    durationMs <= STAGE_SEEK_MIN_SPAN_MS.toLong() -> durationMs.toFloat()
+    else -> durationMs.toFloat().coerceIn(STAGE_SEEK_MIN_SPAN_MS, STAGE_SEEK_MAX_SPAN_MS)
+}
+
+/** 横滑增量 → seek 增量（满幅由调用方按当前片长给出）。 */
+internal fun seekDeltaMs(
+    deltaX: Float,
+    width: Float,
+    fullSpanMs: Float = STAGE_SEEK_FULL_SPAN_MS,
+): Float = if (width <= 0f) 0f else deltaX / width * fullSpanMs
+
+/**
+ * 双击 seek 的目标；时长未知（<=0）返回 null——装载瞬间双击不能把自己送回片头。
+ */
+internal fun doubleTapSeekTargetMs(
+    positionMs: Long,
+    stepMs: Long,
+    forward: Boolean,
+    durationMs: Long,
+): Long? {
+    if (durationMs <= 0L) return null
+    val raw = positionMs + if (forward) stepMs else -stepMs
+    return raw.coerceIn(0L, durationMs)
+}
 
 /** 竖滑增量 → 百分比增量（满幅 100%；pointer y 向下为正，调用方取负实现"上滑变大"）。 */
 internal fun verticalDeltaPercent(deltaY: Float, height: Float): Float =

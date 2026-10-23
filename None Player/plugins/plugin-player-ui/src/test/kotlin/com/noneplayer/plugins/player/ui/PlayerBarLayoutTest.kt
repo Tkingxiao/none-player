@@ -73,6 +73,28 @@ class PlayerBarLayoutTest {
         )
     }
 
+    @Test fun narrowFullscreenStaysOneRowWithLongTimeCodes() {
+        // 2026-10-23 用户裁定：900x1440 窄屏（约 576dp，扣掉左右内边距 544dp）下，
+        // 全屏底栏也不拆行；7 字时间码仍能塞进完整单行。
+        assertEquals(
+            PlayerBarLayout.SingleRow,
+            playerBarLayout(
+                544f, 1f,
+                preferSingleRow = true, showTransport = true, hasLeading = false,
+                iconButtonCount = 4, timeCodeChars = 7,
+            ),
+        )
+        // 480dp 先省总时长，仍保持一行。
+        assertEquals(
+            PlayerBarLayout.SingleRowWithoutDuration,
+            playerBarLayout(
+                480f, 1f,
+                preferSingleRow = true, showTransport = true, hasLeading = false,
+                iconButtonCount = 4, timeCodeChars = 7,
+            ),
+        )
+    }
+
     @Test fun splitsOnlyWhenEvenTheLeanRowDoesNotFit() {
         // 连"一枚时间码 + 最短进度条 + 三枚图标"都塞不下，才回落到两行
         assertEquals(

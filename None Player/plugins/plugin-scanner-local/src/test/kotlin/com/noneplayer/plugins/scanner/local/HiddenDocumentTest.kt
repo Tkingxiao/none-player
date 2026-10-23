@@ -1,6 +1,7 @@
 package com.noneplayer.plugins.scanner.local
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -39,5 +40,29 @@ class HiddenDocumentTest {
             hiddenDocumentId("primary:Movies/.nphidden/a.mp4"),
             hiddenDocumentId("primary:Movies/.nphidden/b.mp4"),
         )
+    }
+
+    @Test
+    fun `显式选择的隐藏根判定 tree 路径含隐藏分段`() {
+        assertFalse(treeRootEntersHiddenPath("primary:Movies"))
+        assertTrue(treeRootEntersHiddenPath("primary:Movies/.nphidden"))
+        assertTrue(treeRootEntersHiddenPath("primary:Movies/.nphidden/series"))
+        assertTrue(treeRootEntersHiddenPath("primary:.secret"))
+        assertFalse(treeRootEntersHiddenPath("1234-5678:Movies/Anime"))
+        assertFalse(treeRootEntersHiddenPath("primary:"))
+    }
+
+    @Test
+    fun `仅显式选中的隐藏分支才下钻隐藏子目录`() {
+        val deny = setOf(".thumbnails", ".cache")
+        // 非隐藏目录照常下钻
+        assertTrue(shouldDescendDirectory("Series", false, deny))
+        // 普通授权根下的隐藏目录：不进（数据保护 E198）
+        assertFalse(shouldDescendDirectory(".nphidden", false, deny))
+        // 显式选中的隐藏根下：可继续进
+        assertTrue(shouldDescendDirectory(".nphidden", true, deny))
+        // 黑名单优先，即便在显式隐藏根下也不进
+        assertFalse(shouldDescendDirectory(".thumbnails", true, deny))
+        assertFalse(shouldDescendDirectory(".cache", false, deny))
     }
 }

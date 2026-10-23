@@ -73,6 +73,9 @@ import kotlin.coroutines.resumeWithException
  * 播放器实例驻留服务进程侧：UI 销毁不影响播放（后台播放 + 媒体通知）。
  * [awaitReady] 阻塞到会话建立；字幕/倍速/进度记忆都作用于会话侧播放器。
  */
+internal fun shouldEnableTextTracks(type: NpTrackType, enabled: Boolean): Boolean =
+    type == NpTrackType.TEXT && !enabled
+
 class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     private val appContext = context.applicationContext
@@ -875,6 +878,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         currentArtworkUri = artworkUri
         // 单媒体 prepare 没有媒体 id，也就没有身份键（appliedMediaKey = null）
         loadingTargetKey = null
+        // 新的单媒体意图不继承上一条媒体的挂起 seek
+        pendingSeek = null
         // A18：新的播放意图到来，上一条媒体的回退状态/闸门一律复位
         decoderFallbackGate.onMediaChanged()
         decoderFallbackState.clear()
@@ -1368,6 +1373,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         prefetchJob?.cancel()
         prepareGeneration++
         terminalFailure = false
+        // 会话级状态不跟着媒体残留：循环/擦洗/裁剪一并复位
+        setLoopMode(NpLoopMode.OFF)
+        setScrubbing(false)
+        setVideoCrop(false)
         val c = activeController
         runCatching { c?.stop() }
         runCatching { c?.clearMediaItems() }
@@ -1784,6 +1793,10 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val c = activeController ?: return
         // 用户手选轨道即作废"待选中外挂轨"：之后轨道回调不再把选择抢回外挂轨
         pendingExternalSubtitleSelect = false
+        // 文本轨整体被关掉时，单加 override 不会让它出字；先恢复类型开关。
+        if (shouldEnableTextTracks(type, textTracksEnabled)) setTextTracksEnabled(true)
+        // 轨道表可能在上一次 publish 之后已经换过：用当前 Tracks 重建，避免旧 group/index。
+        publishTracks(c.currentTracks)
         val (group, index) = trackGroupById[id] ?: return
         val trackType = when (type) {
             NpTrackType.AUDIO -> C.TRACK_TYPE_AUDIO
@@ -1992,7 +2005,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         reconnectJob?.cancel()
         reconnectJob = null
         // 注意：会话侧播放器由 PlaybackService 持有，后台播放继续；
-        // 这里只解除 UI 与会话的连接
+        // 这里只解除 UI 与会话的连接。先摘掉会话侧的视频表面，避免旧 Surface 留在
+        // 服务播放器上，下一次挂载时画面还连着上一页。
+        runCatching { activeController?.clearVideoSurface() }
         controller?.release()
         controller = null
         // REV-04：本实例已不再观察任何媒体，身份作废；仍挂在 awaitReady 上的
