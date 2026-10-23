@@ -201,6 +201,13 @@ internal class CoverPump(
                     queue.addFirst(id)
                     queuedIds.add(id)
                     added++
+                } else if (queuedIds.remove(id)) {
+                    // E205④：已在队列里（通常是 publish 按列表序登记的）→ 摘出重排队首。
+                    // 「可见窗口最高优先级」对已入队条目同样成立；knownIds 保留（幂等依据
+                    // 是"本轮见过"，与"还在不在队列"是两回事）。
+                    queue.remove(id)
+                    queue.addFirst(id)
+                    added++
                 }
             }
         }
@@ -222,6 +229,9 @@ internal class CoverPump(
             queuedIds.clear()
             knownIds.clear()
             pendingCovers.clear()
+            // E205⑨：latest 只增不删会随「历史见过的 id 总数」单调涨（条目淘汰后永久残留）。
+            // 清掉最安全：resolveItem 回查 _media 是内存操作，下一轮 publish 全量重建。
+            latest.clear()
             job = pumpJob
             pumpJob = null
         }
@@ -311,9 +321,13 @@ internal class CoverPump(
         val runStartedAt = nowMs()
         lastActivityMs = runStartedAt
         lastProgressAtMs = runStartedAt
-        // 扫描中只给一半许可（别抢遍历的 IPC）；扫描已收尾就直接满速
+        // E205⑧：扫描期起点给上限的一半，给 tuner 留出真实的爬坡空间（[scanPermits] →
+        // 上限之间找 knee）——旧写法起点==上限，growOrLock 的 `permits >= cap` 恒真，
+        // 调参完全空转、summary 打出的许可数口径失真。非扫描期没有竞争车道，直接
+        // 满速起步（调参无意义，扫描收尾另有 raiseToFull 一次性放开）。
         val scanning = isScanning()
-        val startPermits = if (scanning) scanningPermits() else workers
+        val cap = if (scanning) scanningPermits() else workers
+        val startPermits = if (scanning) (cap / 2).coerceAtLeast(2) else workers
         val limiter = ScanLimiter(workers, startPermits)
         limiterNow = limiter
         // 收回许可必须异步：onPermitsChanged 在监视协程里被调用，同步 acquire 会把 tick 卡住
@@ -321,7 +335,7 @@ internal class CoverPump(
         val tuner = ScanLaneTuner(
             kind = LaneKind.COVER,
             initialPermits = startPermits,
-            cap = if (scanning) scanningPermits() else workers,
+            cap = cap,
             cores = cores,
             onPermitsChanged = { delta ->
                 if (delta > 0) {
@@ -367,7 +381,10 @@ internal class CoverPump(
                     }
                 } finally {
                     monitor.cancel()
-                    shrinkJobs.forEach { it.cancel() }
+                    // E205⑬：synchronizedList 的迭代必须持有它自己的监视锁——monitor.cancel()
+                    // 返回时它的协程可能正在 onPermitsChanged 尾段里 add，裸 forEach 有 CME 窗口
+                    val snapshot = synchronized(shrinkJobs) { shrinkJobs.toList() }
+                    snapshot.forEach { it.cancel() }
                 }
             }
             flushCovers()

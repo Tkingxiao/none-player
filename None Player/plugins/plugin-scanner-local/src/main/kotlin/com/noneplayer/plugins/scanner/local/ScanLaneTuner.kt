@@ -376,6 +376,10 @@ internal object ScanLanePresets {
 
     /** 按字节上限读取，读不到的按损坏处理（与 ScanSnapshotStore 同一姿势）。 */
     private fun readPayload(file: File): String {
+        // E205⑩：先按 length 预检再读入（TOCTOU 由第二次检查兜底）——
+        // 被外部写坏成超大文件时不再先做一次全量分配
+        val len = file.length()
+        require(len in 1..MAX_PAYLOAD_BYTES) { "车道预设文件过大：$len" }
         val bytes = file.readBytes()
         require(bytes.size <= MAX_PAYLOAD_BYTES) { "车道预设文件过大：" + bytes.size }
         return String(bytes, Charsets.UTF_8)

@@ -7,8 +7,9 @@ import androidx.compose.runtime.snapshotFlow
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.kernel.api.MediaSourceProvider
 import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.sample
 
 /**
  * E203-C（契约 §8.5）：库页「按需封面」的窗口计算与分发。
@@ -58,8 +59,20 @@ const val COVER_PRELOAD_SCREENS = 1
 /** 急速滚动时，滚动方向那一侧加到 2 屏（契约 §8.5）。 */
 const val COVER_FAST_SCROLL_SCREENS = 2
 
-/** 窗口去抖：滚动中的每帧布局都算一次窗口没有意义，150ms 内只认最后一次（契约 §8.5）。 */
-const val COVER_DEMAND_DEBOUNCE_MS = 150L
+/**
+ * 窗口需求节流周期：滚动中的每帧布局都算一次窗口没有意义，按固定周期采样**最新值**
+ * （E205⑤：debounce 的「静默 150ms」在急滚期会被连续发射无限重置，整段 fling 一次
+ * 需求都发不出去，2 屏扩窗随之失效；sample 每 150ms 放行最新窗口，滚动中持续预热）。
+ */
+const val COVER_DEMAND_SAMPLE_MS = 150L
+
+/**
+ * 需求节流：固定周期放行最新值。提取成扩展函数是为了把「debounce→sample」的语义
+ * 决策钉在单测里（管线在 @Composable 内无法直接测）。
+ */
+@OptIn(FlowPreview::class)
+internal fun <T> Flow<T>.coverDemandThrottle(periodMs: Long = COVER_DEMAND_SAMPLE_MS): Flow<T> =
+    sample(periodMs)
 
 /**
  * 一次封面预热窗口——条目列表里的**闭区间**序号。
@@ -245,7 +258,7 @@ private fun CoverDemandPipeline(
         var previousFirstSlot = -1
         var lastSignature: List<String> = emptyList()
         snapshotFlow { sample() }
-            .debounce(COVER_DEMAND_DEBOUNCE_MS)
+            .coverDemandThrottle()
             .distinctUntilChanged()
             .collect { current ->
                 val direction = coverScrollDirection(

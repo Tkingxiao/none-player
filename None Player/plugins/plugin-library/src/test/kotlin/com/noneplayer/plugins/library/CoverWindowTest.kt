@@ -1,6 +1,13 @@
 package com.noneplayer.plugins.library
 
 import com.noneplayer.core.media.MediaItem
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.asFlow
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -177,4 +184,27 @@ class CoverWindowTest {
         const val LOCAL = "local-media"
         const val REMOTE = "remote"
     }
+
+    // ---- E205⑤：需求节流的采样语义（管线在 @Composable 内测不了，钉在这里）----
+
+    @Test
+    fun `急滚期间节流持续放行最新窗口而不是等静默`() = runTest {
+        val emitted = mutableListOf<Int>()
+        val job = launch {
+            (0 until 30).asFlow()
+                // 20ms 一发、连发 600ms——急滚形态：debounce 的"静默 150ms"会被
+                // 连续发射无限重置，整段期间 0 放行；sample 每 150ms 放行最新值
+                .onEach { delay(20) }
+                .coverDemandThrottle()
+                .collect { emitted += it }
+        }
+        advanceTimeBy(300)
+        assertTrue("急滚期间必须持续放行（debounce 语义下这里为空）", emitted.isNotEmpty())
+        advanceUntilIdle()
+        job.cancel()
+        // 尾部窗口必须到达：150ms tick 与上游最后一发（t=600）同帧时，完成发射可能
+        // 带的是倒数第二个值（29 或 28 都算"最新窗口"），钉下界即可
+        assertTrue("尾部窗口必须到达（实际 ${emitted.last()}）", emitted.last() >= 28)
+    }
 }
+

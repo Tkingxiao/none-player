@@ -86,19 +86,23 @@ internal class ScanCoverNegativeCache(
      * 记录一次抽帧失败。
      *
      * 幂等：同一指纹已有**未过期**结论时不再改写（结论与时间无关，重复刷新时间戳只会让坏文件
-     * 更久被重试，没有收益），返回 false。
+     * 更久被重试，没有收益），返回 false。落盘在**锁外**做（E205⑦）：markFailed 的锁被泵的
+     * 全部 worker 与 needsCover 查表共用，持锁写盘会把抽帧线程串到磁盘 IO 上。
      *
      * @return true = 新增了一条否定结论（[dirty] 已置位，会随 [save]/[flush] 落盘）
      */
-    fun markFailed(key: String, nowMs: Long): Boolean = synchronized(lock) {
-        ensureLoaded()
-        val failedAt = entries[key]
-        if (failedAt != null && !isExpired(failedAt, nowMs)) return false
-        entries[key] = nowMs
-        evictIfNeeded()
-        dirty = true
-        save()
-        true
+    fun markFailed(key: String, nowMs: Long): Boolean {
+        val added = synchronized(lock) {
+            ensureLoaded()
+            val failedAt = entries[key]
+            if (failedAt != null && !isExpired(failedAt, nowMs)) return false
+            entries[key] = nowMs
+            evictIfNeeded()
+            dirty = true
+            true
+        }
+        if (added) save()
+        return true
     }
 
     /**
@@ -107,22 +111,54 @@ internal class ScanCoverNegativeCache(
      *
      * @return true = 本次真的写了文件
      */
-    fun save(): Boolean = synchronized(lock) {
-        if (!dirty) return false
-        val now = nowMs()
-        val last = lastWriteAtMs
-        if (last != null && now - last < minSaveIntervalMs) return false
-        writeBlocking(now)
-    }
+    fun save(): Boolean = saveInternal(force = false)
 
     /**
      * 强制落盘：忽略节流。扫描收尾/静默时调用一次，保证下次冷启能直接命中。
      *
      * @return true = 本次真的写了文件
      */
-    fun flush(): Boolean = synchronized(lock) {
-        if (!dirty) return false
-        writeBlocking(nowMs())
+    fun flush(): Boolean = saveInternal(force = true)
+
+    /**
+     * E205⑦ 的落盘结构：锁内只做「该不该写 + 配额淘汰 + 序列化 + 节流预约」（纯内存），
+     * 真正的 tmp 写文件与原子替换在**锁外**。节流时间在**预约时**推进而不是写成功后——
+     * 磁盘满/目录只读时不会退化成「每条失败都试一次全量写」的写放大；写失败由 dirty
+     * 复位兜着，下个节流窗口或 flush() 会再试。
+     */
+    private fun saveInternal(force: Boolean): Boolean {
+        val claim = synchronized(lock) {
+            ensureLoaded()
+            if (!dirty) return false
+            val now = nowMs()
+            val last = lastWriteAtMs
+            if (!force && last != null && now - last < minSaveIntervalMs) return false
+            lastWriteAtMs = now
+            dirty = false
+            serializeWithinQuota() to entries.size
+        }
+        val (json, count) = claim
+        val ok = writeClaimed(json, count)
+        if (!ok) synchronized(lock) { dirty = true }
+        return ok
+    }
+
+    /** 锁外执行的实际写盘：tmp + 原子替换；失败保留旧文件并置回 dirty。 */
+    private fun writeClaimed(json: String, count: Int): Boolean {
+        val tmp = File(file.path + TMP_SUFFIX)
+        return try {
+            val dir = file.parentFile
+            if (dir != null && !dir.isDirectory && !dir.mkdirs()) return false
+            tmp.writeText(json, Charsets.UTF_8)
+            replaceAtomically(tmp)
+            log("cover negative saved entries=" + count)
+            true
+        } catch (t: Throwable) {
+            // 写失败保留旧文件（绝不先删），内存结论仍然有效，下次再写。
+            Log.w(TAG, "封面否定缓存落盘失败", t)
+            tmp.delete()
+            false
+        }
     }
 
     /** 清空结论并删除落盘文件（用户「清除缓存」/重置索引时调用）。 */
@@ -153,6 +189,12 @@ internal class ScanCoverNegativeCache(
             return
         }
         try {
+            // E205⑩：先按 length 预检再读入——被外部写坏成超大文件时不再先做一次全量分配
+            val len = file.length()
+            if (len > MAX_PAYLOAD_BYTES) {
+                log("cover negative loaded entries=0 oversized=" + len)
+                return
+            }
             val bytes = file.readBytes()
             if (bytes.size > MAX_PAYLOAD_BYTES) {
                 // 超限文件可能是坏数据，也可能是别的版本写的：都当空表，别拿它当真相。
@@ -191,27 +233,6 @@ internal class ScanCoverNegativeCache(
     }
 
     // ---------------- 落盘 ----------------
-
-    /** 调用方必须已持有 [lock]。 */
-    private fun writeBlocking(now: Long): Boolean {
-        val tmp = File(file.path + TMP_SUFFIX)
-        return try {
-            val json = serializeWithinQuota()
-            val dir = file.parentFile
-            if (dir != null && !dir.isDirectory && !dir.mkdirs()) return false
-            tmp.writeText(json, Charsets.UTF_8)
-            replaceAtomically(tmp)
-            lastWriteAtMs = now
-            dirty = false
-            log("cover negative saved entries=" + entries.size)
-            true
-        } catch (t: Throwable) {
-            // 写失败保留旧文件（绝不先删），内存结论仍然有效，下次再写。
-            Log.w(TAG, "封面否定缓存落盘失败", t)
-            tmp.delete()
-            false
-        }
-    }
 
     /**
      * 序列化，并保证**落盘永远不超过** [MAX_PAYLOAD_BYTES]：超限就从最旧的条目开始丢。

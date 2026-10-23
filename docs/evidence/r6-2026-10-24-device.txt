@@ -16,3 +16,8 @@
          1792786666.575 16743 16964 D Wmv2Avi : wmv2 samples=40840 base=0 streams=2 idx1=false
          1792786666.577 16743 16964 D Wmv2Avi : emit 640x480 extra=4 durationUs=600000000
 == 播放状态采样（P1 播放/P2 双击 seek/P3 热切小夹具/P4 热切回大夹具）==
+
+== R6-C 真机冒烟（60dd2f94，静音，同日）==
+冷启扫描：scan enter → phase=MEDIA_STORE storeItems=84 → index loaded entries=68 → scan done elapsed=264ms items=84（ScanTrace logcat 通路正常，落盘改后台线程后无异常）
+播放冒烟：np-wmv2 PLAYING position=6129，0 FATAL / 0 Playback error
+门禁：test 137 套件 / 984 项 / 0 失败；lint 0 issue；release 19,736,597 B

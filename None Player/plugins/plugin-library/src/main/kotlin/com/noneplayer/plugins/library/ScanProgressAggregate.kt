@@ -17,9 +17,14 @@ import com.noneplayer.kernel.api.ScanProgress
 internal fun aggregateScanProgress(values: List<ScanProgress>): ScanProgress {
     val active = values.filter { it.active }
     if (active.isEmpty()) return ScanProgress()
+    // E205⑬（混口径）：HIDDEN_WALK（total=0）的 processed 是**已发现条目数**，与
+    // 「已处理 x / y」不同量纲——混进求和会出现「已处理 650 / 500」。有可度量来源
+    //（total>0）时只汇总它们；全部不可度量时退回全量和（此时数字按「已发现」口径展示）。
+    val measurable = active.filter { it.total > 0 }
+    val processed = if (measurable.isEmpty()) active.sumOf { it.processed } else measurable.sumOf { it.processed }
     return ScanProgress(
         active = true,
-        processed = active.sumOf { it.processed },
+        processed = processed,
         total = active.sumOf { it.total },
         phase = active.firstNotNullOfOrNull { it.phase },
     )

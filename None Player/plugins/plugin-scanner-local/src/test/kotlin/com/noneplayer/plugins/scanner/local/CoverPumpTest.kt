@@ -52,9 +52,11 @@ class CoverPumpTest {
         fx.pump.publish(fx.items)
 
         assertTrue("泵必须在 publish 后立刻开工", entered.await(5, TimeUnit.SECONDS))
-        // (workers=8) → 扫描期许可总数 = max(2, 8/2) = 4；currentPermits() 报的是**可用**令牌，
-        // 此刻有 1 项正持有许可（阻塞在 produce 里），所以可用 3 而不是 4。
-        assertEquals("扫描中许可必须压到一半，别跟遍历抢 IPC", 3, fx.pump.currentPermits())
+        // (workers=8) → 扫描期上限 = max(2, 8/2) = 4；E205⑧ 起点给上限一半 = 2（给 tuner
+        // 留真实爬坡空间，旧写法起点==上限、调参空转）。currentPermits() 报的是**可用**
+        // 令牌，此刻 1 项正持有许可（阻塞在 produce 里），所以可用 1 而不是 2。
+        // tuner 首个 tick 在 ~7×40ms 后，本断言远早于它，不存在爬坡竞态。
+        assertEquals("扫描中起点必须是扫描期上限的一半", 1, fx.pump.currentPermits())
 
         // 扫描收尾：监视协程在下一个窗口把它抬到满速
         fx.scanning.set(false)
@@ -106,6 +108,42 @@ class CoverPumpTest {
             fx.produced,
         )
         assertEquals("三个 id 各回流一次", 3, fx.pump.appliedCount())
+    }
+
+    @Test
+    fun `request重排已在队列里的条目到队首（E205④）`() = runBlocking {
+        val gate = CountDownLatch(1)
+        val firstEntered = CountDownLatch(1)
+        val fx = Fixture(
+            workers = 1,
+            scanning = false,
+            produce = { item ->
+                if (item.id == "ms-a") {
+                    firstEntered.countDown()
+                    gate.await(5, TimeUnit.SECONDS)
+                }
+                "/cache/${item.id}.jpg"
+            },
+        )
+        val a = videoItem("ms-a")
+        val b = videoItem("ms-b")
+        val c = videoItem("ms-c")
+        fx.items = listOf(a, b, c)
+        fx.pump.publish(listOf(a, b, c))
+        assertTrue(firstEntered.await(5, TimeUnit.SECONDS))
+
+        // c 已被 publish 按列表序登记（排在 b 后面）：request(c) 必须把它摘出重排队首——
+        // 旧实现只对「本轮从未登记」的 id 生效，扫描发布过的条目插队全部空操作
+        fx.pump.request(listOf("ms-c"))
+        assertEquals("重排不改变队列长度", 2, fx.pump.pendingCount())
+
+        gate.countDown()
+        fx.pump.awaitIdle(5_000L)
+        assertEquals(
+            "已入队条目也要重排到队首：a 之后先 c 再 b",
+            listOf("ms-a", "ms-c", "ms-b"),
+            fx.produced,
+        )
     }
 
     @Test
