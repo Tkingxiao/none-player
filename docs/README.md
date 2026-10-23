@@ -24,6 +24,8 @@
 ## 证据口径
 
 - 源码实现、单测通过、设备验收分开记；缺哪一层就写明缺哪一层。
+- 起播注入：`noneplayer://player?uri=…&title=…&mime=…&id=…&fs=1`。**uri 优先用 `content://media/external/video/media/<_id>` 而不是 `file://`**——长中文路径带括号时 file URI 编码极易出错，`content://` 直接可播（`_id` 用 `content query --uri content://media/external/video/media --projection _id:_display_name --where "_display_name LIKE '%xxx%'"` 取）。
+- 合成素材：本机无独立 ffmpeg，但 `python -c "import imageio_ffmpeg;print(imageio_ffmpeg.get_ffmpeg_exe())"` 能取出随包 ffmpeg 7.1，可直接合成 HEVC Main10 / AVC High10 / VP9 Profile2 / AV1 10bit / MPEG-1 等夹具补「素材欠账」（`-pix_fmt yuv420p10le`，AV1 也用 10le 不是 10p）。
 - 设备基线：骁龙平板 `60dd2f94`（Android 14 / SDK 34，显示 1800×2880 / 400dpi / 144Hz）。**天玑机按裁定不再补测**（2026-10-23），欠账口径里不再把「缺天玑」计为缺口。
 - 动效采样仪器：`screenrecord --bit-rate 24000000` 出片平均 **41.5fps**，配 `imageio-ffmpeg` 自带的 ffmpeg 抽帧，足够穿过 560ms 级动画；`screencap` 连拍实测 1586ms/帧，采不到短动画。`settings put global animator_duration_scale` **对本应用动效无效**（`npDuration()` 只走 `npQuality().scaled()`，只缩不放）。
 - HyperOS 转屏注入：`settings put system user_rotation` **间歇不生效**，实测需先把 `accelerometer_rotation` 写 1 再写 0 重新断言锁；且 `screenrecord` 占着 shell 时多次失败。
