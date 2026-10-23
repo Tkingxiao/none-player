@@ -12,7 +12,7 @@ class LegacyCodec(
     extradata: ByteArray?,
     width: Int,
     height: Int,
-) : AutoCloseable {
+) : VideoCodec {
 
     private var yBuffer: ByteBuffer? = null
     private var uBuffer: ByteBuffer? = null
@@ -39,13 +39,10 @@ class LegacyCodec(
 
     private var sendScratch: ByteBuffer? = null
 
-    /**
-     * direct ByteBuffer 送入（A1 批）：渲染器侧的 DecoderInputBuffer
-     * （BUFFER_REPLACEMENT_MODE_DIRECT）直接过 JNI，不再每帧 `ByteArray(remaining())`
-     * 拷一份。堆 buffer 走 direct scratch 复制兜底（nativeSendDirect 只认 direct）。
-     */
-    fun send(data: ByteBuffer?, ptsUs: Long, eos: Boolean) {
+    override fun send(data: ByteBuffer?, ptsUs: Long, eos: Boolean) {
         check(handle != 0L) { "decoder released" }
+        // E204：size=0 的非 EOS 包是无效输入（avcodec_send_packet 直接 EINVAL）——
+        // 跳过发送按成功处理（队列里没有可解的内容，drain 交给后续调用）。
         if (eos || data == null || data.remaining() <= 0) {
             val rc = LegacyNative.nativeSendDirect(handle, null, 0, ptsUs, eos)
             if (rc < 0) throw LegacyDecoderException("送入 $rc")
@@ -67,10 +64,10 @@ class LegacyCodec(
     }
 
     /** 解码器已把 EOS 前的所有帧交出来（队列也因此排空）。 */
-    val isEof: Boolean
+    override val isEof: Boolean
         get() = handle != 0L && LegacyNative.nativeEof(handle)
 
-    fun receive(): LegacyFrame? {
+    override fun receive(): LegacyFrame? {
         if (handle == 0L || LegacyNative.nativePending(handle) <= 0) return null
         val info = IntArray(6)
         val pts = LongArray(1)
@@ -96,7 +93,7 @@ class LegacyCodec(
         return LegacyFrame(width, height, y, u, v, yStride, uvStride, colorspace, matrix, pts[0])
     }
 
-    fun render(
+    override fun render(
         y: ByteBuffer,
         yStride: Int,
         u: ByteBuffer,
@@ -120,7 +117,7 @@ class LegacyCodec(
             ByteBuffer.allocateDirect(size)
         }
 
-    fun flush() {
+    override fun flush() {
         if (handle != 0L) LegacyNative.nativeFlush(handle)
     }
 

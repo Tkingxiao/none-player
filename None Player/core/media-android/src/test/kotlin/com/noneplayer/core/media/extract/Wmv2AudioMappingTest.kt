@@ -2,6 +2,7 @@ package com.noneplayer.core.media.extract
 
 import androidx.media3.common.C
 import androidx.media3.common.MimeTypes
+import com.noneplayer.core.media.MediaNames
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -23,9 +24,11 @@ class Wmv2AudioMappingTest {
 
     @Test
     fun `wma family keeps a track with wma mime`() {
-        listOf(0x0160, 0x0161, 0x0162, 0x0163).forEach { tag ->
-            assertEquals("audio/x-ms-wma", wmvAudioMimeForTag(tag))
+        listOf(0x0160, 0x0161).forEach { tag ->
+            assertEquals(MediaNames.MIME_WMA, wmvAudioMimeForTag(tag))
         }
+        assertEquals(MediaNames.MIME_WMAPRO, wmvAudioMimeForTag(0x0162))
+        assertEquals(MediaNames.MIME_WMALOSSLESS, wmvAudioMimeForTag(0x0163))
     }
 
     @Test

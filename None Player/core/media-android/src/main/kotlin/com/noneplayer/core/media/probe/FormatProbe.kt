@@ -28,6 +28,7 @@ import com.noneplayer.core.media.ProbeMemo
 import com.noneplayer.core.media.PlaybackFailure
 import com.noneplayer.core.media.extract.NpExtractorsFactory
 import com.noneplayer.core.media.legacy.LegacyDecoderLibrary
+import com.noneplayer.core.media.ffmpeg.NpFfmpegCodecs
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary
 import java.io.ByteArrayOutputStream
 import java.nio.channels.FileChannel
@@ -740,7 +741,9 @@ object FormatProbe {
                 if (expectVideo == false && audio != null) {
                     // A17：平台查询三态——查询异常不能当「支持」，也不能当「不支持」
                     val audioQuery = platformAudioDecoderQuery(audio)
-                    val audioDecodable = audioQuery == true || ffmpegSupports(audio.sampleMimeType)
+                    val audioDecodable = audioQuery == true ||
+                        ffmpegSupports(audio.sampleMimeType) ||
+                        npFfmpegAudioSupports(audio.sampleMimeType)
                     if (audioDecodable) {
                         return ProbeOutcome(
                             Result.Playable(
@@ -784,14 +787,21 @@ object FormatProbe {
             val ffmpegVideo = ffmpegSupports(video.sampleMimeType)
             val bitmapVideo = bitmapRendererSupports(video.sampleMimeType)
             val legacyVideo = legacySupports(video.sampleMimeType)
+            val npFfmpegVideo = npFfmpegVideoSupports(video.sampleMimeType)
             // A11：有视频轨时也要查音频解码器。H.264 + WMA/DTS/TrueHD 这类组合
             // 以前一律判 Playable，起播后无声或音频渲染器报错，用户拿不到原因。
             // A17：只有平台**明确**说没有时才敢声明 audioUnsupported（查询异常不冒充）。
             val audioQuery = audio?.let { platformAudioDecoderQuery(it) }
             val audioUnsupported = audio != null &&
                 audioQuery == false &&
-                !ffmpegSupports(audio.sampleMimeType)
-            if (!platformVideo && !ffmpegVideo && !bitmapVideo && !legacyVideo) {
+                !ffmpegSupports(audio.sampleMimeType) &&
+                !npFfmpegAudioSupports(audio.sampleMimeType)
+            android.util.Log.d(
+                "FormatProbe",
+                "decide platform=$platformVideo ffmpeg=$ffmpegVideo bitmap=$bitmapVideo " +
+                    "legacy=$legacyVideo npff=$npFfmpegVideo",
+            )
+            if (!platformVideo && !ffmpegVideo && !bitmapVideo && !legacyVideo && !npFfmpegVideo) {
                 // A17：平台查询异常时「没有解码器」可能只是没查到，不能冒充确定不支持
                 return if (platformVideoQuery == null) {
                     ProbeOutcome.transient(Result.Unknown)
@@ -930,6 +940,17 @@ object FormatProbe {
      */
     private fun legacySupports(mime: String?): Boolean =
         runCatching { LegacyDecoderLibrary.supports(mime) }.getOrDefault(false)
+
+    /**
+     * E204 白名单批：libnpffmpeg（NextLib 共享 libavcodec 后端）能否解这个 mime。
+     * 与播放链同源——NpFfmpegVideoRenderer/NpFfmpegAudioRenderer 认领的就是这张表，
+     * 探测与播放不会分叉。加载失败时表查询返回 null（fail-closed，不冒充可解）。
+     */
+    private fun npFfmpegVideoSupports(mime: String?): Boolean =
+        mime != null && NpFfmpegCodecs.videoCodecName(mime) != null
+
+    private fun npFfmpegAudioSupports(mime: String?): Boolean =
+        mime != null && NpFfmpegCodecs.audioCodecName(mime, emptyList()) != null
 }
 
 // ---------------------------------------------------------------------------

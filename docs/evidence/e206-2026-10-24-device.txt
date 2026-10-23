@@ -1,0 +1,11 @@
+10-24 06:35:19.691 32599 32646 D FormatProbe: matched=dm4 ch=seekable expectedMime=video/avi expectVideo=true reads=8 formats=2 mimes=[video/x-np-wmv2, audio/raw]
+10-24 06:35:19.694 32599 32646 D FormatProbe: decide platform=false ffmpeg=false bitmap=false legacy=true npff=false
+10-24 06:35:19.919 32599 32703 D NpPerf  : NpFfmpegRenderer surface clone ok src=102981859 clone=120036064
+10-24 06:35:19.929 32599 32703 D NpPerf  : LegacyVideoRenderer surface clone ok src=102981859 clone=105734553
+
+== E206 白名单批真机读数（60dd2f94，全程静音）==
+- 夹具 wl-wmv1-wmav2.avi（WMV1+wmav2，10s）：probe mimes=[video/x-ms-wmv1, audio/x-ms-wma] → decide npff=true → PLAYING(3) position 推进（视频 npff-wmv1 + 音频 NpFfmpegAudio/wmav2）
+- 夹具 wl-msmpeg4v3-mp3.avi（MP43+mp3，10s）：mimes=[video/mp43, audio/mpeg] → decide npff=true → PLAYING(3)（视频 npff-msmpeg4 + 音频 NextLib mp3）
+- 夹具 wl-wmv2-regression.avi（WMV2+PCM）：decide legacy 路径不变 → PLAYING(3)（LegacyVideoRenderer 回归通过）
+- 全程 0 FATAL；门禁 test 138 套件/989 项/0 失败、lint 0 issue、release 28,141,739 B（+8.4MB ≈ +4.2MB/ABI，符合任务文档 +4–5MB/ABI 估计）
+- 夹具生成脚本 tools/gen-whitelist-fixtures.py（imageio-ffmpeg 7.1，testsrc2+sine 确定性语料）

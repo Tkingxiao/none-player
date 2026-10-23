@@ -1,0 +1,23 @@
+{
+  global:
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioCreate;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioDecode;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioDrain;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioGetChannelCount;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioGetSampleRate;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioReset;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioRelease;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffHasDecoder;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeCreate;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeSend;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeSendDirect;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativePending;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeEof;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativePeek;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeCopy;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeRender;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeFlush;
+    Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeRelease;
+  local:
+    *;
+};

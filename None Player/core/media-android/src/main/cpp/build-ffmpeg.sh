@@ -79,7 +79,6 @@ build_one() {
       --disable-avdevice \
       --disable-avformat \
       --disable-avfilter \
-      --disable-swresample \
       --disable-swscale \
       --disable-postproc \
       --disable-network \
@@ -91,7 +90,8 @@ build_one() {
       --disable-iconv \
       --disable-lzma \
       --enable-small \
-      --enable-decoder=wmv2,mpeg4 \
+      --enable-decoder=wmv2,mpeg4,wmv1,wmv3,vc1,rv10,rv20,rv30,rv40,msmpeg4v1,msmpeg4v2,msmpeg4v3,vp5,vp6,vp6a,vp6f,prores,ffv1,huffyuv,ffvhuff,cfhd,dirac,theora,svq1,svq3,indeo2,indeo3,indeo4,indeo5,fraps,flv1,mjpeg,wmav1,wmav2,wmapro,wmalossless,wavpack,tta,als,cook,atrac1,atrac3,atrac3al,atrac3pal,sipr \
+      --enable-parser=mpeg4video,mpegvideo,vc1,vorbis \
       --enable-parser=mpeg4video,mpegvideo \
       --extra-cflags="-Os -fvisibility=hidden -ffunction-sections -fdata-sections -fPIC -DANDROID" \
       --extra-ldflags="-Wl,-z,max-page-size=16384 -Wl,--gc-sections"
@@ -109,9 +109,18 @@ build_one() {
   ls -lh "${dest}/lib/"*.a
 }
 
-build_one arm64-v8a   aarch64 ""       "aarch64-linux-android"
-build_one armeabi-v7a arm     armv7-a "armv7a-linux-androideabi"
-build_one x86         x86     ""      "i686-linux-android"
-build_one x86_64      x86_64  ""      "x86_64-linux-android"
+# NPFF_ABIS：只构建指定 ABI（E204 白名单批重编用，逐 ABI 跑避免 WSL 会话超时）。
+case "${NPFF_ABIS:-}" in
+  arm64-v8a)   build_one arm64-v8a   aarch64 ""       "aarch64-linux-android" ;;
+  armeabi-v7a) build_one armeabi-v7a arm     armv7-a "armv7a-linux-androideabi" ;;
+  x86)         build_one x86         x86     ""      "i686-linux-android" ;;
+  x86_64)      build_one x86_64      x86_64  ""      "x86_64-linux-android" ;;
+  *)
+    build_one arm64-v8a   aarch64 ""       "aarch64-linux-android"
+    build_one armeabi-v7a arm     armv7-a "armv7a-linux-androideabi"
+    build_one x86         x86     ""      "i686-linux-android"
+    build_one x86_64      x86_64  ""      "x86_64-linux-android"
+    ;;
+esac
 
 echo "DONE"

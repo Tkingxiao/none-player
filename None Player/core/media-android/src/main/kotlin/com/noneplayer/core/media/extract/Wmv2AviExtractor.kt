@@ -21,9 +21,10 @@ import java.io.IOException
 import kotlin.math.abs
 
 /**
- * 只认「内层 AviExtractor 会丢掉的 WMV2 视频轨」。
+ * 只认「内层 AviExtractor 会丢掉的 WMV 视频家族轨」（WMV2/WMV1/WMV3/VC-1，白名单见
+ * [wmvVideoMimeForFourcc]）。
  *
- * 非 WMV2 的 AVI 在 [sniff] 返回 false，仍由 [com.homesoft.exo.extractor.AviExtractorsFactory] 解。
+ * 白名单外 fourcc 的 AVI 在 [sniff] 返回 false，仍由 [com.homesoft.exo.extractor.AviExtractorsFactory] 解。
  * 时间戳用 strh 的 dwScale/dwRate；有 idx1 时按关键帧做 SeekMap。
  */
 @OptIn(UnstableApi::class)
@@ -33,7 +34,8 @@ class Wmv2AviExtractor : Extractor {
 
     private class StreamInfo(
         val index: Int,
-        val isWmv2: Boolean,
+        /** 本提取器认领的视频 mime（WMV 家族 fourcc）；null = 不认领（fourcc 不在白名单） */
+        val videoMime: String?,
         val audioMime: String?,
         val scale: Long,
         val rate: Long,
@@ -46,6 +48,8 @@ class Wmv2AviExtractor : Extractor {
         /** WAVEFORMATEX.nBlockAlign：PCM 一帧的字节数，也是 WMA 超帧的最大输入尺寸 */
         val blockAlign: Int,
         /** PCM 位深（WAVEFORMATEX.wBitsPerSample），非 PCM 为 0 */
+        /** E204：非视频流的整段 WAVEFORMATEX——WMA 族解码器 open 必需的 extradata */
+        val audioExtra: ByteArray?,
         val bitsPerSample: Int,
     )
 
@@ -171,7 +175,7 @@ class Wmv2AviExtractor : Extractor {
 
     override fun sniff(input: ExtractorInput): Boolean {
         return try {
-            peekIsWmv2(input)
+            peekIsWmvFamily(input)
         } catch (_: Throwable) {
             false
         } finally {
@@ -279,7 +283,7 @@ class Wmv2AviExtractor : Extractor {
                     moviFccPos = input.position - 4
                     moviDataStart = input.position
                     moviEnd = AviChunk.listEnd(chunkStart, size, inputLength(input))
-                    if (streams.none { it.isWmv2 }) return Extractor.RESULT_END_OF_INPUT
+                    if (streams.none { it.videoMime != null }) return Extractor.RESULT_END_OF_INPUT
                     phase = Phase.INDEX
                     holder.position = moviEnd
                     return Extractor.RESULT_SEEK
@@ -468,16 +472,17 @@ class Wmv2AviExtractor : Extractor {
         for (i in 0 until entries.count) {
             val streamIndex = AviChunk.streamIndex(entries.ckid[i]) ?: continue
             val stream = streams.getOrNull(streamIndex) ?: continue
-            if (!stream.isWmv2 && stream.audioMime == null) continue
+            val isVideo = stream.videoMime != null
+            if (!isVideo && stream.audioMime == null) continue
             val kind = AviChunk.chunkKind(entries.ckid[i])
             val videoChunk = kind == AviChunk.Kind.VIDEO
             val audioChunk = kind == AviChunk.Kind.AUDIO
-            if (stream.isWmv2 && !videoChunk) continue
-            if (!stream.isWmv2 && !audioChunk) continue
+            if (isVideo && !videoChunk) continue
+            if (!isVideo && !audioChunk) continue
             val scale = stream.scale.coerceAtLeast(1L)
             val rate = stream.rate.coerceAtLeast(1L)
             val chunkBytes = entries.size[i].coerceAtLeast(0).toLong()
-            val timeUs = if (stream.isWmv2) {
+            val timeUs = if (isVideo) {
                 val n = ordinal[streamIndex]
                 ordinal[streamIndex] = n + 1
                 n * 1_000_000L * scale / rate
@@ -493,8 +498,8 @@ class Wmv2AviExtractor : Extractor {
                 ordinal[streamIndex] = n + 1
                 n * 1_000_000L * scale / rate
             }
-            val key = entries.flags[i] and KEYFRAME != 0L || (stream.isWmv2 && !videoSeen)
-            if (stream.isWmv2) videoSeen = true
+            val key = entries.flags[i] and KEYFRAME != 0L || (isVideo && !videoSeen)
+            if (isVideo) videoSeen = true
             val offset = if (base == 0L && !fromIndex) entries.offset[i] else base + entries.offset[i]
             // idx1 是**解码顺序**，偏移不保证单调；不单调就不能二分（见 seek）
             if (offset < previousOffset) samplesOffsetSorted = false
@@ -509,12 +514,12 @@ class Wmv2AviExtractor : Extractor {
     private fun emit(holder: PositionHolder): Int {
         val sink = output ?: return Extractor.RESULT_END_OF_INPUT
         if (!emitted) {
-            val video = streams.firstOrNull { it.isWmv2 } ?: return Extractor.RESULT_END_OF_INPUT
+            val video = streams.firstOrNull { it.videoMime != null } ?: return Extractor.RESULT_END_OF_INPUT
             for (stream in streams) {
-                if (stream.isWmv2) {
+                if (stream.videoMime != null) {
                     val maxIn = maxSampleSize(stream.index).coerceAtLeast(64 * 1024)
                     val format = Format.Builder()
-                        .setSampleMimeType(MediaNames.MIME_WMV2)
+                        .setSampleMimeType(stream.videoMime)
                         .setWidth(abs(stream.width).coerceAtLeast(1))
                         .setHeight(abs(stream.height).coerceAtLeast(1))
                         .setMaxInputSize(maxIn.coerceAtLeast(1))
@@ -540,6 +545,12 @@ class Wmv2AviExtractor : Extractor {
                             if (stream.channels > 0) setChannelCount(stream.channels)
                             if (stream.audioMime == MimeTypes.AUDIO_RAW) {
                                 setPcmEncoding(pcmEncodingForBits(stream.bitsPerSample))
+                            }
+                            // E204：WMA 族的 codec 身份（wmav1/2/pro/lossless）与解码参数
+                            // 都在 WAVEFORMATEX 里——没有这段 extradata，FFmpeg 的 wma
+                            // 解码器 open 直接 EINVAL（真机实录"初始化 wmav2 失败"）
+                            if (stream.audioExtra != null && stream.audioMime != MimeTypes.AUDIO_RAW) {
+                                setInitializationData(listOf(stream.audioExtra))
                             }
                         }
                         .build()
@@ -588,7 +599,7 @@ class Wmv2AviExtractor : Extractor {
         for (i in 0 until samples.count) {
             if (samples.stream[i] == stream.index) count++
         }
-        val n = if (!stream.isWmv2 && stream.blockAlign > 0) {
+        val n = if (stream.videoMime == null && stream.blockAlign > 0) {
             // length 缺失的音频：按字节折块
             var bytes = 0L
             for (i in 0 until samples.count) {
@@ -619,7 +630,7 @@ class Wmv2AviExtractor : Extractor {
         var hasVideo = false
         var firstPool = -1
         for (i in 0 until samples.count) {
-            val isVideo = streams.getOrNull(samples.stream[i])?.isWmv2 == true
+            val isVideo = streams.getOrNull(samples.stream[i])?.videoMime != null
             if (isVideo) {
                 hasVideo = true
                 firstPool = i
@@ -649,7 +660,7 @@ class Wmv2AviExtractor : Extractor {
     }
 
     private fun seekEntryEligible(i: Int, hasVideo: Boolean, firstPool: Int): Boolean {
-        if (hasVideo && streams.getOrNull(samples.stream[i])?.isWmv2 != true) return false
+        if (hasVideo && streams.getOrNull(samples.stream[i])?.videoMime == null) return false
         return samples.keyframe[i] || i == firstPool
     }
 
@@ -685,7 +696,7 @@ class Wmv2AviExtractor : Extractor {
         return Extractor.RESULT_CONTINUE
     }
 
-    private fun peekIsWmv2(input: ExtractorInput): Boolean {
+    private fun peekIsWmvFamily(input: ExtractorInput): Boolean {
         val head = ByteArray(12)
         input.peekFully(head, 0, head.size)
         if (fcc(head, 0) != "RIFF" || fcc(head, 8) != "AVI ") return false
@@ -703,7 +714,7 @@ class Wmv2AviExtractor : Extractor {
                 if (fcc(type, 0) == "hdrl") {
                     val payload = ByteArray((size - 4).toInt())
                     if (payload.isNotEmpty()) input.peekFully(payload, 0, payload.size)
-                    return parseHdrl(payload).any { it.isWmv2 }
+                    return parseHdrl(payload).any { it.videoMime != null }
                 } else {
                     input.advancePeekPosition((size - 4).toInt())
                 }
@@ -791,7 +802,7 @@ class Wmv2AviExtractor : Extractor {
         val bitsPerSample = if (!video && strf != null && strf.size >= 16) u16(strf, 14) else 0
         return StreamInfo(
             index = index,
-            isWmv2 = video && (compression == "WMV2" || fccHandler == "WMV2"),
+            videoMime = if (video) wmvVideoMimeForFourcc(compression, fccHandler) else null,
             audioMime = audioMime,
             scale = scale,
             rate = rate,
@@ -803,6 +814,7 @@ class Wmv2AviExtractor : Extractor {
             channels = if (strf != null && strf.size >= 4 && !video) u16(strf, 2) else 0,
             blockAlign = blockAlign,
             bitsPerSample = bitsPerSample,
+            audioExtra = if (!video) strf else null,
         )
     }
 
@@ -872,6 +884,23 @@ internal fun pcmEncodingForBits(bitsPerSample: Int): Int = when {
 internal fun wmvAudioMimeForTag(tag: Int): String? = when (tag) {
     0x0001, 0x0003 -> MimeTypes.AUDIO_RAW
     0x0050, 0x0055 -> MimeTypes.AUDIO_MPEG
-    0x0160, 0x0161, 0x0162, 0x0163 -> "audio/x-ms-wma"
+    0x0160, 0x0161 -> MediaNames.MIME_WMA
+    0x0162 -> MediaNames.MIME_WMAPRO
+    0x0163 -> MediaNames.MIME_WMALOSSLESS
+    else -> null
+}
+
+/**
+ * AVI 视频 fourcc → WMV 家族 mime（纯函数便于 JVM 测试）。compression（strf 的
+ * biCompression）与 handler（strh 的 fccHandler）都要查：编码器对两处写哪个并不统一，
+ * 旧 WMV2 判据就是双查的；白名单外返回 null，交给 Media3Avi。
+ */
+internal fun wmvVideoMimeForFourcc(compression: String, handler: String): String? = when {
+    compression == "WMV2" || handler == "WMV2" -> MediaNames.MIME_WMV2
+    compression == "WMV1" || handler == "WMV1" -> MediaNames.MIME_WMV1
+    compression == "WMV3" || handler == "WMV3" ||
+        compression == "WMVP" || handler == "WMVP" -> MediaNames.MIME_WMV3
+    compression == "WVC1" || handler == "WVC1" ||
+        compression == "WMVA" || handler == "WMVA" -> MediaNames.MIME_VC1
     else -> null
 }

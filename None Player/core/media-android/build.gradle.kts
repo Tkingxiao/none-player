@@ -53,6 +53,8 @@ dependencies {
     implementation(libs.media3.common)
     implementation(libs.media3.extractor)
     implementation(libs.media3.datasource)
+    // NpFfmpegDecoderException 继承 media3 DecoderException（SimpleDecoder 的类型约束）
+    implementation(libs.media3.decoder)
     // FormatProbe 用 `String.toUri()`（core-ktx）：直接引用须显式声明，与 :core:ui 同一口径，
     // 否则 lint 的 UseKtx 会提示且依赖关系是隐式的
     implementation(libs.androidx.core.ktx)

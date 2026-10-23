@@ -135,6 +135,27 @@ object MediaNames {
      */
     const val MIME_MPEG4_ASP = "video/x-np-mpeg4-asp"
 
+    // ---- E204 解码白名单批：libnpffmpeg 认领的 mime（media3 无对应常量的自定义 mime）----
+    // MIME_WMV2 走 libnplegacy 专用链（既定裁定），不在这里。
+
+    /** WMV1（fourcc WMV1，AVI） */
+    const val MIME_WMV1 = "video/x-ms-wmv1"
+
+    /** WMV3/WMV9（fourcc WMV3/WMVP，AVI） */
+    const val MIME_WMV3 = "video/x-ms-wmv"
+
+    /** VC-1 Advanced Profile（fourcc WVC1/WMVA；media3 MatroskaExtractor 既有常量同值） */
+    const val MIME_VC1 = "video/wvc1"
+
+    /** WMA（wmav1/wmav2，tag 0x160/0x161——Media3Avi 与本插件对整族发这一个 mime） */
+    const val MIME_WMA = "audio/x-ms-wma"
+
+    /** WMA Pro（tag 0x162） */
+    const val MIME_WMAPRO = "audio/x-ms-wmapro"
+
+    /** WMA Lossless（tag 0x163） */
+    const val MIME_WMALOSSLESS = "audio/x-ms-wmalossless"
+
     /** 从地址扩展名映射容器名；未知时返回大写的扩展名 */
     fun containerName(uriString: String): String? {
         val path = uriString.substringBefore('?').substringBefore('#')
@@ -166,7 +187,10 @@ object MediaNames {
         "video/mpeg" to "MPEG-1/2",
         "video/mp42" to "MS MPEG-4 v2",
         "video/mp43" to "MS MPEG-4 v3",
-        "video/x-ms-wmv" to "WMV (VC-1)",
+        // E204 白名单批：WMV 家族拆开展示（wmv3 与 vc1 是不同编码，旧口径混写）
+        "video/x-ms-wmv" to "WMV3 (WMV9)",
+        "video/x-ms-wmv1" to "WMV1",
+        "video/wvc1" to "VC-1",
         "video/x-ms-vc1" to "VC-1",
         MIME_WMV2 to "WMV2",
         MIME_MPEG4_ASP to "MPEG-4 ASP (Qpel)",
@@ -191,6 +215,8 @@ object MediaNames {
         "audio/flac" to "FLAC",
         "audio/raw" to "PCM",
         "audio/x-ms-wma" to "WMA",
+        MIME_WMAPRO to "WMA Pro",
+        MIME_WMALOSSLESS to "WMA Lossless",
         "audio/amr" to "AMR",
         "audio/alac" to "ALAC",
         "audio/midi" to "MIDI",

@@ -9,6 +9,8 @@ import androidx.media3.exoplayer.Renderer
 import androidx.media3.exoplayer.mediacodec.MediaCodecInfo
 import androidx.media3.exoplayer.mediacodec.MediaCodecSelector
 import androidx.media3.exoplayer.video.VideoRendererEventListener
+import com.noneplayer.core.media.ffmpeg.NpFfmpegCodecs
+import com.noneplayer.core.media.ffmpeg.NpFfmpegVideoCodec
 import com.noneplayer.core.media.probe.PlatformDecoderSupport
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegVideoRenderer
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
@@ -108,6 +110,56 @@ open class NpRenderersFactory(
                 eventHandler,
                 eventListener,
                 MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
+            ),
+        )
+        // E204 白名单批：libnpffmpeg（NextLib 共享 libavcodec 后端）认领 WMV1/WMV3/VC-1/
+        // MS-MPEG4——mime 表与探测同源（NpFfmpegCodecs）。渲染器本体复用 LegacyVideoRenderer
+        //（E204 的入口背压/内存收口随之共享），后端按表路由到 npffmpeg codec。
+        out.add(
+            LegacyVideoRenderer(
+                allowedVideoJoiningTimeMs,
+                eventHandler,
+                eventListener,
+                MAX_DROPPED_VIDEO_FRAME_COUNT_TO_NOTIFY,
+                rendererName = "NpFfmpegVideoRenderer",
+                codecNameFor = NpFfmpegCodecs::videoCodecName,
+                codecFactory = { name, extra, width, height ->
+                    NpFfmpegVideoCodec(name, extra, width, height)
+                },
+            ),
+        )
+    }
+
+    override fun buildAudioRenderers(
+        context: Context,
+        extensionRendererMode: Int,
+        mediaCodecSelector: MediaCodecSelector,
+        enableDecoderFallback: Boolean,
+        audioSink: androidx.media3.exoplayer.audio.AudioSink,
+        eventHandler: Handler,
+        eventListener: androidx.media3.exoplayer.audio.AudioRendererEventListener,
+        out: ArrayList<Renderer>,
+    ) {
+        super.buildAudioRenderers(
+            context,
+            extensionRendererMode,
+            mediaCodecSelector,
+            enableDecoderFallback,
+            audioSink,
+            eventHandler,
+            eventListener,
+            out,
+        )
+        // E204 白名单批音频：WMA 族（wmav1/2/wmapro/wmalossless）等 → 共享 libavcodec
+        // 软解转 s16 PCM。自持 DefaultAudioSink（与 NextLib 默认构造同姿势——平台渲染器
+        // 用 factory 的 sink，本渲染器不认领它们的 mime，互不干扰）。
+        out.add(
+            NpFfmpegAudioRenderer(
+                eventHandler,
+                eventListener,
+                arrayOf(
+                    // 与 ExoPlayer 默认链一致的静音跳变消除/标准化不需要：s16 直出交给 sink
+                ),
             ),
         )
     }

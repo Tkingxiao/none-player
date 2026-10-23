@@ -51,11 +51,15 @@ class Wmv2AviExtractorIndexTest {
         return out.toByteArray()
     }
 
-    /** 两个关键帧的 WMV2 视频（无音轨），idx1 偏移按 movi 数据起点 */
-    private fun buildAvi(): ByteArray {
+    /**
+     * 两个关键帧的视频（无音轨），idx1 偏移按 movi 数据起点。[codec] 写进 strh 的
+     * fccHandler **和** strf 的 biCompression（strf[16..20]）两处：提取器认领时对
+     * compression 与 handler 双查，缺一处就认不到。
+     */
+    private fun buildAvi(codec: String = "WMV2"): ByteArray {
         val strh = ByteArray(56)
         System.arraycopy(fourcc("vids"), 0, strh, 0, 4)
-        System.arraycopy(fourcc("WMV2"), 0, strh, 4, 4)
+        System.arraycopy(fourcc(codec), 0, strh, 4, 4)
         // scale @20 = 1001, rate @24 = 30000 (29.97fps), length @32 = 2
         System.arraycopy(u32(1001), 0, strh, 20, 4)
         System.arraycopy(u32(30000), 0, strh, 24, 4)
@@ -64,6 +68,7 @@ class Wmv2AviExtractorIndexTest {
         System.arraycopy(u32(40), 0, strf, 0, 4)
         System.arraycopy(u32(64), 0, strf, 4, 4)
         System.arraycopy(u32(48), 0, strf, 8, 4)
+        System.arraycopy(fourcc(codec), 0, strf, 16, 4) // biCompression
 
         val strl = chunk("LIST", fourcc("strl") + chunk("strh", strh) + chunk("strf", strf))
         val hdrl = chunk("LIST", fourcc("hdrl") + strl)
@@ -198,6 +203,18 @@ class Wmv2AviExtractorIndexTest {
         assertTrue(seekMap.isSeekable)
         // 2 帧 × 1e6 × 1001 / 30000
         assertEquals(2L * 1_000_000L * 1001L / 30000L, seekMap.durationUs)
+    }
+
+    @Test
+    fun `WMV3 fourcc 认领为 WMV3 家族 mime`() {
+        val (output, _) = runToSamples(buildAvi("WMV3"))
+        assertEquals(MediaNames.MIME_WMV3, output.formats.single().sampleMimeType)
+    }
+
+    @Test
+    fun `WVC1 fourcc 认领为 VC1 家族 mime`() {
+        val (output, _) = runToSamples(buildAvi("WVC1"))
+        assertEquals(MediaNames.MIME_VC1, output.formats.single().sampleMimeType)
     }
 
     @Test

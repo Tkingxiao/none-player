@@ -20,6 +20,7 @@ import com.noneplayer.core.media.legacy.LegacyCodec
 import com.noneplayer.core.media.legacy.LegacyDecoderException
 import com.noneplayer.core.media.legacy.LegacyDecoderLibrary
 import com.noneplayer.core.media.legacy.LegacyFrame
+import com.noneplayer.core.media.legacy.VideoCodec
 import java.nio.ByteBuffer
 import java.util.ArrayDeque
 
@@ -28,6 +29,10 @@ import java.util.ArrayDeque
  *
  * 不认 `video/mp4v-es` / `video/mjpeg`，所以硬件优先开或关时，Simple Profile 和设备已声明
  * ASP 的流仍由平台渲染器获得。构造函数不加载 native。
+ *
+ * E204 白名单批参数化：同一渲染器经 [codecNameFor]/[codecFactory] 可驱动任意
+ * [VideoCodec] 实现（legacy 后端 = libnplegacy 静态最小 avcodec；npffmpeg 后端 =
+ * NextLib 共享 libavcodec 的白名单解码器）。默认参数即 legacy 行为，零改动。
  *
  * CPU 渲染经 [OwnedSurfaceCloner] 走给定 Surface 的 Parcel 克隆，解码器释放时归还
  * CPU 连接——否则下一条平台流的 MediaCodec 会 `connect: already connected` 起不来
@@ -39,6 +44,11 @@ class LegacyVideoRenderer(
     eventHandler: Handler?,
     eventListener: VideoRendererEventListener?,
     maxDroppedFramesToNotify: Int,
+    private val rendererName: String = "LegacyVideoRenderer",
+    /** mime → 解码器名；null = 不认领（渲染器 supportsFormat 的唯一判据） */
+    private val codecNameFor: (String?) -> String? = { LegacyDecoderLibrary.codecName(it) },
+    private val codecFactory: (codecName: String, extradata: ByteArray?, width: Int, height: Int) -> VideoCodec =
+        { name, extra, w, h -> LegacyCodec(name, extra, w, h) },
 ) : DecoderVideoRenderer(
     allowedJoiningTimeMs,
     eventHandler,
@@ -46,13 +56,13 @@ class LegacyVideoRenderer(
     maxDroppedFramesToNotify,
 ) {
     private var decoder: LegacyVideoDecoder? = null
-    private val surfaces = OwnedSurfaceCloner("LegacyVideoRenderer")
+    private val surfaces = OwnedSurfaceCloner(rendererName)
 
-    override fun getName(): String = TAG
+    override fun getName(): String = rendererName
 
     override fun supportsFormat(format: Format): Int {
         val mime = format.sampleMimeType
-        if (!LegacyDecoderLibrary.supports(mime)) return C.FORMAT_UNSUPPORTED_TYPE
+        if (codecNameFor(mime) == null) return C.FORMAT_UNSUPPORTED_TYPE
         if (format.cryptoType != C.CRYPTO_TYPE_NONE) {
             return RendererCapabilities.create(C.FORMAT_UNSUPPORTED_DRM)
         }
@@ -67,7 +77,13 @@ class LegacyVideoRenderer(
         format: Format,
         cryptoConfig: CryptoConfig?,
     ): Decoder<DecoderInputBuffer, VideoDecoderOutputBuffer, DecoderException> {
-        return LegacyVideoDecoder(format, onReleased = surfaces::release).also { decoder = it }
+        return LegacyVideoDecoder(
+            format,
+            onReleased = surfaces::release,
+            rendererName = rendererName,
+            codecNameFor = codecNameFor,
+            codecFactory = codecFactory,
+        ).also { decoder = it }
     }
 
     override fun renderOutputBufferToSurface(outputBuffer: VideoDecoderOutputBuffer, surface: Surface) {
@@ -93,23 +109,22 @@ class LegacyVideoRenderer(
         surfaces.release()
         super.onRelease()
     }
-
-    private companion object {
-        const val TAG = "LegacyVideoRenderer"
-    }
 }
 
 @OptIn(UnstableApi::class)
 private class LegacyVideoDecoder(
     format: Format,
     private val onReleased: () -> Unit,
+    rendererName: String,
+    codecNameFor: (String?) -> String?,
+    codecFactory: (codecName: String, extradata: ByteArray?, width: Int, height: Int) -> VideoCodec,
 ) :
     Decoder<DecoderInputBuffer, VideoDecoderOutputBuffer, DecoderException> {
 
-    private val codecName = LegacyDecoderLibrary.codecName(format.sampleMimeType)
-        ?: throw DecoderException("no legacy codec for ${format.sampleMimeType}", null)
+    private val codecName = codecNameFor(format.sampleMimeType)
+        ?: throw DecoderException("no codec for ${format.sampleMimeType}", null)
 
-    private val codec: LegacyCodec = try {
+    private val codec: VideoCodec = try {
         val extra = format.initializationData.filter { it.isNotEmpty() }
             .takeIf { it.isNotEmpty() }
             ?.let { parts ->
@@ -122,13 +137,8 @@ private class LegacyVideoDecoder(
                     }
                 }
             }
-        LegacyCodec(
-            codecName,
-            extra,
-            format.width.takeIf { it > 0 } ?: 0,
-            format.height.takeIf { it > 0 } ?: 0,
-        )
-    } catch (e: LegacyDecoderException) {
+        codecFactory(codecName, extra, format.width.takeIf { it > 0 } ?: 0, format.height.takeIf { it > 0 } ?: 0)
+    } catch (e: Exception) {
         throw DecoderException(e.message ?: "legacy decoder", e)
     }
 
@@ -158,7 +168,7 @@ private class LegacyVideoDecoder(
         repeat(4) { freeOut.add(VideoDecoderOutputBuffer(owner)) }
     }
 
-    override fun getName(): String = "nplegacy-$codecName"
+    override fun getName(): String = "npff-$codecName"
 
     override fun setOutputStartTimeUs(outputStartTimeUs: Long) {
         this.outputStartTimeUs = outputStartTimeUs
