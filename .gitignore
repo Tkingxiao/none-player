@@ -47,6 +47,9 @@ captures/
 /.e108verify/
 /.tmp_device/
 /None Player/app/release/
+# 证据图落点在仓库根 `screenshots/`（不是 `docs/screenshots/`——旧规则写错了路径，
+# 一直没生效，所以验证截图被一路提交进库）。设备实测产物一律不入库。
+/screenshots/
 /docs/screenshots
 install.bat
 /None Player/code error
