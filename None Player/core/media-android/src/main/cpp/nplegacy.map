@@ -2,6 +2,7 @@
   global:
     Java_com_noneplayer_core_media_legacy_LegacyNative_nativeCreate;
     Java_com_noneplayer_core_media_legacy_LegacyNative_nativeSend;
+    Java_com_noneplayer_core_media_legacy_LegacyNative_nativeSendDirect;
     Java_com_noneplayer_core_media_legacy_LegacyNative_nativePending;
     Java_com_noneplayer_core_media_legacy_LegacyNative_nativeEof;
     Java_com_noneplayer_core_media_legacy_LegacyNative_nativePeek;

@@ -37,6 +37,35 @@ class LegacyCodec(
         if (rc < 0) throw LegacyDecoderException("送入 $rc")
     }
 
+    private var sendScratch: ByteBuffer? = null
+
+    /**
+     * direct ByteBuffer 送入（A1 批）：渲染器侧的 DecoderInputBuffer
+     * （BUFFER_REPLACEMENT_MODE_DIRECT）直接过 JNI，不再每帧 `ByteArray(remaining())`
+     * 拷一份。堆 buffer 走 direct scratch 复制兜底（nativeSendDirect 只认 direct）。
+     */
+    fun send(data: ByteBuffer?, ptsUs: Long, eos: Boolean) {
+        check(handle != 0L) { "decoder released" }
+        if (eos || data == null || data.remaining() <= 0) {
+            val rc = LegacyNative.nativeSendDirect(handle, null, 0, ptsUs, eos)
+            if (rc < 0) throw LegacyDecoderException("送入 $rc")
+            return
+        }
+        val direct = if (data.isDirect) {
+            data
+        } else {
+            val n = data.remaining()
+            val scratch = sendScratch?.takeIf { it.capacity() >= n }
+                ?: ByteBuffer.allocateDirect(maxOf(n, 64 * 1024)).also { sendScratch = it }
+            scratch.clear()
+            scratch.put(data)
+            scratch.flip()
+            scratch
+        }
+        val rc = LegacyNative.nativeSendDirect(handle, direct, direct.remaining(), ptsUs, eos)
+        if (rc < 0) throw LegacyDecoderException("送入 $rc")
+    }
+
     /** 解码器已把 EOS 前的所有帧交出来（队列也因此排空）。 */
     val isEof: Boolean
         get() = handle != 0L && LegacyNative.nativeEof(handle)

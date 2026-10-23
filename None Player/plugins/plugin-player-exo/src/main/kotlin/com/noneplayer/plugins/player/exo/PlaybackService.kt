@@ -138,7 +138,13 @@ class PlaybackService : MediaSessionService() {
         // 同理，FormatProbe 的"有没有解码器"也必须把上面这条链算全：FFmpeg 软解
         // （FormatProbe.ffmpegSupports）与末端的 MJPEG 位图软解（FormatProbe.bitmapRendererSupports），
         // 否则会把"能软解"的文件误判为不可播。
-        val mediaSourceFactory = DefaultMediaSourceFactory(this, NpExtractorsFactory())
+        // A1 收口：本地 file/content 走可随机访问的 DataSource（close→open 不再重开 fd，
+        // 解封装器 RESULT_SEEK 降为 channel.position()）；远程/流式仍是 DefaultDataSource。
+        // 探测侧（FormatProbe）同一思路：单 fd + FileChannel 定位。
+        val mediaSourceFactory = DefaultMediaSourceFactory(
+            com.noneplayer.core.media.datasource.SeekableLocalDataSourceFactory(this),
+            NpExtractorsFactory(),
+        )
         val loadControl = buildLoadControl()
         // L1/L2（§11.2）：预载管理器与播放器必须出自**同一个 builder**——
         // `buildExoPlayer` 会把同一个 MediaSource.Factory / RenderersFactory / LoadControl

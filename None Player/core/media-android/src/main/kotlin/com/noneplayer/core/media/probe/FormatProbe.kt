@@ -20,6 +20,7 @@ import androidx.media3.extractor.ExtractorsFactory
 import androidx.media3.extractor.PositionHolder
 import androidx.media3.extractor.SeekMap
 import android.net.Uri
+import android.os.ParcelFileDescriptor
 import androidx.core.net.toUri
 import androidx.media3.extractor.TrackOutput
 import com.noneplayer.core.media.MediaNames
@@ -29,6 +30,7 @@ import com.noneplayer.core.media.extract.NpExtractorsFactory
 import com.noneplayer.core.media.legacy.LegacyDecoderLibrary
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegLibrary
 import java.io.ByteArrayOutputStream
+import java.nio.channels.FileChannel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -207,7 +209,21 @@ object FormatProbe {
     // ---- 内部实现 ----
 
     private val PROBE_SCHEMES = setOf("file", "content")
-    private const val MAX_READS = 400
+
+    /**
+     * 随机访问探测的读轮上限：SEEK 免费后，成本只剩逐块读头（每轮 8 字节 + 一次定位）。
+     * 真正封顶的是下面的墙钟预算——两小时正片十几万块在预算内走不走完都由 [PROBE_BUDGET_NS] 决定。
+     */
+    private const val MAX_READS = 1_000_000
+
+    /** 随机访问探测的墙钟预算：只对"逐块扫 movi"这种重探测生效，常规探测远够不着。 */
+    private const val PROBE_BUDGET_NS = 4L * 1_000_000_000
+
+    /** 墙钟检查的轮间隔（System.nanoTime 也有成本，不必每轮查） */
+    private const val BUDGET_CHECK_STRIDE = 64
+
+    /** 回落路径（拿不到 seekable channel）的读轮上限：保持旧值，每轮 SEEK 都要重开 fd。 */
+    private const val FALLBACK_MAX_READS = 400
 
     /** tracksEnded 之后仍无任何 format 时的宽限读轮数（Wav 型：格式在下一轮 read 才来） */
     private const val GRACE_READS = 8
@@ -256,6 +272,179 @@ object FormatProbe {
         if (uri.scheme?.lowercase() !in PROBE_SCHEMES) return ProbeOutcome.transient(Result.Unknown)
 
         val containerName = MediaNames.containerName(uriString)
+
+        // A1 收口：fd 只开一次、SEEK 变 channel.position()。
+        // 旧路径每次 RESULT_SEEK 都 dataSource.close()+open()——content:// 上一次 open
+        // 是一次 openAssetFileDescriptor（binder + dup fd），无 idx1 的 AVI 扫描每块一次
+        // SEEK，两小时正片十几万块就是十几万次 binder 往返（真机探测因此从亚秒涨到数秒）。
+        // FileChannel 天然可定位：本地 file/content 都能拿到一个 seekable channel。
+        val channel = openSeekableChannel(context, uri)
+            ?: return probeViaDataSource(context, uri, containerName, expectedMime, expectVideo)
+        try {
+            return probeOnChannel(channel, uriString, containerName, expectedMime, expectVideo)
+        } finally {
+            runCatching { channel.close() }
+        }
+    }
+
+    /**
+     * file/content → 一个可定位的只读 [FileChannel]；拿不到（远端、SAF 撤权、
+     * 流式 provider）返回 null，调用方回落到旧的 DataSource 探测路径。
+     */
+    private fun openSeekableChannel(context: Context, uri: Uri): FileChannel? = runCatching {
+        when (uri.scheme?.lowercase()) {
+            "file" -> uri.path?.let { path ->
+                java.io.RandomAccessFile(path, "r").channel
+            }
+            "content" -> context.contentResolver.openFileDescriptor(uri, "r")?.let { pfd ->
+                ParcelFileDescriptor.AutoCloseInputStream(pfd).channel
+            }
+            else -> null
+        }
+    }.getOrNull()
+
+    /**
+     * 随机访问探测：单 fd + channel 定位，SEEK 零成本（A1 收口的兑现）。
+     */
+    private suspend fun probeOnChannel(
+        channel: FileChannel,
+        uriString: String,
+        containerName: String?,
+        expectedMime: String?,
+        expectVideo: Boolean?,
+    ): ProbeOutcome {
+        val totalLength = runCatching { channel.size() }.getOrDefault(0L)
+        val reader = ChannelReader(channel)
+        var input = DefaultExtractorInput(reader, 0, if (totalLength > 0) totalLength else LENGTH_HINT)
+
+        val uri = uriString.toUri()
+        val extractors = AVI_EXTRACTORS.createExtractors(uri, emptyMap())
+        var matched: Extractor? = null
+        var sniffThrew = false
+        for (extractor in extractors) {
+            currentCoroutineContext().ensureActive()
+            val sniffed = try {
+                extractor.sniff(input)
+            } catch (_: Throwable) {
+                sniffThrew = true
+                false
+            }
+            if (sniffed) {
+                matched = extractor
+                // 关键：sniff 只做 peek；不重置会让 Extractor 自己的首个 read
+                // （如 AviExtractor 会再 sniff 一次）从错误的 peek 位置开始
+                input.resetPeekPosition()
+                break
+            }
+            input.resetPeekPosition()
+        }
+        if (matched == null) {
+            // sniff 抛异常 = 瞬态读失败，不缓存；没有解封装器认领才是确定结论
+            return if (sniffThrew) {
+                ProbeOutcome.transient(
+                    Result.Unplayable(PlaybackFailure.unreadable(containerName)),
+                )
+            } else {
+                ProbeOutcome(
+                    Result.Unplayable(PlaybackFailure.containerUnsupported(containerName)),
+                    ProbeVerdict.CONTAINER_UNSUPPORTED,
+                )
+            }
+        }
+
+        val output = ProbeOutput()
+        try {
+            matched.init(output)
+        } catch (_: Throwable) {
+            // 解封装器初始化失败（I/O、SAF 失效…）：瞬态，不缓存
+            return ProbeOutcome.transient(
+                Result.Unplayable(PlaybackFailure.unreadable(containerName)),
+            )
+        }
+        // MediaStore 的 content:// 地址没有扩展名：容器名以"谁认领了它"为准
+        val effectiveContainer = containerFromExtractor(matched) ?: containerName
+
+        val holder = PositionHolder()
+        var reads = 0
+        var readThrew = false
+        var budgetExceeded = false
+        val deadlineNs = System.nanoTime() + PROBE_BUDGET_NS
+        while (reads < MAX_READS) {
+            reads++
+            currentCoroutineContext().ensureActive()
+            if (reads % BUDGET_CHECK_STRIDE == 0 && System.nanoTime() > deadlineNs) {
+                // 预算按墙钟收（SEEK 已经免费，剩下的成本是逐块读头本身）；
+                // 超预算与旧读数耗尽同判：有格式照常定论，没格式按拿不准放行
+                budgetExceeded = true
+                break
+            }
+            val result = try {
+                matched.read(input, holder)
+            } catch (_: Throwable) {
+                // 解复用中途失败（含部分编码未映射的容器）：轨道信息可能只拿到一半，
+                // 有视频轨照常判定，没有则按"编码无法识别"给原因
+                readThrew = true
+                break
+            }
+            if (result == Extractor.RESULT_SEEK) {
+                val position = holder.position
+                if (position < 0 || (totalLength > 0 && position >= totalLength)) break
+                // A1 收口后 SEEK 只是 channel.position()，不再 close+open
+                runCatching { channel.position(position) }
+                input = DefaultExtractorInput(
+                    reader,
+                    position,
+                    if (totalLength > 0) totalLength - position else LENGTH_HINT,
+                )
+            } else if (result == Extractor.RESULT_END_OF_INPUT) {
+                break
+            }
+            // 轨道表确定后通常即可收尾；但有两类例外要**多读几轮**：
+            // ① MPEG-4 ASP 判读（§12.9.4）需要 codec 头字节——XVID/DivX 的 AVI 常把
+            //    VOS/VOL 头内联在首帧（initializationData 为空）；
+            // ② WavExtractor 等"先 endTracks、下一次 read 才吐 format"的解封装器
+            //    （批次 8 实测：endTracks 即 break 会拿到 0 条格式，音频分支全灭）。
+            // 收尾条件因此改为：轨道已结束 **且**（有格式 或 宽限轮次用尽）且 mp4v 判读就绪。
+            if (output.tracksEnded) output.graceReads++
+            if (output.tracksEnded &&
+                (output.formats.isNotEmpty() || output.graceReads > GRACE_READS) &&
+                output.hasEnoughForProfileCheck()
+            ) break
+        }
+        matched.release()
+        android.util.Log.d(
+            "FormatProbe",
+            "matched=${matched.javaClass.simpleName} ch=seekable expectedMime=$expectedMime expectVideo=$expectVideo " +
+                "reads=$reads formats=${output.formats.size} mimes=${output.formats.map { it.sampleMimeType }}",
+        )
+        // A1：预算耗尽或读取抛异常，而**一条格式都没拿到** = 拿不准，不是"编码不支持"。
+        // 判 Unplayable 会被写进缓存（缓存条件只排除 Unknown），于是能播的文件被永久
+        // 记成"没有受支持的视频编码"。类注释承诺的"拿不准放行"在这里兑现。
+        if (output.formats.isEmpty() &&
+            (readThrew || budgetExceeded || (!output.tracksEnded && reads >= MAX_READS))
+        ) {
+            return ProbeOutcome.transient(Result.Unknown)
+        }
+        val outcome = output.decide(effectiveContainer, expectVideo)
+        // 解复用中途失败过：即便算出了结论，也按瞬态处理（不写缓存，下次重探）
+        return if (readThrew) {
+            ProbeOutcome(outcome.result, ProbeVerdict.NON_DETERMINISTIC)
+        } else {
+            outcome
+        }
+    }
+
+    /**
+     * 拿不到 seekable channel 时的回落路径：旧 DataSource + 每次 SEEK 重开 fd。
+     * 只服务远端/流式/SAF 异常态，预算保持旧读数，不做放宽。
+     */
+    private suspend fun probeViaDataSource(
+        context: Context,
+        uri: Uri,
+        containerName: String?,
+        expectedMime: String?,
+        expectVideo: Boolean?,
+    ): ProbeOutcome {
         val totalLength = localLength(context, uri)
         val dataSource = DefaultDataSource.Factory(context).createDataSource()
         try {
@@ -311,7 +500,7 @@ object FormatProbe {
             val holder = PositionHolder()
             var reads = 0
             var readThrew = false
-            while (reads < MAX_READS) {
+            while (reads < FALLBACK_MAX_READS) {
                 reads++
                 currentCoroutineContext().ensureActive()
                 val result = try {
@@ -365,7 +554,7 @@ object FormatProbe {
             // 记成"没有受支持的视频编码"——无 idx1 的 AVI 扫描每块一次 SEEK，400 轮根本
             // 走不到建索引，正是这条。类注释承诺的"拿不准放行"在这里兑现。
             if (output.formats.isEmpty() &&
-                (readThrew || (!output.tracksEnded && reads >= MAX_READS))
+                (readThrew || (!output.tracksEnded && reads >= FALLBACK_MAX_READS))
             ) {
                 return ProbeOutcome.transient(Result.Unknown)
             }
@@ -746,6 +935,20 @@ object FormatProbe {
 // ---------------------------------------------------------------------------
 // R3-14 / REV-04 / A17：探测结论的确定性分类与缓存
 // ---------------------------------------------------------------------------
+
+/**
+ * seekable [FileChannel] 之上的只读 [DataReader]：`DefaultExtractorInput` 只会向前
+ * read（外加 peek 窗口），定位由探测循环直接 `channel.position()`——探测侧因此
+ * 不需要 DataSource 的 open/close 语义（A1 收口）。
+ */
+@OptIn(UnstableApi::class)
+private class ChannelReader(private val channel: FileChannel) : DataReader {
+    override fun read(target: ByteArray, offset: Int, length: Int): Int {
+        if (length == 0) return 0
+        val n = channel.read(java.nio.ByteBuffer.wrap(target, offset, length))
+        return if (n < 0) C.RESULT_END_OF_INPUT else n
+    }
+}
 
 /**
  * 结论的确定性分类：决定它能否被缓存。

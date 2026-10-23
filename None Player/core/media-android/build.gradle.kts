@@ -31,6 +31,12 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    // 纯 JVM 测试驱动 Extractor（Wmv2AviExtractorIndexTest 等）：android.util.Log
+    // 走默认 no-op 而不是抛 "not mocked"。模块 JVM 测试只覆盖纯 Kotlin/extractor 面，
+    // 真机语义仍在 androidTest。
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 kotlin {

@@ -166,6 +166,10 @@ private class LegacyVideoDecoder(
 
     override fun dequeueInputBuffer(): DecoderInputBuffer? {
         if (dequeuedIn != null || availableIn.isEmpty()) return null
+        // E204：readyOut 背压必须挡在**入口**——解码出帧快于上屏消费时不再吃输入，
+        // 让 media3 把积压放进有界的 SampleQueue（LoadControl 60s）。挡在 pump 里
+        // 不行：原生队列只有 4 帧，满了再 send 会撞 AVERROR(EAGAIN) 直接报错。
+        if (readyOut.size >= MAX_READY_OUT) return null
         dequeuedIn = availableIn.removeFirst()
         return dequeuedIn
     }
@@ -175,12 +179,11 @@ private class LegacyVideoDecoder(
             val eos = inputBuffer.isEndOfStream()
             val pts = inputBuffer.timeUs
             val data = inputBuffer.data
-            val bytes = if (!eos && data != null && data.remaining() > 0) {
-                ByteArray(data.remaining()).also { data.get(it) }
-            } else {
-                ByteArray(0)
-            }
-            codec.send(bytes, pts, eos)
+            // A1 批：direct buffer 直送 JNI（nativeSendDirect），不再每帧
+            // `ByteArray(remaining())` 拷一份；非 direct 兜底由 LegacyCodec 的
+            // direct scratch 复制处理，行为不变。
+            val direct = if (!eos && data != null && data.remaining() > 0) data else null
+            codec.send(direct, pts, eos)
             if (eos) eosReceived = true
             pump(fallbackPts = pts)
         } catch (e: LegacyDecoderException) {
@@ -238,6 +241,8 @@ private class LegacyVideoDecoder(
     }
 
     private fun pump(fallbackPts: Long) {
+        // 原生队列必须每次排空（≤4 帧，原生内存），否则 send 撞 EAGAIN；
+        // 上屏消费的背压由 dequeueInputBuffer 在 readyOut 满时挡（见上）。
         while (true) {
             val frame = codec.receive() ?: break
             if (outputStartTimeUs != C.TIME_UNSET && frame.ptsUs != C.TIME_UNSET && frame.ptsUs < outputStartTimeUs) {
@@ -291,5 +296,8 @@ private class LegacyVideoDecoder(
 
     private companion object {
         const val DEFAULT_INPUT = 256 * 1024
+
+        /** readyOut 积压上限：挡住"解码快于上屏"的稳态增长（E204 OOM） */
+        const val MAX_READY_OUT = 8
     }
 }

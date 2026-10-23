@@ -12,6 +12,16 @@ public final class LegacyNative {
     /** @return 0 成功，负数是 FFmpeg 错误码 */
     static native int nativeSend(long handle, byte[] data, int size, long ptsUs, boolean eos);
 
+    /**
+     * 直接 ByteBuffer 版（必须 direct；A1 批）：渲染器侧 DecoderInputBuffer 本就是
+     * direct buffer，旧路径要先 `ByteArray(remaining())` 拷一份再 `GetByteArrayRegion`
+     * 拷进 packet——每帧两份全尺寸拷贝。direct 版 JNI 里 `GetDirectBufferAddress`
+     * + memcpy，只留一份。
+     *
+     * @return 0 成功，负数是 FFmpeg 错误码
+     */
+    static native int nativeSendDirect(long handle, ByteBuffer data, int size, long ptsUs, boolean eos);
+
     static native int nativePending(long handle);
 
     static native boolean nativeEof(long handle);

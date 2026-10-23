@@ -50,18 +50,79 @@ class Wmv2AviExtractor : Extractor {
     )
 
     /**
-     * 一条 chunk 索引项。[ckid] 存 fourcc 的**打包值**而不是字符串——扫描一条两小时
-     * 视频是十几万次，每次 `String(b, o, 4)` 就是十几万个短命对象（A1）。
+     * chunk 索引的平铺存储（idx1 与扫描中间表共用）。[ckid] 存 fourcc 的**打包值**而不是
+     * 字符串——扫描一条两小时视频是十几万次，每次 `String(b, o, 4)` 就是十几万个短命对象
+     * （A1）。行式对象（每块一个实例 + List 引用）换成四个原生数组：十几万条不再逐条装箱。
      */
-    private class RawIdx(val ckid: Int, val flags: Long, val offset: Long, val size: Int)
+    private class IdxTable(capacity: Int = 1024) {
+        var ckid = IntArray(capacity)
+            private set
+        var flags = LongArray(capacity)
+            private set
+        var offset = LongArray(capacity)
+            private set
+        var size = IntArray(capacity)
+            private set
+        var count = 0
+            private set
 
-    private class Sample(
-        val stream: Int,
-        val offset: Long,
-        val size: Int,
-        val timeUs: Long,
-        val keyframe: Boolean,
-    )
+        fun add(ck: Int, fl: Long, off: Long, sz: Int) {
+            if (count == ckid.size) {
+                ckid = ckid.copyOf(count * 2)
+                flags = flags.copyOf(count * 2)
+                offset = offset.copyOf(count * 2)
+                size = size.copyOf(count * 2)
+            }
+            ckid[count] = ck
+            flags[count] = fl
+            offset[count] = off
+            size[count] = sz
+            count++
+        }
+
+        fun clear() {
+            count = 0
+        }
+    }
+
+    /**
+     * materialize 之后的样本表：五列平铺（流号/偏移/大小/时间/关键帧），播放期常驻，
+     * seek 的二分直接在列上进行。
+     */
+    private class SampleTable(capacity: Int = 1024) {
+        var stream = IntArray(capacity)
+            private set
+        var offset = LongArray(capacity)
+            private set
+        var size = IntArray(capacity)
+            private set
+        var timeUs = LongArray(capacity)
+            private set
+        var keyframe = BooleanArray(capacity)
+            private set
+        var count = 0
+            private set
+
+        fun add(s: Int, off: Long, sz: Int, ts: Long, key: Boolean) {
+            if (count == stream.size) {
+                stream = stream.copyOf(count * 2)
+                offset = offset.copyOf(count * 2)
+                size = size.copyOf(count * 2)
+                timeUs = timeUs.copyOf(count * 2)
+                keyframe = keyframe.copyOf(count * 2)
+            }
+            stream[count] = s
+            offset[count] = off
+            size[count] = sz
+            timeUs[count] = ts
+            keyframe[count] = key
+            count++
+        }
+
+        fun clear() {
+            count = 0
+        }
+    }
 
     private var output: ExtractorOutput? = null
     private var phase = Phase.HEADER
@@ -71,20 +132,39 @@ class Wmv2AviExtractor : Extractor {
     private var moviDataStart = -1L
     private var moviEnd = -1L
     private var inputLengthCache = AviChunk.UNKNOWN_LENGTH
-    private val rawIndex = mutableListOf<RawIdx>()
+    private val rawIndex = IdxTable()
     private var baseTry = 0
     private var scanCursor = -1L
-    private val scanned = mutableListOf<RawIdx>()
+    private val scanned = IdxTable()
 
     /** 扫描路径上"这条流见过没有"——用集合代替 `scanned.none { }` 的 O(n²) 线性回看。 */
     private val scannedStreams = mutableSetOf<Int>()
-    private val samples = mutableListOf<Sample>()
+    private val samples = SampleTable()
+
+    /** emit 时预构建的关键帧寻点表（时间升序），getSeekPoints 在它上面二分 */
+    private var seekTimes = LongArray(0)
+    private var seekOffsets = LongArray(0)
 
     /** 关键帧信息是否可信：只有 idx1 的 flags 带真位；扫描路径的"首帧即关键帧"是猜的。 */
     private var keyframesReliable = false
 
     /** 样本按文件偏移是否单调（idx1 是解码顺序，不保证单调；不单调就不能二分）。 */
     private var samplesOffsetSorted = true
+
+    /** 关键帧寻点表里是否真有关键帧位（扫描路径"首帧即关键帧"是猜的，不据此宣称可拖） */
+    private var hasKeyframes = false
+
+    /** idx1 的 16 字节记录位（流式解析复用，不整段分配 payload） */
+    private val idxRecord = ByteArray(16)
+
+    /** chunk 头读取位（SAMPLE 阶段每帧复用） */
+    private val header8 = ByteArray(8)
+
+    /** 样本载荷 scratch：按需倍增，不每帧分配 */
+    private var sampleScratch = ByteArray(64 * 1024)
+
+    /** 扫描阶段的 payload 跳读 scratch（固定 64KB，循环用） */
+    private val buildSkipScratch = ByteArray(64 * 1024)
     private val tracks = mutableMapOf<Int, TrackOutput>()
     private var sampleCursor = 0
     private var emitted = false
@@ -115,18 +195,24 @@ class Wmv2AviExtractor : Extractor {
     }
 
     override fun seek(position: Long, timeUs: Long) {
-        if (samples.isEmpty()) {
+        if (samples.count == 0) {
             resetParse()
             return
         }
         // 拖动是一次 seek 一拍，旧写法 `indexOfFirst` 在播放线程上对十几万条做线性扫。
-        // idx1 是解码顺序、不保证偏移单调，所以只有确认单调时才二分。
+        // idx1 是解码顺序、不保证偏移单调，所以只有确认单调时才二分（平铺列上直接二分）。
         sampleCursor = if (samplesOffsetSorted) {
-            val found = samples.binarySearch { it.offset.compareTo(position) }
-            if (found >= 0) found else (-found - 1).coerceAtMost(samples.size)
+            var lo = 0
+            var hi = samples.count
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                if (samples.offset[mid] < position) lo = mid + 1 else hi = mid
+            }
+            lo
         } else {
-            val at = samples.indexOfFirst { it.offset >= position }
-            if (at < 0) samples.size else at
+            var at = 0
+            while (at < samples.count && samples.offset[at] < position) at++
+            at
         }
     }
 
@@ -146,7 +232,10 @@ class Wmv2AviExtractor : Extractor {
         scanned.clear()
         scannedStreams.clear()
         samples.clear()
+        seekTimes = LongArray(0)
+        seekOffsets = LongArray(0)
         keyframesReliable = false
+        hasKeyframes = false
         samplesOffsetSorted = true
         tracks.clear()
         sampleCursor = 0
@@ -241,22 +330,21 @@ class Wmv2AviExtractor : Extractor {
         val id = fcc(hdr, 0)
         val size = u32(hdr, 4)
         if (id == "idx1" && size in 16 until MAX_CHUNK) {
-            val payload = ByteArray(size.toInt())
-            readFully(input, payload)
+            // idx1 直接流式解析进平铺表：两小时正片的 idx1 是 3MB 级，旧写法整段
+            // payload + 逐条 RawIdx 对象（十几万个）两份驻留
             rawIndex.clear()
-            var p = 0
-            while (p + 16 <= payload.size) {
+            var remaining = size
+            while (remaining >= 16) {
+                readFully(input, idxRecord)
                 rawIndex.add(
-                    RawIdx(
-                        ckid = AviChunk.fourcc(payload, p),
-                        flags = u32(payload, p + 4),
-                        offset = u32(payload, p + 8),
-                        size = u32(payload, p + 12).toInt(),
-                    ),
+                    AviChunk.fourcc(idxRecord, 0),
+                    u32(idxRecord, 4),
+                    u32(idxRecord, 8),
+                    u32(idxRecord, 12).toInt(),
                 )
-                p += 16
+                remaining -= 16
             }
-            if (rawIndex.isEmpty()) return startScan(holder)
+            if (rawIndex.count == 0) return startScan(holder)
             baseTry = 0
             phase = Phase.VERIFY
             return Extractor.RESULT_CONTINUE
@@ -276,7 +364,7 @@ class Wmv2AviExtractor : Extractor {
     private fun verifyBase(input: ExtractorInput, holder: PositionHolder): Int {
         val bases = longArrayOf(moviFccPos, moviDataStart, 0L)
         if (baseTry >= bases.size) return startScan(holder)
-        val at = bases[baseTry] + rawIndex.first().offset
+        val at = bases[baseTry] + rawIndex.offset[0]
         if (at < 0) {
             baseTry++
             return Extractor.RESULT_CONTINUE
@@ -287,7 +375,7 @@ class Wmv2AviExtractor : Extractor {
         }
         val id = ByteArray(4)
         readFully(input, id)
-        if (AviChunk.fourcc(id, 0) == rawIndex.first().ckid) {
+        if (AviChunk.fourcc(id, 0) == rawIndex.ckid[0]) {
             // idx1 的 flags 带真关键帧位，这条路径上 SeekMap 才敢说"可拖"
             materialize(bases[baseTry], rawIndex, fromIndex = true)
             phase = Phase.EMIT
@@ -335,45 +423,87 @@ class Wmv2AviExtractor : Extractor {
         // "这条流的第一块"当关键帧是**猜的**，所以 SeekMap 不据此宣称可拖（见 isSeekable）。
         // 见过没有用集合判，旧写法 `scanned.none { }` 是 O(n²) 次比较 + 每块一个 String。
         val key = if (stream != null && scannedStreams.add(stream)) KEYFRAME else 0L
-        scanned.add(RawIdx(ckid, key, scanCursor, size.toInt()))
+        scanned.add(ckid, key, scanCursor, size.toInt())
         val next = scanCursor + 8 + size + AviChunk.pad(size)
         scanCursor = next
+        // A1 收口：相邻 chunk 就地跳过 payload、CONTINUE 直读，让**一个** ExtractorInput
+        // 实例扫完整个 movi。旧写法每块一次 RESULT_SEEK——探测侧与 media3 的
+        // ProgressiveMediaPeriod 每次 SEEK 都重建一个 64KB 内部缓冲的 DefaultExtractorInput，
+        // 十几万块 = GB 级短命对象，真机上把 256MB 堆直接顶满（E204 真机 OOM 实录）。
+        // AVI 相邻块间距就是块本身（几 KB 量级），顺序跳读比逐块 SEEK 更快。
+        // payload 超大（异常形态/JUNK 巨块）才回到 SEEK 跳过。
+        if (size <= BUILD_INLINE_SKIP_LIMIT) {
+            var remaining = (size + AviChunk.pad(size)).toInt()
+            try {
+                while (remaining > 0) {
+                    val n = minOf(remaining, buildSkipScratch.size)
+                    readFully(input, buildSkipScratch, 0, n)
+                    remaining -= n
+                }
+            } catch (_: EOFException) {
+                // 文件截断：用手上已认出的部分收尾，与头部 EOF 同一政策
+                materialize(0L, scanned, fromIndex = false)
+                phase = Phase.EMIT
+                return Extractor.RESULT_CONTINUE
+            }
+            return Extractor.RESULT_CONTINUE
+        }
         holder.position = next
         return Extractor.RESULT_SEEK
     }
 
-    private fun materialize(base: Long, entries: List<RawIdx>, fromIndex: Boolean) {
+    private fun materialize(base: Long, entries: IdxTable, fromIndex: Boolean) {
         samples.clear()
         keyframesReliable = fromIndex
         samplesOffsetSorted = true
-        val ordinal = HashMap<Int, Int>()
+        val ordinal = IntArray(streams.size)
+        // 音频流的时间戳按**累计字节数**折算（E204）：AVI strh 对音频给的是
+        // dwScale=nBlockAlign / dwRate=avgBytesPerSec，一块几 KB 的 PCM chunk 若按
+        // 逐块 ordinal × scale/rate 计时只前进 ~20µs，600s 音轨的时间戳只覆盖
+        // 0.6s——media3 的"缓冲 60s"门永远不触发，整条 PCM 全堆进 SampleQueue
+        //（真机 105MB PCM 把 Java 堆顶到 215MB+）。字节数折算与 FFmpeg avidec 同源。
+        val audioBytes = LongArray(streams.size)
         var videoSeen = false
         var previousOffset = Long.MIN_VALUE
-        for (entry in entries) {
-            val streamIndex = AviChunk.streamIndex(entry.ckid) ?: continue
+        for (i in 0 until entries.count) {
+            val streamIndex = AviChunk.streamIndex(entries.ckid[i]) ?: continue
             val stream = streams.getOrNull(streamIndex) ?: continue
             if (!stream.isWmv2 && stream.audioMime == null) continue
-            val kind = AviChunk.chunkKind(entry.ckid)
+            val kind = AviChunk.chunkKind(entries.ckid[i])
             val videoChunk = kind == AviChunk.Kind.VIDEO
             val audioChunk = kind == AviChunk.Kind.AUDIO
             if (stream.isWmv2 && !videoChunk) continue
             if (!stream.isWmv2 && !audioChunk) continue
-            val n = ordinal.getOrDefault(streamIndex, 0)
-            ordinal[streamIndex] = n + 1
             val scale = stream.scale.coerceAtLeast(1L)
             val rate = stream.rate.coerceAtLeast(1L)
-            val timeUs = n * 1_000_000L * scale / rate
-            val key = entry.flags and KEYFRAME != 0L || (stream.isWmv2 && !videoSeen)
+            val chunkBytes = entries.size[i].coerceAtLeast(0).toLong()
+            val timeUs = if (stream.isWmv2) {
+                val n = ordinal[streamIndex]
+                ordinal[streamIndex] = n + 1
+                n * 1_000_000L * scale / rate
+            } else if (stream.blockAlign > 0) {
+                // strh 的 scale/rate 是采样时钟：tick 数 = 累计字节 / nBlockAlign
+                //（本夹具 scale=1/rate=44100，blockAlign=4；直乘字节会快 4 倍，音频
+                //  时钟错乱 → AudioSink 停摆。与 FFmpeg avidec 的字节折块同源。）
+                val total = audioBytes[streamIndex] + chunkBytes
+                audioBytes[streamIndex] = total
+                total / stream.blockAlign * 1_000_000L * scale / rate
+            } else {
+                val n = ordinal[streamIndex]
+                ordinal[streamIndex] = n + 1
+                n * 1_000_000L * scale / rate
+            }
+            val key = entries.flags[i] and KEYFRAME != 0L || (stream.isWmv2 && !videoSeen)
             if (stream.isWmv2) videoSeen = true
-            val offset = if (base == 0L && !fromIndex) entry.offset else base + entry.offset
+            val offset = if (base == 0L && !fromIndex) entries.offset[i] else base + entries.offset[i]
             // idx1 是**解码顺序**，偏移不保证单调；不单调就不能二分（见 seek）
             if (offset < previousOffset) samplesOffsetSorted = false
             previousOffset = offset
-            samples.add(Sample(streamIndex, offset, entry.size.coerceAtLeast(0), timeUs, key))
+            samples.add(streamIndex, offset, entries.size[i].coerceAtLeast(0), timeUs, key)
         }
-        // 扫描路径的中间列表与 samples 同量级（十几万条），建完就放手，别两份一起驻留
+        // 扫描路径的中间表与 samples 同量级（十几万条），建完就放手，别两份一起驻留
         if (!fromIndex) scanned.clear()
-        Log.d(TAG, "wmv2 samples=${samples.size} base=$base streams=${streams.size} idx1=$fromIndex")
+        Log.d(TAG, "wmv2 samples=${samples.count} base=$base streams=${streams.size} idx1=$fromIndex")
     }
 
     private fun emit(holder: PositionHolder): Int {
@@ -382,7 +512,7 @@ class Wmv2AviExtractor : Extractor {
             val video = streams.firstOrNull { it.isWmv2 } ?: return Extractor.RESULT_END_OF_INPUT
             for (stream in streams) {
                 if (stream.isWmv2) {
-                    val maxIn = samples.filter { it.stream == stream.index }.maxOfOrNull { it.size } ?: 64 * 1024
+                    val maxIn = maxSampleSize(stream.index).coerceAtLeast(64 * 1024)
                     val format = Format.Builder()
                         .setSampleMimeType(MediaNames.MIME_WMV2)
                         .setWidth(abs(stream.width).coerceAtLeast(1))
@@ -401,8 +531,7 @@ class Wmv2AviExtractor : Extractor {
                 } else if (stream.audioMime != null) {
                     // PCM 一帧就是 blockAlign 字节；WMA 的 blockAlign 是超帧上限。
                     // 旧实现只按样本最大值估，遇到空样本表会退 16KB，可能小于一帧。
-                    val sampleMax = samples.filter { it.stream == stream.index }.maxOfOrNull { it.size } ?: 0
-                    val maxIn = maxOf(sampleMax, stream.blockAlign, 1)
+                    val maxIn = maxOf(maxSampleSize(stream.index), stream.blockAlign, 1)
                     val format = Format.Builder()
                         .setSampleMimeType(stream.audioMime)
                         .setMaxInputSize(maxIn)
@@ -420,61 +549,134 @@ class Wmv2AviExtractor : Extractor {
                 }
             }
             val duration = streams.maxOfOrNull { streamDurationUs(it) } ?: 0L
+            buildSeekTable()
             sink.seekMap(object : SeekMap {
                 override fun isSeekable(): Boolean =
-                    keyframesReliable && samples.any { it.keyframe }
+                    keyframesReliable && hasKeyframes
                 override fun getDurationUs(): Long = duration
                 override fun getSeekPoints(timeUs: Long): SeekMap.SeekPoints {
-                    val videoSamples = samples.filter { streams.getOrNull(it.stream)?.isWmv2 == true }
-                    val pool = videoSamples.ifEmpty { samples }
-                    var pick = pool.firstOrNull() ?: return SeekMap.SeekPoints(SeekPoint(0, 0))
-                    for (sample in pool) {
-                        if (!sample.keyframe) continue
-                        if (sample.timeUs <= timeUs) pick = sample else break
+                    // 关键帧寻点表时间升序（逐流 ordinal 递增），二分取"≤ timeUs 的最后一个
+                    // 关键帧"；比旧写法对十几万条逐条线性扫强得多（拖动热路径）
+                    if (seekTimes.isEmpty()) return SeekMap.SeekPoints(SeekPoint(0, 0))
+                    var lo = 0
+                    var hi = seekTimes.size
+                    while (lo < hi) {
+                        val mid = (lo + hi) ushr 1
+                        if (seekTimes[mid] <= timeUs) lo = mid + 1 else hi = mid
                     }
-                    return SeekMap.SeekPoints(SeekPoint(pick.timeUs, pick.offset))
+                    val pick = if (lo == 0) 0 else lo - 1
+                    return SeekMap.SeekPoints(SeekPoint(seekTimes[pick], seekOffsets[pick]))
                 }
             })
             sink.endTracks()
             emitted = true
             Log.d(TAG, "emit ${video.width}x${video.height} extra=${video.extra.size} durationUs=$duration")
         }
-        if (samples.isEmpty()) return Extractor.RESULT_END_OF_INPUT
+        if (samples.count == 0) return Extractor.RESULT_END_OF_INPUT
         sampleCursor = 0
         phase = Phase.SAMPLE
-        holder.position = samples.first().offset
+        holder.position = samples.offset[0]
         return Extractor.RESULT_SEEK
     }
 
     private fun streamDurationUs(stream: StreamInfo): Long {
         val rate = stream.rate
         if (rate <= 0) return 0L
-        val count = if (stream.length > 0) stream.length else samples.count { it.stream == stream.index }.toLong()
-        return count * 1_000_000L * stream.scale.coerceAtLeast(1L) / rate
+        // strh.dwLength 按 scale/rate 时钟计（视频=帧、音频=采样），有的话直接用
+        if (stream.length > 0) return stream.length * 1_000_000L * stream.scale.coerceAtLeast(1L) / rate
+        var count = 0
+        for (i in 0 until samples.count) {
+            if (samples.stream[i] == stream.index) count++
+        }
+        val n = if (!stream.isWmv2 && stream.blockAlign > 0) {
+            // length 缺失的音频：按字节折块
+            var bytes = 0L
+            for (i in 0 until samples.count) {
+                if (samples.stream[i] == stream.index) bytes += samples.size[i].toLong()
+            }
+            bytes / stream.blockAlign
+        } else {
+            count.toLong()
+        }
+        return n * 1_000_000L * stream.scale.coerceAtLeast(1L) / rate
+    }
+
+    /** 某条流的最大样本字节数（emit 估 maxInputSize 用；一遍平铺列） */
+    private fun maxSampleSize(streamIndex: Int): Int {
+        var max = 0
+        for (i in 0 until samples.count) {
+            if (samples.stream[i] == streamIndex && samples.size[i] > max) max = samples.size[i]
+        }
+        return max
+    }
+
+    /**
+     * emit 时把关键帧寻点表从样本表里抽出来（时间升序）：
+     * 有视频轨用视频关键帧；没有视频轨退回全样本池，只认带关键帧位的条目，
+     * 并保证首条池内样本必入表——getSeekPoints 永远有落点（与旧实现 `pick = pool.first()` 一致）。
+     */
+    private fun buildSeekTable() {
+        var hasVideo = false
+        var firstPool = -1
+        for (i in 0 until samples.count) {
+            val isVideo = streams.getOrNull(samples.stream[i])?.isWmv2 == true
+            if (isVideo) {
+                hasVideo = true
+                firstPool = i
+                break
+            }
+        }
+        if (!hasVideo && samples.count > 0) firstPool = 0
+        var keyCount = 0
+        var n = 0
+        for (i in 0 until samples.count) {
+            if (seekEntryEligible(i, hasVideo, firstPool)) {
+                n++
+                if (samples.keyframe[i]) keyCount++
+            }
+        }
+        hasKeyframes = keyCount > 0
+        seekTimes = LongArray(n)
+        seekOffsets = LongArray(n)
+        var w = 0
+        for (i in 0 until samples.count) {
+            if (seekEntryEligible(i, hasVideo, firstPool)) {
+                seekTimes[w] = samples.timeUs[i]
+                seekOffsets[w] = samples.offset[i]
+                w++
+            }
+        }
+    }
+
+    private fun seekEntryEligible(i: Int, hasVideo: Boolean, firstPool: Int): Boolean {
+        if (hasVideo && streams.getOrNull(samples.stream[i])?.isWmv2 != true) return false
+        return samples.keyframe[i] || i == firstPool
     }
 
     private fun readSample(input: ExtractorInput, holder: PositionHolder): Int {
-        if (sampleCursor >= samples.size) return Extractor.RESULT_END_OF_INPUT
-        val sample = samples[sampleCursor]
-        if (input.position != sample.offset) {
-            holder.position = sample.offset
+        if (sampleCursor >= samples.count) return Extractor.RESULT_END_OF_INPUT
+        if (input.position != samples.offset[sampleCursor]) {
+            holder.position = samples.offset[sampleCursor]
             return Extractor.RESULT_SEEK
         }
-        val hdr = ByteArray(8)
-        readFully(input, hdr)
-        val size = u32(hdr, 4).toInt()
+        readFully(input, header8)
+        val size = u32(header8, 4).toInt()
         if (size < 0 || size > MAX_CHUNK) throw IOException("sample too large: $size")
-        val data = ByteArray(size)
-        if (size > 0) readFully(input, data)
+        // scratch 复用：不再每帧 ByteArray(size)（两小时片 = 十几万次分配 + GC 压力）
+        if (size > sampleScratch.size) {
+            sampleScratch = ByteArray(maxOf(size, sampleScratch.size * 2))
+        }
+        val data = sampleScratch
+        if (size > 0) readFully(input, data, 0, size)
         if (size % 2 == 1) skipOne(input)
-        val track = tracks[sample.stream]
+        val track = tracks[samples.stream[sampleCursor]]
         if (track != null) {
-            val bytes = ParsableByteArray(data)
-            track.sampleData(bytes, data.size, TrackOutput.SAMPLE_DATA_PART_MAIN)
+            val bytes = ParsableByteArray(data, size)
+            track.sampleData(bytes, size, TrackOutput.SAMPLE_DATA_PART_MAIN)
             track.sampleMetadata(
-                sample.timeUs,
-                if (sample.keyframe) C.BUFFER_FLAG_KEY_FRAME else 0,
-                data.size,
+                samples.timeUs[sampleCursor],
+                if (samples.keyframe[sampleCursor]) C.BUFFER_FLAG_KEY_FRAME else 0,
+                size,
                 0,
                 null,
             )
@@ -615,10 +817,14 @@ class Wmv2AviExtractor : Extractor {
     }
 
     private fun readFully(input: ExtractorInput, dest: ByteArray) {
+        readFully(input, dest, 0, dest.size)
+    }
+
+    private fun readFully(input: ExtractorInput, dest: ByteArray, off: Int, len: Int) {
         var read = 0
-        while (read < dest.size) {
-            val n = input.read(dest, read, dest.size - read)
-            if (n == C.RESULT_END_OF_INPUT) throw EOFException("need ${dest.size} got $read")
+        while (read < len) {
+            val n = input.read(dest, off + read, len - read)
+            if (n == C.RESULT_END_OF_INPUT) throw EOFException("need $len got $read")
             read += n
         }
     }
@@ -641,6 +847,9 @@ class Wmv2AviExtractor : Extractor {
         const val PEEK_LIMIT = 1_048_576L
         const val MAX_CHUNK = 32L * 1024 * 1024
         const val KEYFRAME = 0x10L
+
+        /** 扫描就地跳读的 payload 上限：常规样本几 KB～几百 KB；超过按 SEEK 跳过 */
+        const val BUILD_INLINE_SKIP_LIMIT = 2L * 1024 * 1024
 
         /** 标准 BITMAPINFOHEADER 长度；extradata 从它之后开始（与 FFmpeg avidec 一致） */
         const val BITMAPINFOHEADER = 40

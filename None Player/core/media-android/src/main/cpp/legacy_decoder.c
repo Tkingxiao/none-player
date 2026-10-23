@@ -370,6 +370,49 @@ Java_com_noneplayer_core_media_legacy_LegacyNative_nativeSend(
     return drain(L);
 }
 
+/* A1 批：direct ByteBuffer 送入。渲染器侧 DecoderInputBuffer 本就是 direct buffer，
+ * 旧路径要先 ByteArray(remaining()) 拷一份再 GetByteArrayRegion 拷进 packet——
+ * 每帧两份全尺寸拷贝；这里 GetDirectBufferAddress + memcpy，只留一份。 */
+JNIEXPORT jint JNICALL
+Java_com_noneplayer_core_media_legacy_LegacyNative_nativeSendDirect(
+        JNIEnv *env, jclass clazz, jlong handle, jobject data, jint size, jlong pts_us, jboolean eos) {
+    (void)clazz;
+    Legacy *L = (Legacy *)handle;
+    if (!L || !L->ctx) return AVERROR(EINVAL);
+    int r;
+    if (eos) {
+        r = avcodec_send_packet(L->ctx, NULL);
+        if (r < 0 && r != AVERROR_EOF) return r;
+        return drain(L);
+    }
+    if (size < 0) return AVERROR(EINVAL);
+    if (av_new_packet(L->pkt, size) < 0) return AVERROR(ENOMEM);
+    if (size > 0 && data) {
+        void *addr = (*env)->GetDirectBufferAddress(env, data);
+        if (!addr) {
+            av_packet_unref(L->pkt);
+            return AVERROR(EINVAL);
+        }
+        memcpy(L->pkt->data, addr, (size_t)size);
+    }
+    L->pkt->pts = pts_us;
+    L->pkt->dts = pts_us;
+    r = avcodec_send_packet(L->ctx, L->pkt);
+    if (r == AVERROR(EAGAIN)) {
+        // A19：先 drain 再重试一次，不把可恢复的背压当失败。
+        int d = drain(L);
+        if (d < 0) {
+            av_packet_unref(L->pkt);
+            return d;
+        }
+        r = avcodec_send_packet(L->ctx, L->pkt);
+    }
+    av_packet_unref(L->pkt);
+    if (r < 0) return r;
+    L->eof = 0;
+    return drain(L);
+}
+
 JNIEXPORT jint JNICALL
 Java_com_noneplayer_core_media_legacy_LegacyNative_nativePending(JNIEnv *env, jclass clazz, jlong handle) {
     (void)env;
