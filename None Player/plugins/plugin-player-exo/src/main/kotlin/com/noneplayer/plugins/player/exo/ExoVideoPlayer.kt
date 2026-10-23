@@ -482,7 +482,9 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
             if (!refreshPausedFrameOnSurface || width <= 0 || height <= 0) return
             refreshPausedFrameOnSurface = false
             // A paused decoder may have already released its only frame to the old surface.
-            if (attachedDisplay != null && videoTracksEnabled &&
+            // E205：装载在途时同样别自动 seek——与 seekTo 的转发闸同理，刚清理过的
+            // controller 吃一记 seek 会踩 flush-after-release 竞态。
+            if (attachedDisplay != null && videoTracksEnabled && !loadPending &&
                 c.playbackState == Player.STATE_READY && !c.playWhenReady
             ) c.seekTo(c.currentPosition)
         }
@@ -1910,6 +1912,12 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         val target = positionMs.coerceAtLeast(0L)
         val targetKey = if (loadPending) loadingTargetKey else _appliedMediaKey.value
         pendingSeek = nextPendingSeek(pendingSeek, target, targetKey)
+        // E205：探测窗口内不向 controller 转发——此刻它要么还挂着上一条媒体（转发会把
+        // seek 打到用户已离开的内容上），要么刚被错误清理 stop/clear。真机实录：热切出
+        // 错后点「重试」，prepare 完紧跟的这记转发 seek 触发 re-prepare 的 onPositionReset
+        // 对已 release 的异步 codec flush（"flush() is valid only at Executing states"）。
+        // pendingSeek 会在装载落地时作为起播位置落实（applyMedia/applyQueue/断连重建）。
+        if (loadPending) return
         activeController?.seekTo(target)
     }
 

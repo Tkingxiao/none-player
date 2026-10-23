@@ -1,0 +1,18 @@
+         1792786647.977 16743 16778 D Wmv2Avi : wmv2 samples=40837 base=0 streams=2 idx1=false
+         1792786647.983 16743 16778 D Wmv2Avi : emit 640x480 extra=4 durationUs=600000000
+         1792786647.983 16743 16778 D FormatProbe: matched=sl4 ch=seekable expectedMime=video/avi expectVideo=true reads=40844 formats=2 mimes=[video/x-np-wmv2, audio/raw]
+         1792786648.405 16743 16832 D Wmv2Avi : wmv2 samples=40840 base=0 streams=2 idx1=false
+         1792786648.411 16743 16832 D Wmv2Avi : emit 640x480 extra=4 durationUs=600000000
+         1792786651.560 16743 16783 D FormatProbe: matched=kf2 ch=seekable expectedMime=video/mp4 expectVideo=true reads=1 formats=2 mimes=[video/avc, audio/mp4a-latm]
+         1792786651.566 16743 16783 D FormatProbe: matched=kf2 ch=seekable expectedMime=video/mp4 expectVideo=true reads=2 formats=2 mimes=[video/avc, audio/mp4a-latm]
+         1792786651.577 16743 16783 D FormatProbe: matched=rn ch=seekable expectedMime=video/avi expectVideo=true reads=14 formats=1 mimes=[video/mjpeg]
+         1792786651.583 16743 16783 D Wmv2Avi : wmv2 samples=45 base=0 streams=1 idx1=false
+         1792786651.583 16743 16783 D Wmv2Avi : emit 320x240 extra=4 durationUs=3000000
+         1792786651.583 16743 16783 D FormatProbe: matched=sl4 ch=seekable expectedMime=video/avi expectVideo=true reads=52 formats=1 mimes=[video/x-np-wmv2]
+         1792786659.485 16743 16907 D Wmv2Avi : wmv2 samples=45 base=5754 streams=1 idx1=true
+         1792786659.485 16743 16907 D Wmv2Avi : emit 320x240 extra=4 durationUs=3000000
+         1792786659.638 16743 16917 D Wmv2Avi : wmv2 samples=45 base=5754 streams=1 idx1=true
+         1792786659.638 16743 16917 D Wmv2Avi : emit 320x240 extra=4 durationUs=3000000
+         1792786666.575 16743 16964 D Wmv2Avi : wmv2 samples=40840 base=0 streams=2 idx1=false
+         1792786666.577 16743 16964 D Wmv2Avi : emit 640x480 extra=4 durationUs=600000000
+== 播放状态采样（P1 播放/P2 双击 seek/P3 热切小夹具/P4 热切回大夹具）==

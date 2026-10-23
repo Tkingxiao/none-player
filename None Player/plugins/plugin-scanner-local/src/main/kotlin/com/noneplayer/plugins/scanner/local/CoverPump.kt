@@ -132,6 +132,9 @@ internal class CoverPump(
 
     private var pumpJob: Job? = null
 
+    /** 最近一次泵协程；cancel 会清空 pumpJob，但 join 还需要它（awaitStopped） */
+    private var lastPumpJob: Job? = null
+
     /** 当前这一轮的许可器（只给测试/诊断看，非 null 时即「泵在跑」） */
     @Volatile
     private var limiterNow: ScanLimiter? = null
@@ -268,6 +271,15 @@ internal class CoverPump(
         }
     }
 
+    /**
+     * E205：等泵**彻底退出**——[cancel] 只发取消信号且会把 [pumpJob] 清空，[awaitIdle]
+     * 随即返回，但协程可能还挂在最后一次 flush/saveSnapshot 中途。removeScanFolder 的
+     * 清空路径需要等它真正结束再删快照，否则排空收尾的落盘会把刚删的快照写回。
+     */
+    suspend fun awaitStopped() {
+        synchronized(lock) { lastPumpJob }?.join()
+    }
+
     // ------------------------------------------------------------------
     // 泵主体
     // ------------------------------------------------------------------
@@ -276,6 +288,7 @@ internal class CoverPump(
         synchronized(lock) {
             if (pumpJob?.isActive == true) return
             pumpJob = scope.launch { runPump() }
+            lastPumpJob = pumpJob
         }
     }
 

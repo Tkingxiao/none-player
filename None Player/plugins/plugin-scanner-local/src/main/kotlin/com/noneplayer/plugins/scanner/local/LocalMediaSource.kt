@@ -449,11 +449,10 @@ class LocalMediaSource(
             cover
         },
         applyCovers = { covers ->
-            // 只按 id 覆盖 coverUri，其余字段用当前列表里的实例：泵写入与扫描提交可能并发，
-            // 整表替换会用旧列表覆盖掉新一轮扫描的结果
-            val current = _media.value
-            val merged = current.map { item -> covers[item.id]?.let { item.copy(coverUri = it) } ?: item }
-            if (merged != current) _media.value = merged
+            // E205：回写与扫描提交段并发——读列表前记代际，写回必须仍在同一代际内完成；
+            // 被提交插队就对着新列表重试合并。无锁 RMW 会把旧列表整表覆盖掉新扫描结果
+            //（增删/时长补读全部回退），代际门内的「复核+写回」杜绝这一窗口。
+            applyCoversUnderCommitGate(commitGate, covers, { _media.value }, { _media.value = it })
         },
         currentItems = { _media.value },
         saveSnapshot = { items -> saveSnapshot(items) },
@@ -1223,6 +1222,10 @@ class LocalMediaSource(
             )
         }
         if (remaining.isEmpty()) {
+            // E205：清空前先停泵并等它退出——泵排空的「落一次快照」会把刚删的快照
+            // 写回（旧列表或空列表），撤销下面的 snapshotFile.delete()。
+            coverPump.cancel()
+            coverPump.awaitStopped()
             File(context.cacheDir, "video_thumbs").listFiles()?.forEach { it.delete() }
             _media.value = emptyList()
             _lastScan.value = null
@@ -1767,14 +1770,29 @@ class LocalMediaSource(
                     warnings.add(WARN_HIDDEN_WALK_FAILED)
                     return
                 }
-                runCatching {
+                // E205：null 游标（provider 契约允许）≠ 空目录——与 query 抛异常同判为
+                // 「本目录没走完整」。否则 childDirs==0、items 空，该目录被记成空叶子
+                // 固化进 ScanWalkIndex，complete 误判还会让孤儿清理把这批文件的
+                // 播放历史/收藏当孤儿删掉。
+                val childCursor = runCatching {
                     context.contentResolver.query(
                         childrenUri,
                         HIDDEN_PROJECTION,
                         null,
                         null,
                         null,
-                    )?.use { cursor ->
+                    )
+                }.getOrElse { t ->
+                    if (t is CancellationException) throw t
+                    Log.w(TAG, "隐藏目录遍历失败（本次扫描不完整）", t)
+                    null
+                }
+                if (childCursor == null) {
+                    partial = true
+                    warnings.add(WARN_HIDDEN_WALK_FAILED)
+                    return
+                }
+                childCursor.use { cursor ->
                         val idCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DOCUMENT_ID)
                         val nameCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_DISPLAY_NAME)
                         val mimeCol = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE)
@@ -1894,12 +1912,6 @@ class LocalMediaSource(
                             }
                         }
                     }
-                }.onFailure { t ->
-                    partial = true
-                    if (t is CancellationException) throw t
-                    Log.w(TAG, "隐藏目录遍历失败（本次扫描不完整）", t)
-                    warnings.add(WARN_HIDDEN_WALK_FAILED)
-                }
                 // W3：只 record「走完整、且没被取消」的目录。leaf = 没有直接子目录（含被 E198 拒的），
                 // 依据是契约 §3 的正确性边界：非叶目录的深层新增只改子目录 mtime、祖先自身 mtime 不动，
                 // 所以非叶目录一律不给复用（下一轮照常下钻）。
@@ -2443,6 +2455,40 @@ private const val PROGRESS_EVERY_MS = 100L
 
 /** 隐藏目录遍历失败的统一告警文案（完整性判定按字面量透传到扫描摘要，勿改） */
 private const val WARN_HIDDEN_WALK_FAILED = "隐藏目录遍历失败，本次扫描不完整"
+
+/**
+ * E205：封面回写的代际安全合并（[LocalMediaSource] 的 applyCovers 用）。
+ *
+ * 泵的回写（读列表 → 合并封面 → 写回）与扫描提交段并发：无锁 RMW 在「读之后、写之前」
+ * 被提交插队，会把旧列表整份覆盖掉刚提交的新扫描结果（本轮的增删、AVI 时长补读全部
+ * 回退）。写回必须发生在与读取时同一代际的串行段内（[ScanCommitGate.commitIfCurrent]
+ * 的复核+执行同锁）；被提交插队（返回 null）就对着新列表重试合并——封面不丢、新结果
+ * 也不被覆盖。重试上限只是防活锁兜底（invalidate 仅在目录集变化时发生，与 250ms 节流
+ * 的回写撞满 8 次几乎不可能）；用尽则放弃本批，等下一次 flush 或扫描自然重放。
+ *
+ * @return 是否成功发布（无变化 / 写回成功为 true；重试用尽为 false）
+ */
+internal suspend fun applyCoversUnderCommitGate(
+    gate: ScanCommitGate,
+    covers: Map<String, String>,
+    currentItems: suspend () -> List<MediaItem>,
+    publish: suspend (List<MediaItem>) -> Unit,
+    maxAttempts: Int = 8,
+): Boolean {
+    if (covers.isEmpty()) return true
+    var attempt = 0
+    while (true) {
+        val generation = gate.currentGeneration()
+        val current = currentItems()
+        val merged = current.map { item -> covers[item.id]?.let { item.copy(coverUri = it) } ?: item }
+        if (merged == current) return true
+        if (gate.commitIfCurrent(generation) { publish(merged) } != null) return true
+        if (++attempt >= maxAttempts) {
+            Log.w(TAG, "封面回写代际重试用尽（$attempt 次），本批 ${covers.size} 条待下轮重放")
+            return false
+        }
+    }
+}
 
 /** 隐藏目录遍历的 projection（SAF children 查询的固定五列） */
 private val HIDDEN_PROJECTION = arrayOf(

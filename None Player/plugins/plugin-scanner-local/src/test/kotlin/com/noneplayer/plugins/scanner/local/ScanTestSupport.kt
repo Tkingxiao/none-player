@@ -441,6 +441,9 @@ internal class FakeDocumentsProvider(
     /** 命中该 docId 的 children 查询直接抛异常（模拟遍历失败）。 */
     var failForDocId: String? = null
 
+    /** 命中该 docId 的 children 查询返回 null（E205：provider 契约允许，不得当空目录）。 */
+    var returnNullForDocId: String? = null
+
     /** 只返回前 N 个子项（模拟预算耗尽/部分结果）；null = 全部返回。 */
     var maxChildren: Int? = null
 
@@ -492,6 +495,10 @@ internal class FakeDocumentsProvider(
         val docId = parentDocId(uri) ?: return MatrixCursor(columns.toTypedArray())
         if (docId == failForDocId) {
             throw IllegalStateException("注入故障：SAF children 查询失败（$docId）")
+        }
+        if (docId == returnNullForDocId) {
+            // E205：provider 对 children 查询返回 null（契约允许）——不是空目录
+            return null
         }
         val all = dynamicChildren?.invoke(docId) ?: childrenByDocId[docId].orEmpty()
         val limited = maxChildren?.let { all.take(it) } ?: all
