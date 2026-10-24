@@ -863,13 +863,19 @@ fun PlayerScreen(
     fun requestExitFullscreen() {
         setFullscreen(false)
     }
-    // ---- 锁屏锁定键（批次 2 / §4.2 顶栏 🔒）----
-    // 锁定语义：屏蔽**全部**舞台手势、返回键与键盘，仅顶部解锁钮可点——口袋/带娃
-    // 场景防误触；控制层与全部弹层的收口见下方 LaunchedEffect（那里各弹层状态才已声明）。
-    var stageLocked by rememberSaveable { mutableStateOf(false) }
+    // ---- 锁定档（批次 2 / §4.2 顶栏 🔒；D3 半锁）----
+    // 整页锁定语义不变：屏蔽**全部**舞台手势、返回键与键盘，仅顶部解锁钮可点——
+    // 口袋/带娃场景防误触；控制层与全部弹层的收口见下方 LaunchedEffect（那里各弹层状态才已声明）。
+    // D3 新增半锁档（只护画面）：屏蔽舞台手势动作，控制层/返回/键盘仍可用，
+    // 解锁钮常驻——见 [StageLockTier]。两档互斥，转移只走枚举上的纯函数。
+    var stageLockTier by rememberSaveable { mutableStateOf(StageLockTier.None) }
+    // 旧读点 `stageLocked`（整页锁）的语义原样保留；半锁只在手势层与徽标常驻上生效。
+    // （局部 val 不能带 getter——组合期各读一次 stageLockTier，档位变化经重组下传。）
+    val stageLocked = stageLockTier.fullLocked
+    val stageHalfLocked = stageLockTier == StageLockTier.Half
     BackHandler(enabled = isFullscreen) { exitFullscreenOrLeave() }
-    // 锁定态吞掉返回（后注册的 BackHandler 优先）：解锁钮是唯一出口，
-    // 防止口袋里按返回悄悄离开播放页
+    // 整页锁定态吞掉返回（后注册的 BackHandler 优先）：解锁钮是唯一出口，
+    // 防止口袋里按返回悄悄离开播放页。半锁**不吞返回**（D3：返回仍可用）。
     BackHandler(enabled = stageLocked) { }
 
     // 系统栏随沉浸状态联动：手机式横屏沉浸（滑动呼出），其余形态显示系统栏
@@ -1648,17 +1654,23 @@ fun PlayerScreen(
         fileInfoVisible = false
     }
 
-    // 锁定语义：屏蔽**全部**舞台手势、返回键与键盘，舞台上仅解锁钮可点——
+    // 锁定语义：整页锁屏蔽**全部**舞台手势、返回键与键盘，舞台上仅解锁钮可点——
     // 口袋/带娃场景防误触。
-    // 锁定瞬间让解锁钮**先亮一下**（controlsVisible=true 只是它的载体：锁定态下
+    // 锁定瞬间让解锁钮**先亮一下**（controlsVisible=true 只是它的载体：整页锁态下
     // 顶/底控制层都被 !stageLocked 挡住，屏幕上只多出解锁钮）——随后由自动隐藏
     // 守护按同一节拍收起；之后单指点按即可再唤出（见 [stageGestures] 的 onTap）。
-    LaunchedEffect(stageLocked) {
-        if (stageLocked) {
-            controlsVisible = true
-            // 审查批次 B1：统一收口。旧清单漏了章节 / 音轨 / 画面三层，
-            // 而锁定态的 BackHandler 会吞返回键 → 残留面板既盖在锁定舞台上又关不掉。
-            dismissAllOverlays()
+    // D3 半锁不收弹层（控制层/弹层仍可用），只亮控制层；说明 toast 放在两个菜单
+    // 入口回调里——放在这里会随旋转/恢复的重组重跑而重复弹出。
+    LaunchedEffect(stageLockTier) {
+        when (stageLockTier) {
+            StageLockTier.Full -> {
+                controlsVisible = true
+                // 审查批次 B1：统一收口。旧清单漏了章节 / 音轨 / 画面三层，
+                // 而锁定态的 BackHandler 会吞返回键 → 残留面板既盖在锁定舞台上又关不掉。
+                dismissAllOverlays()
+            }
+            StageLockTier.Half -> controlsVisible = true
+            StageLockTier.None -> Unit
         }
     }
 
@@ -1690,14 +1702,15 @@ fun PlayerScreen(
 
     /**
      * 两种形态的舞台手势接线（§4.3）——收敛成一处，避免双份漂移。
-     * 锁定态（[stageLocked]）只停"动作"（双击/长按/拖动），**点按例外**：它是解锁钮的
-     * 唤出入口（锁定后屏幕只剩解锁钮，不许点按就等于没有出口）。
+     * 任一锁定档（[StageLockTier.locked]）都停"动作"（双击/长按/拖动）——半锁（D3）
+     * 也停动作，**点按例外**：它是控制层的唤出入口（半锁下控制层仍可用），
+     * 也是整页锁下解锁钮的唤出入口。
      */
     @Composable
     fun stageGestures(): Modifier =
         Modifier.npStageGestures(
             gesturesEnabled = gesturesEnabled,
-            stageLocked = stageLocked,
+            stageLocked = stageLockTier.locked,
             deadZones = stageGestureZones,
             onTap = { controlsVisible = !controlsVisible },
             onDoubleTap = ::onStageDoubleTap,
@@ -1978,13 +1991,15 @@ fun PlayerScreen(
                 if (event.type != KeyEventType.KeyUp) return@onPreviewKeyEvent false
                 // §8.4：`L` 锁定/解锁。**排在"锁定吞键"之前**——否则锁死之后键盘再也解不开，
                 // 出口只剩屏幕中央那颗解锁钮（触控用户找得到，键鼠用户找不到）。
+                // D3：半锁下按 L 升级为整页锁（[StageLockTier.onLockKey]），不是回半锁。
                 if (event.key == Key.L) {
-                    stageLocked = !stageLocked
+                    stageLockTier = stageLockTier.onLockKey()
                     controlsVisible = true
                     return@onPreviewKeyEvent true
                 }
-                // 锁定态吞掉全部按键（与手势屏蔽同语义）：键盘也是误触面
-                if (stageLocked) return@onPreviewKeyEvent true
+                // 整页锁吞掉全部按键（与手势屏蔽同语义）：键盘也是误触面。
+                // 读 stageLockTier 派生值而不是捕获的 val——档位在重组间隙变化时也即时生效。
+                if (stageLockTier.fullLocked) return@onPreviewKeyEvent true
                 // A27：子节点（顶栏/底栏/面板里的可聚焦控件）持焦时，方向键交给焦点系统做
                 // 遍历，空格/回车交给控件做激活；根节点只在"焦点就在自己身上"时承担
                 // seek/音量/播放暂停。Esc/媒体键不受影响（仍然是页面级快捷键）。
@@ -2246,15 +2261,17 @@ fun PlayerScreen(
                     verticalGesture?.let { mode ->
                         VerticalAdjustHud(mode, brightnessState, volumeState, 28.dp)
                     }
-                    // 锁定态（§4.2 🔒）：唯一可点元素是解锁钮
+                    // 锁定态（§4.2 🔒）：整页锁下唯一可点元素是解锁钮
                     // 锁定徽标：随控制层显隐——锁定瞬间亮起（反馈 + 指出解锁位置），
                     // 随后按同一节拍自动隐去；锁定态下单指点按可随时把它唤回。
                     // （旧行为是"常驻不隐"，用户实报"已锁定按钮不会隐藏，一直存在"。）
+                    // D3 半锁例外：解锁钮**常驻**（|| stageHalfLocked）——半锁下控制层
+                    // 照常自动隐藏，常驻的徽标是唯一一直可见的出口。
                     StageLockBadgeHost(
-                        visible = controlsVisible && !inPipMode,
-                        locked = stageLocked,
+                        visible = (controlsVisible || stageHalfLocked) && !inPipMode,
+                        locked = stageLockTier.locked,
                         onUnlock = {
-                            stageLocked = !stageLocked
+                            stageLockTier = stageLockTier.onBadgeTap()
                             controlsVisible = true
                         },
                         modifier = Modifier
@@ -2435,6 +2452,17 @@ fun PlayerScreen(
                                         onPip = {
                                             dismiss()
                                             enterPip()
+                                        },
+                                        // D3 半锁入口（全屏形态）：收菜单再换档，
+                                        // 控制层亮起由 LaunchedEffect(stageLockTier) 承担
+                                        showHalfLock = true,
+                                        halfLocked = stageHalfLocked,
+                                        onHalfLock = {
+                                            dismiss()
+                                            stageLockTier = stageLockTier.onHalfLockMenu()
+                                            if (stageLockTier == StageLockTier.Half) {
+                                                toast.show("半锁：画面手势已屏蔽，点右侧圆钮解除")
+                                            }
                                         },
                                         onFavorite = {
                                             toggleFavorite()
@@ -2689,12 +2717,13 @@ fun PlayerScreen(
                                 VerticalAdjustHud(mode, brightnessState, volumeState, 20.dp)
                             }
                             // 锁定徽标：随控制层显隐（与全屏形态同一语义）；
-                            // 竖屏里视频区之外的信息区不受锁定影响，出口始终不止一个
+                            // 竖屏里视频区之外的信息区不受锁定影响，出口始终不止一个。
+                            // D3 半锁：解锁钮常驻（见全屏形态同款注释）。
                             StageLockBadgeHost(
-                                visible = controlsVisible && !inPipMode,
-                                locked = stageLocked,
+                                visible = (controlsVisible || stageHalfLocked) && !inPipMode,
+                                locked = stageLockTier.locked,
                                 onUnlock = {
-                                    stageLocked = !stageLocked
+                                    stageLockTier = stageLockTier.onBadgeTap()
                                     controlsVisible = true
                                 },
                                 modifier = Modifier
@@ -3265,6 +3294,21 @@ fun PlayerScreen(
                             toast.show(
                                 if (orientationLock == OrientationLock.Landscape) "已锁定横屏" else "已解除锁定",
                             )
+                        },
+                    )
+                    // D3 半锁入口（竖屏形态）：与「锁定横屏」相邻——两把"锁"语义成对；
+                    // 已半锁时行文变「解除半锁」，不给第二次点击造成"更锁"的歧义
+                    add(
+                        QuickTileSpec(
+                            icon = NpIcon.Lock,
+                            label = if (stageHalfLocked) "解除半锁" else "半锁",
+                            selected = stageHalfLocked,
+                        ) {
+                            moreSheetVisible = false
+                            stageLockTier = stageLockTier.onHalfLockMenu()
+                            if (stageLockTier == StageLockTier.Half) {
+                                toast.show("半锁：画面手势已屏蔽，点右侧圆钮解除")
+                            }
                         },
                     )
                     add(

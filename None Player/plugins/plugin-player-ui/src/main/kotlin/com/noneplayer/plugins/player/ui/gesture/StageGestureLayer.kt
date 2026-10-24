@@ -56,6 +56,7 @@ enum class StageVerticalMode { Brightness, Volume }
 @Composable
 internal fun Modifier.npStageGestures(
     gesturesEnabled: Boolean,
+    /** 任一锁定档（整页锁或 D3 半锁）都停"动作"；点按永远保留（唤控制层/解锁钮）。 */
     stageLocked: Boolean = false,
     deadZones: StageGestureZones = StageGestureZones.Default,
     onTap: () -> Unit = {},

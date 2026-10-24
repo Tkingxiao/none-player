@@ -854,6 +854,14 @@ fun FsMainMenuContent(
     onFavorite: () -> Unit,
     onScreenshot: () -> Unit,
     onSleep: () -> Unit,
+    /**
+     * D3 半锁行（「只护画面」轻一档）：只在有画面区手势的形态渲染——播放页两个形态
+     * 传 true；右栏内嵌播放器的画面区没有手势（只有点按），半锁在那里无从生效，
+     * 缺省不渲染，不摆一个点了没反应的假入口。
+     */
+    showHalfLock: Boolean = false,
+    halfLocked: Boolean = false,
+    onHalfLock: () -> Unit = {},
     /** 插件贡献的选项行（[PlaybackMenuContributor]，如弹幕开关）；渲染在列表尾部 */
     contributors: List<PlaybackMenuContributor> = emptyList(),
     contributorMedia: MediaItem? = null,
@@ -884,6 +892,14 @@ fun FsMainMenuContent(
         FsMenuRow(label = "章节", icon = NpIcon.ListView, chevron = true, onClick = { onPage(FsMenuPage.CHAPTERS) })
     }
     FsMenuRow(label = "画中画", icon = NpIcon.Pip, onClick = onPip)
+    if (showHalfLock) {
+        FsMenuRow(
+            label = if (halfLocked) "解除半锁" else "半锁（只护画面）",
+            icon = NpIcon.Lock,
+            active = halfLocked,
+            onClick = onHalfLock,
+        )
+    }
     FsMenuRow(label = "截图", icon = NpIcon.Screenshot, onClick = onScreenshot)
     FsMenuRow(
         label = sleepLabel,
