@@ -1,0 +1,71 @@
+E213 ASS 第二期富文本 真机证据（60dd2f94，2026-10-25）
+================================================================
+
+设备 60dd2f94（小米平板 6，MIUI/API 34）。安装 release：
+adb -s 60dd2f94 install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+
+----------------------------------------------------------------
+1. 改动
+----------------------------------------------------------------
+- `SubtitleCue` 新增 `SubtitleCueStyle`：主色 / 盒式背景 / 粗体 / 斜体 / 下划线 / 删除线。
+- `ExoVideoPlayer.toKernelCue` 把 media3 SSA 解析出的整条 span 样式带出，不再只取首个
+  前景色、也不再在 UI 侧按用户颜色覆盖 ASS 颜色。
+- `SubtitleLayer`：容器颜色优先，用户颜色只补缺省；容器斜体与用户斜体取或；
+  粗体/下划线/删除线/盒式背景按容器绘制；ASS 盒式背景优先于用户背景条。
+- 测试：`SubtitlePaintSpecTest` 4 项（ASS 颜色优先 / 用户颜色补缺省 / 装饰透传 /
+  无容器样式）。
+
+----------------------------------------------------------------
+2. 门禁读数
+----------------------------------------------------------------
+./gradlew test lint assembleDebug assembleRelease --offline
+BUILD SUCCESSFUL in 3m 38s
+test：144 套件 / 1016 项 / 0 失败 / 0 error
+lint：15 份报告 / 0 issue
+release：29,191,911 B
+debug：66,222,573 B
+
+----------------------------------------------------------------
+3. 真机夹具与现象
+----------------------------------------------------------------
+夹具放在 /sdcard/Movies/wl-ps-fresh.ass（与 wl-ps-fresh.mpg 同名，自动挂载）：
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour,
+        BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle,
+        BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: NpTest,Arial,48,&H0000FF00,&H000000FF,&H000000FF,&H00000000,1,1,1,0,100,100,
+       0,0,3,1,0,2,10,10,20,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:00.00,0:00:29.00,NpTest,,0,0,0,,ASS RICH TEXT
+
+（ASS 颜色是 BGR：Primary &H0000FF00 = 绿，Outline &H000000FF = 红；
+ BorderStyle=3 才是 media3 认的盒式背景，BorderStyle=4 会被当作非盒式。）
+
+起播 deep link：
+noneplayer://player?uri=content%3A%2F%2Fmedia%2Fexternal%2Fvideo%2Fmedia%2F1000015406&fs=1
+
+暂停在 position=1605ms，截图：
+screenshots/e213-2026-10-25/60dd2f94/ass-richtext.png
+
+可见：
+- 「ASS RICH TEXT」为**绿色**（ASS PrimaryColour），不是用户默认的白色——
+  容器颜色优先规则生效；
+- 文本**粗体 + 斜体 + 下划线**同时呈现；
+- 文本后方是**红色盒式背景**（OutlineColour + BorderStyle=3），不是应用的
+  黑色半透明背景条——容器盒式背景优先规则生效。
+- 视频本身是 10s 测试图，cue 0–29s；播放结束后字幕随会话清空属预期行为。
+
+----------------------------------------------------------------
+4. 边界
+----------------------------------------------------------------
+- media3 1.11.1 的 SSA 解析把样式 span 全量铺在整条 Cue 上，inline 覆盖块
+  （\c、\k 等）在解析前被剥掉；因此实现是"整条 Cue 一套样式"，没有伪造逐字 span。
+- \pos 的静态位置由 media3 带出；卡拉OK/旋转/移动/缩放仍只由
+  `SubtitleEffectDetector` 提示"含特效只显示文本"，本轮未做逐字动画。
+- ASS 字号/边距不参与排版（沿用用户字号/位置设置）。
+- 播放页 ⋯ 菜单的「移除」tile 已在 E212 删除并由本包编译覆盖；本轮点击右上角 ⋯
+  未成功打开菜单（截屏时控制层已自动隐藏/点击窗口不稳定），未做菜单截图取证。
+- 中途 ADB 掉为 unauthorized，已重新授权后继续；无 FATAL/AndroidRuntime。

@@ -7,7 +7,12 @@ import android.content.Intent
 import android.os.Bundle
 import android.text.Layout
 import android.text.Spanned
+import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
+import android.text.style.StrikethroughSpan
+import android.text.style.StyleSpan
+import android.text.style.UnderlineSpan
+import android.graphics.Typeface
 import android.view.SurfaceView
 import android.view.TextureView
 import androidx.annotation.OptIn
@@ -42,6 +47,7 @@ import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.PlayerConnection
 import com.noneplayer.kernel.api.SubtitleCue
+import com.noneplayer.kernel.api.SubtitleCueStyle
 import com.noneplayer.kernel.api.NpLoopMode
 import com.noneplayer.kernel.api.NpMediaButtonAction
 import com.noneplayer.kernel.api.NpSubtitleFormat
@@ -2339,21 +2345,46 @@ private fun Cue.toKernelCue(): SubtitleCue {
         line.takeIf { it != Cue.DIMEN_UNSET && lineType == Cue.LINE_TYPE_FRACTION },
     )
     val positionFraction = npCueFraction(position.takeIf { it != Cue.DIMEN_UNSET })
-    // media3 的 SSA 解码器把 ASS 主色放进 ForegroundColorSpan；只取首个前景色当
-    // "主色"。用户显式改过颜色时渲染层优先用户值（见 SubtitleLayer）。
-    val textColorArgb = (text as? Spanned)
-        ?.let { spanned ->
-            spanned.getSpans(0, spanned.length, ForegroundColorSpan::class.java)
-                ?.firstOrNull()
-                ?.foregroundColor
-        }
-        .let { npCueColorArgb(it) }
+    // A12 第二期：media3 的 SSA 解析把整条 Cue 的样式 span 全量铺在文本上——主色、
+    // BorderStyle=4 的盒式背景、粗体/斜体、下划线、删除线。这里不再只取首个主色，
+    // 而是把整组样式带出去；逐字 span 并不存在（inline 覆盖标签在解析前已被剥掉）。
+    val cueStyle = (text as? Spanned)?.let(::npCueStyle)
     return SubtitleCue(
         text = text?.toString(),
         alignment = alignment,
         lineFraction = lineFraction,
         positionFraction = positionFraction,
-        textColorArgb = textColorArgb,
+        cueStyle = cueStyle,
+    )
+}
+
+/** Spanned 文本 → 整条 Cue 样式；容器没给任何样式时返回 null（渲染层用用户设置）。 */
+private fun npCueStyle(spanned: Spanned): SubtitleCueStyle? {
+    val length = spanned.length
+    fun <T> firstSpan(type: Class<T>): T? =
+        spanned.getSpans(0, length, type).firstOrNull()
+
+    val color = firstSpan(ForegroundColorSpan::class.java)
+        ?.foregroundColor
+        ?.let(::npCueColorArgb)
+    val background = firstSpan(BackgroundColorSpan::class.java)
+        ?.backgroundColor
+        ?.let(::npCueColorArgb)
+    val typefaceStyle = firstSpan(StyleSpan::class.java)?.style
+    val bold = typefaceStyle == Typeface.BOLD || typefaceStyle == Typeface.BOLD_ITALIC
+    val italic = typefaceStyle == Typeface.ITALIC || typefaceStyle == Typeface.BOLD_ITALIC
+    val underline = firstSpan(UnderlineSpan::class.java) != null
+    val strikethrough = firstSpan(StrikethroughSpan::class.java) != null
+    if (color == null && background == null && !bold && !italic && !underline && !strikethrough) {
+        return null
+    }
+    return SubtitleCueStyle(
+        colorArgb = color,
+        backgroundColorArgb = background,
+        bold = bold,
+        italic = italic,
+        underline = underline,
+        strikethrough = strikethrough,
     )
 }
 

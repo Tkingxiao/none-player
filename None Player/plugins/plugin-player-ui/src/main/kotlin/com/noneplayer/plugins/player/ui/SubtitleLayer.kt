@@ -30,6 +30,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.IntOffset
@@ -37,7 +38,6 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
 import com.noneplayer.core.media.SubtitleEffectInfo
 import com.noneplayer.core.media.SubtitleEffectNotice
 import com.noneplayer.core.ui.NpRadius
@@ -45,6 +45,7 @@ import com.noneplayer.kernel.api.CuePlacement
 import com.noneplayer.kernel.api.NpTrackType
 import com.noneplayer.kernel.api.SubtitleAlignment
 import com.noneplayer.kernel.api.SubtitleCue
+import com.noneplayer.kernel.api.SubtitleCueStyle
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.ui.api.PlaybackTextCueArbiter
 import com.noneplayer.kernel.ui.api.TextCueClaim
@@ -178,17 +179,17 @@ fun SubtitleLayer(
 
     Box(modifier = modifier.fillMaxSize()) {
         // 文本字幕（A12 第一期）：按 Cue 自己的对齐 / 垂直位置摆放，缺省才是底部居中。
-        // 用户显式改过颜色时优先用户值；否则吃容器给的主色（ASS ForegroundColorSpan）。
+        // A12 第二期：容器（ASS）样式优先——颜色/粗斜体/下划线/删除线/盒式背景由 Cue 带走；
+        // 用户颜色只补容器没给颜色的缺省。
         textCues.forEach { cue ->
-            val cueColor = if (style.colorArgb != DEFAULT_SUBTITLE_COLOR_ARGB) {
-                Color(style.colorArgb.toInt())
-            } else {
-                cue.textColorArgb?.let { Color(it.toInt()) } ?: Color(style.colorArgb.toInt())
-            }
             TextCue(
                 cue = cue,
                 style = style,
-                color = cueColor,
+                paint = subtitlePaintSpec(
+                    userColorArgb = style.colorArgb,
+                    userItalic = style.italic,
+                    cueStyle = cue.cueStyle,
+                ),
             )
         }
 
@@ -239,14 +240,43 @@ fun SubtitleLayer(
  *
  * 摆放用 `layout` 相位完成（文字更新本来低频；不额外套 `BoxWithConstraints`）。
  */
+/**
+ * 一条文本 Cue 的最终画笔（A12 第二期）：用户设置与容器样式的唯一合并口径。
+ *
+ * - 颜色：容器（ASS/SSA）给了就用容器的，用户颜色只在容器没给时生效；
+ * - 斜体：用户或容器任一为真即斜体（用户偏好不能抹掉 ASS 的斜体）；
+ * - 粗体 / 下划线 / 删除线 / 盒式背景：只来自容器。
+ */
+internal data class SubtitlePaintSpec(
+    val colorArgb: Long,
+    val italic: Boolean,
+    val bold: Boolean,
+    val underline: Boolean,
+    val strikethrough: Boolean,
+    val backgroundColorArgb: Long?,
+)
+
+internal fun subtitlePaintSpec(
+    userColorArgb: Long,
+    userItalic: Boolean,
+    cueStyle: SubtitleCueStyle?,
+): SubtitlePaintSpec = SubtitlePaintSpec(
+    colorArgb = cueStyle?.colorArgb ?: userColorArgb,
+    italic = userItalic || cueStyle?.italic == true,
+    bold = cueStyle?.bold == true,
+    underline = cueStyle?.underline == true,
+    strikethrough = cueStyle?.strikethrough == true,
+    backgroundColorArgb = cueStyle?.backgroundColorArgb,
+)
+
 @Composable
 private fun TextCue(
     cue: SubtitleCue,
     style: SubtitleStyle,
-    color: Color,
+    paint: SubtitlePaintSpec,
 ) {
     val density = LocalDensity.current
-    val textStyle = SubtitleTextStyle(color = color, scale = style.scale, italic = style.italic)
+    val textStyle = SubtitleTextStyle(paint = paint, scale = style.scale)
     val strokeStyle = textStyle.copy(
         color = Color.Black,
         drawStyle = Stroke(width = with(density) { 3.dp.toPx() }),
@@ -291,13 +321,19 @@ private fun TextCue(
     ) {
         // 描边与正文必须**叠在同一行**上：用 Column 排会把它变成第二条字幕（真机实报
         // "字幕多出一行黑框"），正文也被顶离用户设定的垂直位置。
+        // ASS 盒式背景优先于用户背景条（BorderStyle=4 是字幕作者明确要求的底色）。
+        val cueBackground = paint.backgroundColorArgb?.let { Color(it.toInt()) }
         Box(
-            modifier = if (style.background) {
-                Modifier
+            modifier = when {
+                cueBackground != null -> Modifier
+                    .background(cueBackground, RoundedCornerShape(2.dp))
+                    .padding(horizontal = 6.dp, vertical = 1.dp)
+
+                style.background -> Modifier
                     .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(NpRadius.chip))
                     .padding(horizontal = 8.dp, vertical = 2.dp)
-            } else {
-                Modifier
+
+                else -> Modifier
             },
             contentAlignment = Alignment.TopStart,
         ) {
@@ -322,19 +358,29 @@ private fun TextCue(
 }
 
 /**
- * 字幕文本样式（E131：由「字幕设置」面板驱动）。
+ * 字幕文本样式（E131 + A12 第二期）。
  *
- * 基准仍是设计稿的白字 + 阴影（暗背景可读），新增三项用户可调：
- * 颜色 / 大小倍率 / 斜体。行高按同一倍率缩放，否则放大字号会挤成一行。
+ * 基准仍是设计稿的白字 + 阴影（暗背景可读）；用户可调颜色 / 大小倍率 / 斜体，
+ * 容器样式再叠加粗体、下划线、删除线（颜色与斜体已由 [SubtitlePaintSpec] 合并）。
+ * 行高按同一倍率缩放，否则放大字号会挤成一行。
  */
-private fun SubtitleTextStyle(color: Color, scale: Float, italic: Boolean): TextStyle {
+private fun SubtitleTextStyle(paint: SubtitlePaintSpec, scale: Float): TextStyle {
     val size = 20f * scale
+    val decoration = when {
+        paint.underline && paint.strikethrough ->
+            TextDecoration.combine(listOf(TextDecoration.Underline, TextDecoration.LineThrough))
+
+        paint.underline -> TextDecoration.Underline
+        paint.strikethrough -> TextDecoration.LineThrough
+        else -> null
+    }
     return TextStyle(
-        color = color,
+        color = Color(paint.colorArgb.toInt()),
         fontSize = size.sp,
         lineHeight = (size * 1.3f).sp,
-        fontWeight = FontWeight.Medium,
-        fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal,
+        fontWeight = if (paint.bold) FontWeight.Bold else FontWeight.Medium,
+        fontStyle = if (paint.italic) FontStyle.Italic else FontStyle.Normal,
+        textDecoration = decoration,
         shadow = Shadow(
             color = Color.Black.copy(alpha = 0.9f),
             offset = Offset(0f, 1.5f),

@@ -16,6 +16,26 @@ import androidx.compose.runtime.Immutable
 /** 文本 Cue 的水平对齐（A12 第一期：按容器已有的对齐摆放，缺省居中） */
 enum class SubtitleAlignment { LEFT, CENTER, RIGHT }
 
+/**
+ * 容器给**整条 Cue** 的样式（A12 第二期）。
+ *
+ * media3 1.11.1 的 SSA/ASS 解析把主色、边框底色、粗体/斜体、下划线、删除线都作为
+ * 全条覆盖的 span 给出（`SsaParser.createCue`），没有逐字区间；因此这里按"一条 Cue
+ * 一套样式"承载，而不是模拟 AnnotatedString 的区间。卡拉OK/`\move`/旋转等逐字或
+ * 动画特效仍由 [com.noneplayer.core.media.SubtitleEffectDetector] 提示不支持。
+ */
+@Immutable
+data class SubtitleCueStyle(
+    /** 主色（ARGB）；ASS `Style:` 的 PrimaryColour / `\c` 覆盖后的结果 */
+    val colorArgb: Long? = null,
+    /** 边框底色（ARGB）；仅 ASS `BorderStyle=4` 的盒式背景，普通描边不算 */
+    val backgroundColorArgb: Long? = null,
+    val bold: Boolean = false,
+    val italic: Boolean = false,
+    val underline: Boolean = false,
+    val strikethrough: Boolean = false,
+)
+
 @Immutable
 data class SubtitleCue(
     val text: String? = null,
@@ -31,10 +51,10 @@ data class SubtitleCue(
     /** 容器声明的水平中心位置（0..1）；null = 按 [alignment] 铺满可用宽度 */
     val positionFraction: Float? = null,
     /**
-     * Cue 自带的主色（ARGB，取自文本 span，A12 第一期只取首个前景色）。
-     * null = 容器没给颜色；用户显式选过颜色时以用户设置为准。
+     * Cue 自带的整条样式（ASS/SSA 的颜色/粗斜体/下划线/删除线/盒式背景）。
+     * null = 容器没给样式；ASS 有颜色时**优先于用户设置**（用户颜色只补缺省）。
      */
-    val textColorArgb: Long? = null,
+    val cueStyle: SubtitleCueStyle? = null,
 )
 
 /** 归一化摆放（0..1，相对视频画面），用于位图字幕等需要按画面定位的场景 */
