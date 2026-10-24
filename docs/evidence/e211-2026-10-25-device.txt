@@ -1,0 +1,67 @@
+E211 备份排除与后台任务收口 真机证据（60dd2f94，2026-10-25）
+================================================================
+
+设备 60dd2f94（小米平板 6，MIUI/API 34）。安装 release：
+adb -s 60dd2f94 install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+
+----------------------------------------------------------------
+1. 改动读数
+----------------------------------------------------------------
+- SAF 扫描目录从 `none_player_settings` 拆到独立 DataStore
+  `files/datastore/saf_folders.preferences_pb`；旧键 `scan_folder_uris` /
+  `scan_folder_uri` 由 AppSettings 初始化时原子迁移并删除。
+- 备份排除：`app/src/main/res/xml/backup_rules.xml`（API ≤30）与
+  `data_extraction_rules.xml`（API 31+，cloud + D2D）排除 saf 文件、扫描快照/
+  索引/车道预设/负面缓存（含 .tmp）、scan_trace.log、none_player.db(-wal/-shm)。
+- 删除无消费者的 `BackgroundTask` 扩展点与 R8 keep 登记：
+  扫描走 StartupTaskPlugin，转码按 D-6 走前台服务，没有 WorkManager 消费者。
+- 恢复后行为：saf 文件不在备份里，旧键已迁走 → 扫描目录为空，媒体库回到
+  「选择要观看的文件夹」空态；重新授权后 `addScanFolder` 照常持久化。
+
+----------------------------------------------------------------
+2. 门禁读数
+----------------------------------------------------------------
+./gradlew test lint assembleDebug assembleRelease --offline
+BUILD SUCCESSFUL in 5m 13s
+test：143 套件 / 1012 项 / 0 失败 / 0 error（+1 套件 / +3 项：ScanFoldersFromTest）
+lint：15 份报告 / 0 issue（备份 XML 与 manifest 属性通过校验）
+release：29,191,911 B
+debug：66,222,573 B
+
+----------------------------------------------------------------
+3. 旧安装迁移（真机）
+----------------------------------------------------------------
+- 保留原应用数据安装 release（覆盖安装，不清数据）。
+- 冷启库页：`扫描执行` logcat
+  `ScanTrace: scan enter ... folders=1 generation=0`
+  `phase=PREPARING done validFolders=1 revoked=0`
+  `phase=MEDIA_STORE done storeItems=96`
+  `index loaded entries=68`
+  → 旧 DataStore 里的 Movies 树已迁入独立文件，扫描目录没有丢。
+- 库页读数：94 个视频 · 1 个文件夹；Movies 96 项。
+  截图：screenshots/e211-2026-10-25/60dd2f94/library-after-migration.png
+- deep link 起播 wl-mpeg2-mp2.mpg：
+  state=PlaybackState {state=PLAYING(3), position=3562, ...}
+  logcat 无 FATAL / AndroidRuntime / SQLiteException / DataStore 异常。
+
+----------------------------------------------------------------
+4. Auto Backup 执行
+----------------------------------------------------------------
+- 设备默认备份管理器关闭、当前 transport 为 GMS（无账号 → Transport error）。
+- 临时切到本地 transport 验证规则可解析（测试后恢复原状）：
+  adb shell bmgr transport com.android.localtransport/.LocalTransport
+  adb shell bmgr enable true
+  adb shell bmgr backupnow com.noneplayer.app
+  → Package com.noneplayer.app ... result: Success（约 474 KB）
+  adb shell bmgr enable false
+  adb shell bmgr transport com.google.android.gms/.backup.BackupTransportService
+- 说明：本地 transport 的备份数据不可读（无 root），**未逐文件核对排除结果**；
+  排除口径由 XML + lint + 单测（恢复后目录为空）覆盖。
+
+----------------------------------------------------------------
+5. 边界
+----------------------------------------------------------------
+- 未在第二台设备上走真实恢复（无可用 AOSP/备用机）；「恢复后空态 + 重新授权」
+  由 `ScanFoldersFromTest` 的空值分支 + 现有库页空态路径覆盖，未拍摄恢复现场。
+- 备份 excluded 的 DB 意味着换机后历史/收藏不迁移（mediaKey/uri 绑定本机，
+  迁移会指向错误媒体）；这是有意取舍，不是遗漏。

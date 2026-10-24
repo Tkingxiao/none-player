@@ -16,11 +16,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 /**
  * E65 修复：此前未配置 corruptionHandler——偏好文件一旦因异常关机/存储故障等损坏，
@@ -88,6 +90,35 @@ private val Context.dataStore: androidx.datastore.core.DataStore<androidx.datast
     corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
 )
 
+/**
+ * SAF 扫描目录单独落盘（E211）。
+ *
+ * 持久化 URI 授权不会随 Auto Backup / 换机迁移，恢复出来的树地址在新设备上必然失效。
+ * 因此 `scan_folder_uris` 与其余偏好分文件存放，备份规则按**文件**排除这一份
+ * （`app/src/main/res/xml/backup_rules.xml`），主题/字幕等可迁移偏好不受影响。
+ */
+private val Context.safFoldersStore: androidx.datastore.core.DataStore<androidx.datastore.preferences.core.Preferences> by preferencesDataStore(
+    name = "saf_folders",
+    corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+)
+
+/**
+ * 扫描目录的读取口径（E211）：独立文件优先，旧键仅作迁移兜底。
+ *
+ * 旧版本把目录存在主设置里；迁移协程会把旧值复制到 [Context.safFoldersStore] 并删除旧键。
+ * 备份恢复后独立文件为空、旧键已被迁移删除 → 返回空列表，媒体库回到「选择要观看的文件夹」
+ * 空态，用户重新授权即可，不会拿着新设备上不存在的树地址去扫描。
+ */
+internal fun scanFoldersFrom(
+    safValue: String?,
+    legacyValue: String?,
+    legacySingle: String?,
+): List<String> =
+    (safValue ?: legacyValue ?: legacySingle)
+        ?.split('\n')
+        ?.filter { it.isNotBlank() }
+        .orEmpty()
+
 /** 媒体库排序方式 */
 enum class SortMode(val label: String, val usesPlaybackHistory: Boolean = false) {
     NAME("名称"),
@@ -127,6 +158,28 @@ class AppSettings(private val context: Context) {
 
     /** A25：设置侧共享 stateIn 的作用域（进程级，不随页面取消）。 */
     private val settingsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+        // E211 一次性迁移：旧版本的扫描目录在主设置文件里。先复制到独立文件，再删旧键；
+        // 复制走 DataStore.edit 的原子读改写，与 setScanFolders 并发时不会覆盖用户新值。
+        settingsScope.launch {
+            runCatching {
+                val legacy = context.dataStore.data.first()
+                val legacyValue = legacy[KEY_SCAN_FOLDERS] ?: legacy[KEY_SCAN_FOLDER]
+                context.safFoldersStore.edit { prefs ->
+                    if (prefs[KEY_SCAN_FOLDERS] == null && legacyValue != null) {
+                        prefs[KEY_SCAN_FOLDERS] = legacyValue
+                    }
+                }
+                if (context.safFoldersStore.data.first()[KEY_SCAN_FOLDERS] != null) {
+                    context.dataStore.edit {
+                        it.remove(KEY_SCAN_FOLDERS)
+                        it.remove(KEY_SCAN_FOLDER)
+                    }
+                }
+            }
+        }
+    }
 
     companion object {
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
@@ -477,20 +530,28 @@ class AppSettings(private val context: Context) {
     /** 无阻塞读；未落地时为 null（由 UI 出骨架，不出任何"未配置"结论） */
     val scanFolderUrisSnapshot: List<String>? get() = _scanFolderUrisSnapshot.value
 
-    val scanFolderUris: Flow<List<String>> = context.dataStore.data
-        .map { prefs ->
-            val stored = prefs[KEY_SCAN_FOLDERS]
-            if (stored != null) {
-                stored.split('\n').filter { it.isNotBlank() }
-            } else {
-                prefs[KEY_SCAN_FOLDER]?.let { listOf(it) } ?: emptyList()
-            }
-        }.onEach { _scanFolderUrisSnapshot.value = it }
+    val scanFolderUris: Flow<List<String>> = combine(
+        context.safFoldersStore.data,
+        context.dataStore.data,
+    ) { saf, prefs ->
+        scanFoldersFrom(
+            safValue = saf[KEY_SCAN_FOLDERS],
+            legacyValue = prefs[KEY_SCAN_FOLDERS],
+            legacySingle = prefs[KEY_SCAN_FOLDER],
+        )
+    }.distinctUntilChanged().onEach { _scanFolderUrisSnapshot.value = it }
 
+    /**
+     * 写独立文件后清掉主设置里的旧键：否则换机恢复时旧键会绕过备份排除规则，
+     * 把新设备上无效的 SAF 树地址带回来。
+     */
     suspend fun setScanFolders(uris: List<String>) {
-        context.dataStore.edit { prefs ->
-            prefs[KEY_SCAN_FOLDERS] = uris.joinToString("\n")
-            prefs.remove(KEY_SCAN_FOLDER)
+        context.safFoldersStore.edit { it[KEY_SCAN_FOLDERS] = uris.joinToString("\n") }
+        runCatching {
+            context.dataStore.edit { prefs ->
+                prefs.remove(KEY_SCAN_FOLDERS)
+                prefs.remove(KEY_SCAN_FOLDER)
+            }
         }
     }
 

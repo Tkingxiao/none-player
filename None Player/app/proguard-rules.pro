@@ -16,7 +16,6 @@
 # **新增任何 `ExtensionPoint` 子接口（含 kernel-ui-api 包）时必须在此登记**，
 # 否则同一故障会以另一种面貌回归。
 -keep,allowobfuscation interface com.noneplayer.kernel.api.ExtensionPoint
--keep,allowobfuscation interface com.noneplayer.kernel.api.BackgroundTask
 -keep,allowobfuscation interface com.noneplayer.kernel.api.CacheProvider
 -keep,allowobfuscation interface com.noneplayer.kernel.api.ContextMenuItem
 -keep,allowobfuscation interface com.noneplayer.kernel.api.MediaSourceProvider

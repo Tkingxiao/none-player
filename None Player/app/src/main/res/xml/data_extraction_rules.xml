@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ 的云备份 / D2D 排除规则（E211），与 backup_rules.xml 同一口径：
+  SAF 授权、扫描索引、历史库都是设备本地状态，恢复到新设备只会得到失效地址。
+  云端备份与设备间迁移都排除，避免两条路径行为不一致。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="file" path="datastore/saf_folders.preferences_pb" />
+        <exclude domain="file" path="scan_index.json" />
+        <exclude domain="file" path="scan_index.json.tmp" />
+        <exclude domain="file" path="scan_walk_index.json" />
+        <exclude domain="file" path="scan_walk_index.json.tmp" />
+        <exclude domain="file" path="scan_lanes.json" />
+        <exclude domain="file" path="scan_lanes.json.tmp" />
+        <exclude domain="file" path="cover_negative.json" />
+        <exclude domain="file" path="cover_negative.json.tmp" />
+        <exclude domain="file" path="scan_trace.log" />
+        <exclude domain="database" path="none_player.db" />
+        <exclude domain="database" path="none_player.db-wal" />
+        <exclude domain="database" path="none_player.db-shm" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="file" path="datastore/saf_folders.preferences_pb" />
+        <exclude domain="file" path="scan_index.json" />
+        <exclude domain="file" path="scan_index.json.tmp" />
+        <exclude domain="file" path="scan_walk_index.json" />
+        <exclude domain="file" path="scan_walk_index.json.tmp" />
+        <exclude domain="file" path="scan_lanes.json" />
+        <exclude domain="file" path="scan_lanes.json.tmp" />
+        <exclude domain="file" path="cover_negative.json" />
+        <exclude domain="file" path="cover_negative.json.tmp" />
+        <exclude domain="file" path="scan_trace.log" />
+        <exclude domain="database" path="none_player.db" />
+        <exclude domain="database" path="none_player.db-wal" />
+        <exclude domain="database" path="none_player.db-shm" />
+    </device-transfer>
+</data-extraction-rules>
