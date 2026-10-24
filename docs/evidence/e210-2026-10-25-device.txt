@@ -1,0 +1,70 @@
+E210 播放页拆分 真机证据（60dd2f94，2026-10-25）
+================================================================
+
+设备 60dd2f94（小米平板 6，SD860/MIUI/API 34）。安装 release：
+adb -s 60dd2f94 install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+
+----------------------------------------------------------------
+1. 拆分读数
+----------------------------------------------------------------
+PlayerScreen.kt：6460 → 3971 行（-2489，-38.5%），页根不再承载控制层/舞台覆盖层/
+错误面/结束面板/字幕设置/文件信息卡/面板动效/底栏实现。
+
+新增文件（均为同包 internal）：
+- PlayerBarChrome.kt      880 行  底栏常量/按钮/传输组/倍速行/时间码/播放条/常驻 playerbar
+- PlayerStageOverlays.kt  398 行  亮度音量 HUD / seek 气泡 / 续播提示 / 中央播放钮 /
+                                  手势胶囊 / 锁屏徽标 / 倍速 pill / 动作钮
+- SubtitleSettingsPanel.kt 451 行 字幕设置面板与状态行
+- EpisodePanel.kt         349 行  结束面板 / 选集行 / 声柱
+- PlayerErrorChrome.kt    260 行  连接横幅 + 失败面板 + 面板按钮
+- PlayerStage.kt          234 行  VideoStage / PauseGlyph / 封面飞行帧
+- FileInfoCard.kt         139 行  文件信息卡
+- PanelMotion.kt          113 行  面板入场 / 对称进出场
+
+校验：
+- 7 个搬移函数（VideoStage / PauseGlyph / ConnectionBanner / ErrorPanel /
+  ErrorPanelButton / PlayerBar / CoverFlightOverlay）的函数体与 HEAD 逐字节一致，
+  仅跨文件可见性 private → internal。
+- 提取时把 4 处滞留在原文件的 KDoc 归位（BarCtlButton / CenterResumeButton /
+  EpisodeRow / VideoStage）；删除 64 条失效 import。
+- 行为零变更：无逻辑编辑、无新增状态、无参数顺序调整。
+
+----------------------------------------------------------------
+2. 门禁读数
+----------------------------------------------------------------
+./gradlew test lint assembleDebug assembleRelease --offline
+BUILD SUCCESSFUL in 3m 32s
+test：142 套件 / 1009 项 / 0 失败 / 0 error
+lint：15 份报告 / 0 issue
+release：29,190,315 B
+debug：66,222,424 B
+（与 E209 基线逐项相同——本批是纯结构搬迁。）
+
+----------------------------------------------------------------
+3. 真机冒烟
+----------------------------------------------------------------
+起播 deep link：
+noneplayer://player?uri=content%3A%2F%2Fmedia%2Fexternal%2Fvideo%2Fmedia%2F1000015396&fs=1
+媒体：wl-mpeg2-mp2.mpg（E209 同一 PS 夹具，队列会按同目录自然序自动推进）。
+
+- 进入播放页后 dumpsys media_session：
+  state=PlaybackState {state=PLAYING(3), position=6596, buffered position=10517,
+  speed=1.0, active item id=7, error=null}
+- 点画面唤出控制层，顶栏（返回/标题/时钟电量/静音/更多）与底栏（上一集/暂停/下一集/
+  已播时间码/进度条/总时长/截图/循环/仅听/全屏）均正常绘制：
+  screenshots/e210-2026-10-25/60dd2f94/player-controls.png
+- 队列推进到纯音频条目时自动切到仅听页（既有行为），页面正常：
+  未单独留存截图（与本批拆分无关）。
+- logcat：0 FATAL EXCEPTION / 0 AndroidRuntime / 0 Playback error /
+  0 onPlaybackResumption UnsupportedOperationException。
+
+环境插曲：首次截图为全黑——设备处于 Asleep + 通知栏在前台；KEYCODE_WAKEUP +
+dismiss-keyguard 后恢复正常，非应用问题。
+
+----------------------------------------------------------------
+4. 边界
+----------------------------------------------------------------
+- 底栏按钮的逐颗点击未做设备取证：控制层 3s 自动隐藏与 adb 截屏耗时竞争，
+  暂停钮点击窗口无法稳定命中；按钮 lambda 未改动、单测与 E195/E199 的设备走查兜底。
+- 本批不新增 UI 单测（纯搬移，142/1009 与基线一致）；后续若在页根新增热路径读值，
+  必须仍落在已拆出的组件内。
