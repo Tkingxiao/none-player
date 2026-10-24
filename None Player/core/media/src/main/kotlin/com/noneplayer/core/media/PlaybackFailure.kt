@@ -1,9 +1,23 @@
 package com.noneplayer.core.media
 
+/** 播放失败所属环节（E209）：UI/日志据此决定文案与是否给重试。 */
+enum class PlaybackFailureCategory {
+    CONTAINER,
+    VIDEO_DECODE,
+    AUDIO_DECODE,
+    VIDEO_RENDER,
+    AUDIO_OUTPUT,
+    IO,
+    DRM,
+    OTHER,
+}
+
 /**
  * 播放失败的结构化描述（E39 探测 / E41 体面失败）。
  *
- * 字段全部是可直接上屏的本地信息：容器 / 视频编码 / 音频编码 三行 + 原因 + 转码建议。
+ * 字段全部是可直接上屏的本地信息：容器 / 视频编码 / 音频编码 三行 + 原因 + 转码建议；
+ * [category] 标明失败环节，[retryable] 决定 UI 是否给「重试」（永久性编码/容器/DRM
+ * 失败重试没有意义，音轨/渲染/IO 的瞬时失败才给）。
  * 由 [com.noneplayer.core.media.probe.FormatProbe] 或引擎错误映射构造，UI 直出不加工。
  */
 data class PlaybackFailure(
@@ -13,6 +27,8 @@ data class PlaybackFailure(
     val audioCodec: String? = null,
     val reason: String,
     val suggestion: String? = TRANSCODE_SUGGESTION,
+    val category: PlaybackFailureCategory = PlaybackFailureCategory.OTHER,
+    val retryable: Boolean = true,
 ) {
     /** "容器：AVI ｜ 视频：Xvid (MPEG-4 ASP) ｜ 音频：MP3"；三项全空为 null */
     val trackLine: String? = listOfNotNull(
@@ -29,6 +45,8 @@ data class PlaybackFailure(
         fun containerUnsupported(container: String?) = PlaybackFailure(
             container = container,
             reason = "该文件的封装格式暂无解封装支持（常见于 RMVB / WMV 等旧格式）。",
+            category = PlaybackFailureCategory.CONTAINER,
+            retryable = false,
         )
 
         /** 容器能读但视频编码无法识别（WMV2/VC-1 等未映射编码） */
@@ -36,6 +54,8 @@ data class PlaybackFailure(
             container = container,
             audioCodec = audioCodec,
             reason = "没有解析到受支持的视频编码（常见于 WMV / VC-1 / RealVideo 等旧编码）。",
+            category = PlaybackFailureCategory.VIDEO_DECODE,
+            retryable = false,
         )
 
         /**
@@ -55,6 +75,8 @@ data class PlaybackFailure(
             videoCodec = videoCodec,
             audioCodec = audioCodec,
             reason = "本设备没有该视频编码可用的解码器（或解码器不支持该文件的编码档次/特性）。",
+            category = PlaybackFailureCategory.VIDEO_DECODE,
+            retryable = false,
         )
 
         /**
@@ -86,17 +108,23 @@ data class PlaybackFailure(
                 }
                 append("。此类文件会在解码第一帧时失败。")
             },
+            category = PlaybackFailureCategory.VIDEO_DECODE,
+            retryable = false,
         )
 
         /** 文件不可读（损坏 / 截断 / 权限） */
         fun unreadable(container: String? = null) = PlaybackFailure(
             container = container,
             reason = "文件无法读取：可能已损坏、不完整或没有访问权限。",
+            category = PlaybackFailureCategory.IO,
+            retryable = true,
         )
 
         fun fileMissing() = PlaybackFailure(
             reason = "文件不存在或已被移动，请重新扫描媒体库。",
             suggestion = null,
+            category = PlaybackFailureCategory.IO,
+            retryable = false,
         )
 
         /** 音频编码本机不可解（批次 8：纯音频文件的探测分支） */
@@ -105,17 +133,74 @@ data class PlaybackFailure(
             audioCodec = audioCodec,
             reason = "没有可用的解码器播放该音频编码（$audioCodec）。",
             suggestion = "可转码为 FLAC / AAC / MP3 后重试。",
+            category = PlaybackFailureCategory.AUDIO_DECODE,
+            retryable = false,
         )
 
         fun noPermission() = PlaybackFailure(
             reason = "没有读取该文件的权限，请在系统设置中授予媒体访问权限。",
             suggestion = null,
+            category = PlaybackFailureCategory.IO,
+            retryable = false,
         )
 
         /** 兜底：拿不到结构化信息时仅展示引擎消息 */
         fun unexpected(detail: String) = PlaybackFailure(
             reason = detail,
             suggestion = null,
+            category = PlaybackFailureCategory.OTHER,
+            retryable = true,
+        )
+
+        /** 音频输出（AudioTrack 初始化/写入/offload）失败：多为设备或资源瞬时问题 */
+        fun audioOutput(detail: String? = null) = PlaybackFailure(
+            reason = detail?.takeIf { it.isNotBlank() }
+                ?: "音频输出初始化或写入失败（可能是音频设备或系统资源暂时不可用）。",
+            suggestion = null,
+            category = PlaybackFailureCategory.AUDIO_OUTPUT,
+            retryable = true,
+        )
+
+        /** 视频渲染/帧处理失败（Surface、帧处理器、特效链） */
+        fun videoRender(detail: String? = null) = PlaybackFailure(
+            reason = detail?.takeIf { it.isNotBlank() }
+                ?: "视频渲染或帧处理失败（可能是 Surface 或帧处理器异常）。",
+            suggestion = null,
+            category = PlaybackFailureCategory.VIDEO_RENDER,
+            retryable = true,
+        )
+
+        /** DRM 保护内容：重试通常无意义，需换合法来源/授权 */
+        fun drm(detail: String? = null) = PlaybackFailure(
+            reason = detail?.takeIf { it.isNotBlank() }
+                ?: "受 DRM 保护的内容无法在此设备播放（授权或 DRM 组件不可用）。",
+            suggestion = null,
+            category = PlaybackFailureCategory.DRM,
+            retryable = false,
+        )
+
+        /** 解码器被系统回收等可恢复的解码失败 */
+        fun videoDecodeTransient(detail: String? = null) = PlaybackFailure(
+            reason = detail?.takeIf { it.isNotBlank() } ?: "解码器暂时不可用（可能被系统回收），重试可能恢复。",
+            suggestion = null,
+            category = PlaybackFailureCategory.VIDEO_DECODE,
+            retryable = true,
+        )
+
+        /** 可重试的 IO/网络瞬时失败 */
+        fun ioTransient(detail: String? = null) = PlaybackFailure(
+            reason = detail?.takeIf { it.isNotBlank() } ?: "读取失败，请稍后重试。",
+            suggestion = null,
+            category = PlaybackFailureCategory.IO,
+            retryable = true,
+        )
+
+        /** 明确的访问/区域限制：重试无意义 */
+        fun accessDenied(detail: String? = null) = PlaybackFailure(
+            reason = detail?.takeIf { it.isNotBlank() } ?: "没有权限访问该内容。",
+            suggestion = null,
+            category = PlaybackFailureCategory.IO,
+            retryable = false,
         )
     }
 }

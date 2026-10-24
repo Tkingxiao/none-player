@@ -1159,9 +1159,8 @@ fun PlayerScreen(
     fun onScrubEnd() {
         val target = dragPositionMs.toLong()
         pendingSeekMs = target
-        player.setScrubbing(false)
-        player.seekTo(target)
-        if (scrubWasPlaying) player.play()
+        // 一条命令完成退出擦洗 + seek + 恢复播放（Exo 侧经 np.scrub 原子处理）。
+        player.finishScrub(target, scrubWasPlaying)
         userDragging = false
     }
 
@@ -1177,12 +1176,11 @@ fun PlayerScreen(
      */
     fun onScrubCancel() {
         if (!userDragging) return
-        player.setScrubbing(false)
         // 清掉"钉住目标位置"，进度条交还给真实播放位置
         pendingSeekMs = null
         dragPositionMs = scrubStartMs.toFloat()
-        player.seekTo(scrubStartMs)
-        if (scrubWasPlaying) player.play()
+        // 取消 = 回滚到起手位置；同样走一条命令，避免三次往返的半截状态。
+        player.finishScrub(scrubStartMs, scrubWasPlaying)
         userDragging = false
     }
 
@@ -3074,49 +3072,51 @@ fun PlayerScreen(
         // 错误态（E6 可重试 + E41 体面失败：容器/编码三行 + 转码建议 + 外部打开）
         if (state is PlaybackState.Error && mediaOpened) {
             val error = state as PlaybackState.Error
+            val canRetry = error.failure?.retryable ?: true
+            fun retryPlayback() {
+                // 重试必须重载**失败的那一项**：错误可能来自选集切换而非路由入参，
+                // 无条件用路由 uri 会把"重试"变成"打开另一条文件"。
+                // 闸门（mediaOpened）不用拉回：装载入口会同步把状态降到 Buffering，
+                // 旧错误面板随之消失；若再次失败仍能重新浮出，不会把用户卡在黑屏。
+                //
+                // A17 收尾：重试要**从断点续**而不是回片头。断点读取是挂起调用，
+                // 整段重载放进页面 scope；探测侧由引擎按"错误后的重试"自动 bypassCache
+                // （否则缓存里那条失败结论会把用户原样送回同一个错误）。
+                val items = queue
+                val idx = queueIndex
+                scope.launch {
+                    if (items.isNotEmpty() && idx in items.indices) {
+                        val target = items[idx]
+                        val resumeMs = history.positionOfIfIntact(target) ?: 0L
+                        player.setQueue(items, idx, resumeMs)
+                    } else {
+                        // 单媒体路径：prepare ≠ 装载位置参数，改为 prepare 后立刻
+                        // seekTo——引擎在探测窗口内会把它记为挂在目标媒体上的
+                        // pendingSeek，装载落地时消费，一样能续上断点。
+                        // 断点查询优先用会话当前的权威条目（带真实 sourceId 与文件
+                        // 指纹），但必须确认它确实是路由这一条，避免把上一条的位置
+                        // 套到新文件；查不到就用路由参数拼兜底条目（多半没有断点）。
+                        val lookup = session.nowPlayingSummary.value?.item
+                            ?.takeIf { it.uri == uri }
+                            ?: MediaItem(
+                                id = mediaId,
+                                sourceId = "",
+                                title = displayTitle,
+                                uri = uri,
+                                mimeType = resolvedMimeType ?: mimeType,
+                            )
+                        val resumeMs = history.positionOfIfIntact(lookup) ?: 0L
+                        player.prepare(uri, resolvedMimeType ?: mimeType)
+                        if (resumeMs > 0L) player.seekTo(resumeMs)
+                    }
+                    player.play()
+                }
+            }
             ErrorPanel(
                 message = error.message,
                 failure = error.failure,
-                actionLabel = "重试",
-                onAction = {
-                    // 重试必须重载**失败的那一项**：错误可能来自选集切换而非路由入参，
-                    // 无条件用路由 uri 会把"重试"变成"打开另一条文件"。
-                    // 闸门（mediaOpened）不用拉回：装载入口会同步把状态降到 Buffering，
-                    // 旧错误面板随之消失；若再次失败仍能重新浮出，不会把用户卡在黑屏。
-                    //
-                    // A17 收尾：重试要**从断点续**而不是回片头。断点读取是挂起调用，
-                    // 整段重载放进页面 scope；探测侧由引擎按"错误后的重试"自动 bypassCache
-                    // （否则缓存里那条失败结论会把用户原样送回同一个错误）。
-                    val items = queue
-                    val idx = queueIndex
-                    scope.launch {
-                        if (items.isNotEmpty() && idx in items.indices) {
-                            val target = items[idx]
-                            val resumeMs = history.positionOfIfIntact(target) ?: 0L
-                            player.setQueue(items, idx, resumeMs)
-                        } else {
-                            // 单媒体路径：prepare ≠ 装载位置参数，改为 prepare 后立刻
-                            // seekTo——引擎在探测窗口内会把它记为挂在目标媒体上的
-                            // pendingSeek，装载落地时消费，一样能续上断点。
-                            // 断点查询优先用会话当前的权威条目（带真实 sourceId 与文件
-                            // 指纹），但必须确认它确实是路由这一条，避免把上一条的位置
-                            // 套到新文件；查不到就用路由参数拼兜底条目（多半没有断点）。
-                            val lookup = session.nowPlayingSummary.value?.item
-                                ?.takeIf { it.uri == uri }
-                                ?: MediaItem(
-                                    id = mediaId,
-                                    sourceId = "",
-                                    title = displayTitle,
-                                    uri = uri,
-                                    mimeType = resolvedMimeType ?: mimeType,
-                                )
-                            val resumeMs = history.positionOfIfIntact(lookup) ?: 0L
-                            player.prepare(uri, resolvedMimeType ?: mimeType)
-                            if (resumeMs > 0L) player.seekTo(resumeMs)
-                        }
-                        player.play()
-                    }
-                },
+                actionLabel = if (canRetry) "重试" else null,
+                onAction = if (canRetry) ({ retryPlayback() }) else null,
                 onBack = navigator::popBackStack,
                 modifier = Modifier.align(Alignment.Center),
             )
@@ -5768,6 +5768,17 @@ internal fun ErrorPanel(
                 overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.padding(top = 6.dp),
             )
+            failure.suggestion?.let { suggestion ->
+                Text(
+                    text = suggestion,
+                    style = NpTypography.bodySmall,
+                    color = Color.White.copy(alpha = 0.72f),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
         } else {
             Text(
                 text = message,

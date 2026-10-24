@@ -41,7 +41,7 @@ data class HistoryEntry(
 
     companion object {
         /** 跨来源唯一键（E73 口径：按 sourceId 分命名空间） */
-        fun keyOf(item: MediaItem): String = "${item.sourceId}:${item.id}"
+        fun keyOf(item: MediaItem): String = item.identity
     }
 }
 

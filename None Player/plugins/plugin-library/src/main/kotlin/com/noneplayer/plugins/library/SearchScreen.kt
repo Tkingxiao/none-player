@@ -63,6 +63,7 @@ import com.noneplayer.core.ui.NpFilterSelect
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMono
+import com.noneplayer.core.ui.npGridColumnsFor
 import com.noneplayer.core.ui.NpMonoSmall
 import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpRadius
@@ -403,7 +404,7 @@ private fun SearchResults(
         return
     }
     LazyVerticalGrid(
-        columns = gridColumnsFor(compact, gridColumns),
+        columns = npGridColumnsFor(compact, gridColumns),
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(
             start = gutter,

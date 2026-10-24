@@ -35,7 +35,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
@@ -98,6 +97,7 @@ import com.noneplayer.core.ui.NpCoverPlaceholder
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEmptyState
 import com.noneplayer.core.ui.NpFilterSelect
+import com.noneplayer.core.ui.npGridColumnsFor
 import com.noneplayer.core.ui.NpFolderCard
 import com.noneplayer.core.ui.NpHaptic
 import com.noneplayer.core.ui.NpIcon
@@ -1874,7 +1874,7 @@ private fun FolderBrowser(
     LazyVerticalGrid(
         // 设计稿 compact 档媒体网格恒 2 列（`.tier-compact .grid.v` 607）：
         // Adaptive(176dp) 在 360dp 窗口 floor 出 1 列，比设计稿更稀
-        columns = gridColumnsFor(compact, gridColumns),
+        columns = npGridColumnsFor(compact, gridColumns),
         state = gridState,
         contentPadding = PaddingValues(
             top = LocalNpTopBarInset.current,
@@ -2156,22 +2156,6 @@ private fun AggregateHead(
  * "点击条目开始播放" → 可发现性由卡片自身的点击态承担。同轮删除的还有 listhead
  * （用户实报"两个返回键"）——内容区头部就此清零，文件夹页从控件行直接进入内容。
  */
-
-/**
- * 自适应网格每格最小宽度：把用户的「列数」偏好重新诠释为**密度档**——
- * 2 列=舒适（大卡）、3 列=紧凑（小卡）。真实列数随窗口宽度连续变化（E47），
- * 平板/折叠展开后自动变多列，不再被 `GridCells.Fixed` 锁死在手机的 2/3 列。
- */
-private fun gridMinCell(gridColumns: Int): Dp =
-    if (gridColumns <= 2) 176.dp else 120.dp
-
-/**
- * 网格列数（§5.7）：**列数偏好只在紧凑档生效**——紧凑档没有自适应可言，用户说几列就几列
- * （默认 2 列，与设计稿 `.tier-compact .grid.v` 同值）；`Medium/Expanded` 的列数由窗口宽度
- * 决定（E47），把"双列/三列"摆给它们是欺骗，所以视图面板里那排列数 chips 只在紧凑档出现。
- */
-internal fun gridColumnsFor(compact: Boolean, gridColumns: Int): GridCells =
-    if (compact) GridCells.Fixed(gridColumns) else GridCells.Adaptive(gridMinCell(gridColumns))
 
 /**
  * 筛选键 → 列表（设计稿 `filterList`）。
@@ -2469,7 +2453,7 @@ private fun AggregateList(
     CoverDemandEffect(items = shown, leaderSlots = coverLeaderSlots, sources = sources, state = gridState)
 
     LazyVerticalGrid(
-        columns = gridColumnsFor(compact, gridColumns),
+        columns = npGridColumnsFor(compact, gridColumns),
         state = gridState,
         contentPadding = PaddingValues(
             top = LocalNpTopBarInset.current,

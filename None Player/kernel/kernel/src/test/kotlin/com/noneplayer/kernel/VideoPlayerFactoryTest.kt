@@ -6,6 +6,7 @@ import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.VideoPlayerFactory
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -41,6 +42,15 @@ class VideoPlayerFactoryTest {
         override fun pause() {}
         override fun seekTo(positionMs: Long) {}
         override fun release() {}
+    }
+
+    @Test
+    fun `默认 StateFlow getter 必须稳定复用同一个实例`() {
+        assertSame(StubPlayer.bufferedPositionMs, StubPlayer.bufferedPositionMs)
+        assertSame(StubPlayer.videoAspectRatio, StubPlayer.videoAspectRatio)
+        assertSame(StubPlayer.speed, StubPlayer.speed)
+        assertSame(StubPlayer.cues, StubPlayer.cues)
+        assertSame(StubPlayer.connection, StubPlayer.connection)
     }
 
     @Test

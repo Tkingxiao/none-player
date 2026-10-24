@@ -132,6 +132,13 @@ class HistoryRepository private constructor(
      */
     val count: Flow<Int> by lazy { resilientFlow("count") { dao.count() } }
 
+    /**
+     * E209：系统「最近媒体/恢复播放」入口使用。必须走冷查询而不是 [recent].first()：
+     * `recent` 是 WhileSubscribed 的 StateFlow，无订阅者时首值是空表，会让恢复永远没有条目。
+     */
+    suspend fun mostRecentForResumption(): HistoryEntry? =
+        storageRead("resume") { dao.mostRecent() }?.toEntry()
+
     /** 收藏键的**唯一一条** DAO 订阅（P1-6）：下面两个视图都从它派生。
      *  StateFlow 的理由与 [recent] 同一条——见那里的说明。 */
     private val favoriteKeysFlow: StateFlow<List<String>> by lazy {
@@ -283,14 +290,10 @@ class HistoryRepository private constructor(
      */
     suspend fun toggleFavorite(item: MediaItem): Boolean? {
         val key = HistoryEntry.keyOf(item)
-        val currentlyFavorite = storageRead("toggleFavorite") { dao.isFavoriteNow(key) } ?: return null
-        return if (currentlyFavorite) {
-            if (storageWrite("toggleFavorite") { dao.removeFavorite(key) } == null) null else false
-        } else {
-            val added = storageWrite("toggleFavorite") {
-                dao.addFavorite(FavoriteEntity(mediaKey = key, addedAt = System.currentTimeMillis()))
-            }
-            if (added == null) null else true
+        // E209：读取与写入都收进 DAO 的 @Transaction，连点/并发不会出现
+        // "返回已收藏但表里没有"的相反状态。
+        return storageWrite("toggleFavorite") {
+            dao.toggleFavorite(key, System.currentTimeMillis())
         }
     }
 

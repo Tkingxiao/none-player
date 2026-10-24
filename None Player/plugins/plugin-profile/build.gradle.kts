@@ -27,6 +27,7 @@ dependencies {
     // 插件依赖铁律：只允许 kernel-api / kernel-ui-api / core-*，禁止依赖其他 plugin-*
     implementation(project(":kernel:kernel-api"))
     implementation(project(":kernel:kernel-ui-api"))
+    implementation(project(":core:data"))
     implementation(project(":core:database"))
     implementation(project(":core:media"))
     implementation(project(":core:ui"))

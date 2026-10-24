@@ -1,7 +1,9 @@
 package com.noneplayer.core.media
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlaybackFailureTest {
@@ -20,6 +22,32 @@ class PlaybackFailureTest {
         val failure = PlaybackFailure.containerUnsupported("RealMedia (RMVB)")
         assertEquals("容器：RealMedia (RMVB)", failure.trackLine)
         assertNull(PlaybackFailure.unexpected("x").trackLine)
+    }
+
+    @Test
+    fun `失败类别与 retryable 按环节区分`() {
+        val audio = PlaybackFailure.audioOutput()
+        assertEquals(PlaybackFailureCategory.AUDIO_OUTPUT, audio.category)
+        assertTrue(audio.retryable)
+
+        val render = PlaybackFailure.videoRender()
+        assertEquals(PlaybackFailureCategory.VIDEO_RENDER, render.category)
+        assertTrue(render.retryable)
+
+        val decode = PlaybackFailure.videoCodecUnsupported("AVI", "Xvid", "MP3")
+        assertEquals(PlaybackFailureCategory.VIDEO_DECODE, decode.category)
+        assertFalse("永久性编码失败不应给重试", decode.retryable)
+
+        val drm = PlaybackFailure.drm()
+        assertEquals(PlaybackFailureCategory.DRM, drm.category)
+        assertFalse(drm.retryable)
+
+        val missing = PlaybackFailure.fileMissing()
+        assertEquals(PlaybackFailureCategory.IO, missing.category)
+        assertFalse(missing.retryable)
+
+        assertTrue(PlaybackFailure.ioTransient().retryable)
+        assertTrue(PlaybackFailure.videoDecodeTransient().retryable)
     }
 
     @Test

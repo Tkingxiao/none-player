@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.itemsIndexed as gridItemsIndexed
 import androidx.compose.material3.Icon
@@ -37,6 +36,7 @@ import androidx.navigation.compose.composable
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
+import com.noneplayer.core.data.AppSettings
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
 import com.noneplayer.core.media.MediaItem
@@ -60,6 +60,7 @@ import com.noneplayer.core.ui.NpPageScaffold
 import com.noneplayer.core.ui.NpSectionHead
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.npGridColumnsFor
 import com.noneplayer.core.ui.npMaskFadeEdges
 import com.noneplayer.kernel.ui.api.LocalNpPaneOccupied
 import com.noneplayer.core.ui.npStaggeredEntry
@@ -136,6 +137,8 @@ private fun ProfileScreen(navigator: Navigator) {
     val mediaState = rememberMediaItems()
     // §8.3：播放历史/收藏（进度与时间序都读 Room 仓库）
     val history = remember { kernel.services.get<HistoryRepository>() }
+    val settings = remember { kernel.services.get<AppSettings>() }
+    val gridColumns by settings.gridColumns.collectAsStateWithLifecycle(2)
     val historyEntries by history.recent.collectAsStateWithLifecycle()
     // 审查批次 A3：键用跨来源唯一键 `sourceId:mediaId`（= [HistoryEntry.keyOf]），
     // 与媒体库页同口径。裸 mediaId 会让不同来源的同 ID 条目互相覆盖。
@@ -148,7 +151,9 @@ private fun ProfileScreen(navigator: Navigator) {
             .sortedByDescending { lastAt[HistoryEntry.keyOf(it)] ?: 0L }
     }
     val recent = remember(playedItems) { playedItems.take(12) }
-    val historyCount = remember(positions) { positions.count { it.value > 0L } }
+    // 与下面的 playedItems 同口径：计数必须等于列表实际能显示的条数（不再把
+    // 已删除/未入库的孤儿历史行算进来）。设置页的「全部记录」是另一个口径。
+    val playedCount = remember(playedItems) { playedItems.size }
     // §8.3 收藏：与媒体库长按菜单的「加入收藏」共用同一个仓库 → 天然联动
     val favorites by history.favorites.collectAsStateWithLifecycle()
     val favoriteItems = remember(mediaState, favorites) {
@@ -191,6 +196,7 @@ private fun ProfileScreen(navigator: Navigator) {
                 positions = positions,
                 contentModifier = contentModifier,
                 compact = compact,
+                gridColumns = gridColumns,
                 onOpen = { openPlayer(navigator, it) },
             )
             return@NpPageScaffold
@@ -218,7 +224,7 @@ private fun ProfileScreen(navigator: Navigator) {
                             title = "播放历史",
                             // 设计稿是「128 条记录 · 今日 6 条」的假数据；
                             // 这里给真实条数（有播放记录即 > 0），拿不到就不显示数字
-                            subtitle = if (historyCount > 0) "$historyCount 条记录" else null,
+                            subtitle = if (playedCount > 0) "$playedCount 条记录" else null,
                             onClick = { subPage = ProfileSubPage.HISTORY },
                         )
                         EntryRow(
@@ -414,6 +420,7 @@ private fun ProfileSubPage(
     positions: Map<String, Long>,
     contentModifier: Modifier,
     compact: Boolean,
+    gridColumns: Int,
     onOpen: (MediaItem) -> Unit,
 ) {
     val staggerWindow = npStaggerWindow()
@@ -433,8 +440,8 @@ private fun ProfileSubPage(
             )
         } else {
             LazyVerticalGrid(
-                // 与媒体库同一口径：紧凑档按用户列数偏好定列，宽窗按最小格宽自适应
-                columns = if (compact) GridCells.Fixed(2) else GridCells.Adaptive(176.dp),
+                // 与媒体库/搜索同一口径：紧凑档按用户列数偏好，宽窗按最小格宽自适应
+                columns = npGridColumnsFor(compact, gridColumns),
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(
                     top = LocalNpTopBarInset.current,

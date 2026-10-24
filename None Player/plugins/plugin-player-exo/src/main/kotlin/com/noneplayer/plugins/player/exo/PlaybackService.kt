@@ -28,8 +28,13 @@ import androidx.media3.session.SessionResult
 import com.noneplayer.core.data.AppSettings
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.google.common.util.concurrent.SettableFuture
 import com.noneplayer.core.media.extract.NpExtractorsFactory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 
@@ -387,6 +392,43 @@ class PlaybackService : MediaSessionService() {
                 .build()
         }
 
+        /**
+         * E209：系统「最近媒体/恢复播放」入口。旧实现没覆写，media3 默认实现返回
+         * UnsupportedOperationException，真机起播持续告警且系统恢复面板拿不到本应用。
+         *
+         * 冷查询最近一条历史（不能读 recent StateFlow 的首帧，它在无订阅者时是空表），
+         * 用历史快照构造 media3 条目，起播位置=上次落点。
+         */
+        override fun onPlaybackResumption(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            isForPlayback: Boolean,
+        ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
+            val history = PlaybackResumeHistory.repository
+                ?: return Futures.immediateFuture(
+                    MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L),
+                )
+            val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
+            CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+                runCatching { history.mostRecentForResumption() }
+                    .onSuccess { entry ->
+                        future.set(
+                            if (entry == null) {
+                                MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L)
+                            } else {
+                                MediaSession.MediaItemsWithStartPosition(
+                                    listOf(entry.toResumeMediaItem()),
+                                    0,
+                                    entry.positionMs.coerceAtLeast(0L),
+                                )
+                            },
+                        )
+                    }
+                    .onFailure { future.setException(it) }
+            }
+            return future
+        }
+
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,
@@ -419,8 +461,31 @@ class PlaybackService : MediaSessionService() {
                 )
                 return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
             }
+            if (action == SCRUB_COMMAND &&
+                !validateScrubArgs(
+                    active = args.getBoolean(SCRUB_ARG_ACTIVE),
+                    targetMs = args.get(SCRUB_ARG_TARGET_MS),
+                    resume = args.get(SCRUB_ARG_RESUME),
+                )
+            ) {
+                Log.w(
+                    SERVICE_LOG_TAG,
+                    "private command rejected uid=${controller.uid}" +
+                        " action=$action reason=bad-scrub-args keys=${args.keySet()}",
+                )
+                return Futures.immediateFuture(SessionResult(SessionError.ERROR_BAD_VALUE))
+            }
             when (action) {
-                SCRUB_COMMAND -> player.setScrubbingModeEnabled(args.getBoolean(SCRUB_ARG_ACTIVE))
+                SCRUB_COMMAND -> {
+                    val active = args.getBoolean(SCRUB_ARG_ACTIVE)
+                    player.setScrubbingModeEnabled(active)
+                    if (!active) {
+                        if (args.containsKey(SCRUB_ARG_TARGET_MS)) {
+                            player.seekTo(args.getLong(SCRUB_ARG_TARGET_MS).coerceAtLeast(0L))
+                        }
+                        if (args.getBoolean(SCRUB_ARG_RESUME, false)) player.play()
+                    }
+                }
                 CROP_COMMAND -> {
                     // 满窗裁剪（cover）/ 按比例适配（fit）——§2.4「画面」面板的引擎侧开关；
                     // 比例/镜像/旋转由 UI 层布局与 graphicsLayer 承担，不经会话

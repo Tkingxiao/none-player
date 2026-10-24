@@ -308,6 +308,24 @@ class HistoryRepositoryResilienceTest {
         assertTrue("取消不是存储故障，不应把状态标成 degraded", repository.storageStatus.value.healthy)
     }
 
+    // ---- E209：系统播放恢复的冷查询 ----------------------------------------
+
+    @Test
+    fun mostRecentForResumptionReturnsLatestRowWithoutCollectingRecentFlow() = runTest {
+        val dao = FakeHistoryDao().apply {
+            history["local:a"] = historyRow("local:a", lastPlayedAt = 10L)
+            history["local:b"] = historyRow("local:b", lastPlayedAt = 20L, positionMs = 34_000L)
+        }
+        val repository = repository(dao)
+
+        val latest = repository.mostRecentForResumption()
+
+        assertEquals("local:b", latest?.mediaKey)
+        assertEquals(34_000L, latest?.positionMs)
+        // 关键是走冷查询，而不是 recent StateFlow 的首帧（无订阅者时为空表）
+        assertEquals(0, dao.recentReadCount)
+    }
+
     // ---- 辅助 --------------------------------------------------------------
 
     private fun TestScope.repository(

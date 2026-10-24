@@ -85,6 +85,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override val state: StateFlow<PlaybackState> = _state.asStateFlow()
 
     private val _positionMs = MutableStateFlow(0L)
+    /** E209：每个播放器实例独立的打点时钟；旧的 object 静态 t0 会被多实例互相覆盖。 */
+    private val perf = NpPerfClock()
     override val positionMs: StateFlow<Long> = _positionMs.asStateFlow()
 
     private val _durationMs = MutableStateFlow(0L)
@@ -134,8 +136,15 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     private val _chapters = MutableStateFlow<List<NpChapter>>(emptyList())
     override val chapters: StateFlow<List<NpChapter>> = _chapters.asStateFlow()
 
-    /** 轨道选择键 → (轨道组, 轨道序号)，selectTrack 时还原成 TrackSelectionOverride */
-    private val trackGroupById = HashMap<String, Pair<Tracks.Group, Int>>()
+    /**
+     * 轨道选择键 → (轨道组, 轨道序号)，selectTrack 时还原成 TrackSelectionOverride。
+     *
+     * E209：契约允许 selectTrack 在任意线程调用，而 onTracksChanged 在播放线程 publish；
+     * 旧的 HashMap 会被一边 clear/put、一边读。改为「本地建表 + volatile 整体替换」：
+     * 读到的永远是完整快照，不再有半张表。
+     */
+    @Volatile
+    private var trackGroupById: Map<String, Pair<Tracks.Group, Int>> = emptyMap()
 
     /** C21：起播探测的"仅软解可用"提示（null = 无） */
     private val _decodeNotice = MutableStateFlow<String?>(null)
@@ -449,7 +458,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         override fun onPlaybackStateChanged(playbackState: Int) {
             if (terminalFailure) return
             if (playbackState == Player.STATE_READY) {
-                NpPerf.mark("READY")
+                perf.mark("READY")
                 // A18：回退重试奏效（解码器已经建起来），撤掉过滤状态——之后字幕重建
                 // 之类的同媒体重新 prepare 不再排除 codec；"已回退过"的闸门保留到换媒体。
                 if (decoderFallbackState.isArmed) decoderFallbackState.clear()
@@ -999,7 +1008,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         _decodeNotice.value = null
         _hdrLabel.value = null
         val myGeneration = ++prepareGeneration
-        NpPerf.begin("probe uri=${uri.substringAfterLast('/')}")
+        perf.begin("probe uri=${uri.substringAfterLast('/')}")
         prepareJob = scope.launch {
             val probe = FormatProbe.probe(
                 appContext,
@@ -1010,7 +1019,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 // A17：错误后的重试强制现场重探，不被缓存里那条失败结论"二次定罪"
                 bypassCache = bypassProbeCache,
             )
-            NpPerf.mark("probe done (${probe.javaClass.simpleName})")
+            perf.mark("probe done (${probe.javaClass.simpleName})")
             if (myGeneration != prepareGeneration) return@launch // 已有更新的装载，丢弃
             when (probe) {
                 is FormatProbe.Result.Unplayable -> {
@@ -1248,7 +1257,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 } else {
                     built
                 }
-            }.also { NpPerf.mark("built ${it.size} media items") }
+            }.also { perf.mark("built ${it.size} media items") }
         }
         // 建表期间可能已经来了更新的装载（A→B 快速切换会 cancel 本次 prepareJob）：
         // withContext 自身会在挂起点抛出取消，但"IO 刚回来、还没落盘"这一小段
@@ -1271,7 +1280,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         // 探测窗口里是空操作，被这里的一句 `play()` 原样覆盖（真机实报自动起播）。
         // 读的是 [loadIntentPlay] 而不是入参：探测窗口里用户按下的 ▶/⏸ 已经改写它。
         if (loadIntentPlay) c.play() else c.pause()
-        NpPerf.mark("setMediaItems idx=$safeIndex applied")
+        perf.mark("setMediaItems idx=$safeIndex applied")
     }
 
     /**
@@ -1419,7 +1428,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun playNext() {
         val next = _currentIndex.value + 1
         if (next in _queue.value.indices) {
-            NpPerf.begin("nav next")
+            perf.begin("nav next")
             selectQueueIndex(next)
         }
     }
@@ -1427,7 +1436,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
     override fun playPrevious() {
         val previous = _currentIndex.value - 1
         if (previous in _queue.value.indices) {
-            NpPerf.begin("nav previous")
+            perf.begin("nav previous")
             selectQueueIndex(previous)
         }
     }
@@ -1690,7 +1699,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
 
     /** 内嵌轨道枚举：音轨/字幕轨各一条目，label 组合语言/标题/声道/角色标签 */
     private fun publishTracks(tracks: Tracks) {
-        trackGroupById.clear()
+        val map = HashMap<String, Pair<Tracks.Group, Int>>()
         val list = buildList {
             tracks.groups.forEach { group ->
                 val type = when (group.type) {
@@ -1702,8 +1711,8 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                     val format = group.getTrackFormat(i)
                     // 同一 format.id 的多轨道（极少见）只暴露第一条，选择键保持稳定
                     val id = format.id ?: "${type.name}_$i"
-                    if (trackGroupById.containsKey(id)) continue
-                    trackGroupById[id] = group to i
+                    if (map.containsKey(id)) continue
+                    map[id] = group to i
                     // 外挂字幕被 media3 平铺进同一条文本轨组、没有自己的名字，
                     // 落到下面的"轨道 N"兜底就把外挂读成了内嵌轨（B4 真机实报）。
                     val label = "外挂字幕".takeIf {
@@ -1724,6 +1733,7 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 }
             }
         }
+        trackGroupById = map
         _tracks.value = list
     }
 
@@ -1930,6 +1940,27 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
         activeController?.sendCustomCommand(
             SessionCommand(SCRUB_COMMAND, Bundle.EMPTY),
             Bundle().apply { putBoolean(SCRUB_ARG_ACTIVE, active) },
+        )
+    }
+
+    /**
+     * 擦洗结束/取消走**一条** np.scrub：会话侧一次性完成「退出擦洗 + 精确 seek + 按需 play」。
+     * 旧路径 setScrubbing(false) + seekTo + play 是三次跨进程调用，中间任何一步被服务回收
+     * 打断都会留下"已退出擦洗但没落点/没恢复"的半截状态。
+     */
+    override fun finishScrub(targetMs: Long, resume: Boolean) {
+        val controller = activeController
+        if (controller == null) {
+            super.finishScrub(targetMs, resume)
+            return
+        }
+        controller.sendCustomCommand(
+            SessionCommand(SCRUB_COMMAND, Bundle.EMPTY),
+            Bundle().apply {
+                putBoolean(SCRUB_ARG_ACTIVE, false)
+                putLong(SCRUB_ARG_TARGET_MS, targetMs.coerceAtLeast(0L))
+                putBoolean(SCRUB_ARG_RESUME, resume)
+            },
         )
     }
 
@@ -2330,6 +2361,7 @@ private fun Cue.toKernelCue(): SubtitleCue {
  * 运行期错误 → 结构化失败信息（E41）：
  * 错误码分四类映射"可读原因"，容器/编码名优先用起播前探测结果补齐。
  */
+@OptIn(UnstableApi::class)
 private fun PlaybackException.toPlaybackFailure(
     container: String?,
     videoCodec: String?,
@@ -2337,11 +2369,34 @@ private fun PlaybackException.toPlaybackFailure(
 ): PlaybackFailure = when (errorCode) {
     PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND -> PlaybackFailure.fileMissing()
     PlaybackException.ERROR_CODE_IO_NO_PERMISSION -> PlaybackFailure.noPermission()
+    PlaybackException.ERROR_CODE_IO_CLEARTEXT_NOT_PERMITTED,
+    PlaybackException.ERROR_CODE_PERMISSION_DENIED,
+    PlaybackException.ERROR_CODE_AUTHENTICATION_EXPIRED,
+    PlaybackException.ERROR_CODE_NOT_AVAILABLE_IN_REGION,
+    -> PlaybackFailure.accessDenied(localizedMessage)
+
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_FAILED,
+    PlaybackException.ERROR_CODE_IO_NETWORK_CONNECTION_TIMEOUT,
+    PlaybackException.ERROR_CODE_IO_BAD_HTTP_STATUS,
+    PlaybackException.ERROR_CODE_IO_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE,
+    -> PlaybackFailure.ioTransient(localizedMessage)
+
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
     PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
     PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
     -> PlaybackFailure.containerUnsupported(container)
+
+    PlaybackException.ERROR_CODE_AUDIO_TRACK_INIT_FAILED,
+    PlaybackException.ERROR_CODE_AUDIO_TRACK_WRITE_FAILED,
+    PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_INIT_FAILED,
+    PlaybackException.ERROR_CODE_AUDIO_TRACK_OFFLOAD_WRITE_FAILED,
+    -> PlaybackFailure.audioOutput(localizedMessage)
+
+    PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSOR_INIT_FAILED,
+    PlaybackException.ERROR_CODE_VIDEO_FRAME_PROCESSING_FAILED,
+    -> PlaybackFailure.videoRender(localizedMessage)
 
     PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
     PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
@@ -2349,6 +2404,20 @@ private fun PlaybackException.toPlaybackFailure(
     PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
     PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
     -> PlaybackFailure.videoCodecUnsupported(container, videoCodec, audioCodec)
+
+    PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED,
+    -> PlaybackFailure.videoDecodeTransient(localizedMessage)
+
+    PlaybackException.ERROR_CODE_DRM_UNSPECIFIED,
+    PlaybackException.ERROR_CODE_DRM_SCHEME_UNSUPPORTED,
+    PlaybackException.ERROR_CODE_DRM_PROVISIONING_FAILED,
+    PlaybackException.ERROR_CODE_DRM_CONTENT_ERROR,
+    PlaybackException.ERROR_CODE_DRM_LICENSE_ACQUISITION_FAILED,
+    PlaybackException.ERROR_CODE_DRM_DISALLOWED_OPERATION,
+    PlaybackException.ERROR_CODE_DRM_SYSTEM_ERROR,
+    PlaybackException.ERROR_CODE_DRM_DEVICE_REVOKED,
+    PlaybackException.ERROR_CODE_DRM_LICENSE_EXPIRED,
+    -> PlaybackFailure.drm(localizedMessage)
 
     else -> PlaybackFailure.unexpected(localizedMessage ?: "播放出错")
 }

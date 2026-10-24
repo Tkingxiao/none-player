@@ -736,7 +736,8 @@ class LocalMediaSource(
             // 复用项是基线**同一实例**（=== 判定），跳过；新增/变更项才走富化
             .map { item -> if (item === baseline[item.id]) item else enrichAll(item) }
         tracePhase("HIDDEN_WALK done hiddenItems=" + hiddenItems.size)
-        val baseItems = (storeItems + unknownItems + hiddenItems).distinctBy { it.id }
+        // 跨来源/多授权树重叠时裸 id 会互相吞；用 sourceId:id。
+        val baseItems = (storeItems + unknownItems + hiddenItems).distinctBy { it.identity }
         // 阶段 4/6（COVERS）：本阶段**不再同步抽帧**（E203-B）——封面已转后台 [coverPump]。
         // 仍上报一帧：一是 UI 的阶段文案要连贯，二是 `processed=0/total=N` 恰好表达
         // 「N 项待后台补封面」，与旧语义（这里是抽帧进度）不会混淆。
@@ -835,6 +836,23 @@ class LocalMediaSource(
                     val validKeys = items.map { HistoryEntry.keyOf(it) }.toSet() + protectedKeys
                     val pruned = history.pruneOrphans(validKeys, sourceId)
                     if (pruned > 0) Log.i(TAG, "孤儿清理（L16）：删除 $pruned 条失效播放历史")
+                    // E209：per-media 键（字幕/显示/仅听/弹幕手选）同样按本轮列表淘汰。
+                    // 只在完整扫描后做——权限缺口时看不到类别的键无法区分"已删"与"本轮没看到"。
+                    // 显式放到 IO：DataStore edit 若沿调用方的 Unconfined/main 恢复，
+                    // Robolectric 的 runBlocking 会把主线程占住（扫描级测试会死等）。
+                    if (complete) {
+                        val removed = withContext(Dispatchers.IO) {
+                            runCatching {
+                                settings.prunePerMediaKeys(
+                                    validMediaKeys = validKeys,
+                                    validUris = items.mapTo(HashSet()) { it.uri },
+                                )
+                            }.getOrDefault(0)
+                        }
+                        if (removed > 0) {
+                            Log.i(TAG, "per-media 键清理（E209）：删除 $removed 项")
+                        }
+                    }
                 }
             }
             if (!complete) {

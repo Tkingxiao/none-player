@@ -850,7 +850,7 @@ private fun ClearPlaybackCacheRow() {
     NpSettingRow(
         title = "清除播放缓存",
         subtitle = if (storageStatus.healthy) {
-            "断点续播进度与最近播放记录"
+            "断点续播进度与最近播放记录（全部）"
         } else {
             "存储暂时不可用（${storageStatus.operation ?: "读写"}），稍后重试"
         },

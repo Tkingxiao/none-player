@@ -138,4 +138,23 @@ class PrivateCommandsTest {
         assertFalse(validatePrivateCommandArgs("np.unknown") { true })
         assertFalse(validatePrivateCommandArgs(null) { true })
     }
+
+    // ---------- 擦洗结束的单条命令参数 ----------
+
+    @Test
+    fun scrubStartNeedsOnlyActive() {
+        assertTrue(validateScrubArgs(active = true, targetMs = null, resume = null))
+    }
+
+    @Test
+    fun scrubFinishAcceptsTargetAndResume() {
+        assertTrue(validateScrubArgs(active = false, targetMs = 12_345L, resume = true))
+        assertTrue(validateScrubArgs(active = false, targetMs = null, resume = null))
+    }
+
+    @Test
+    fun scrubFinishRejectsWrongTypes() {
+        assertFalse(validateScrubArgs(active = false, targetMs = "12345", resume = true))
+        assertFalse(validateScrubArgs(active = false, targetMs = 12_345L, resume = 1))
+    }
 }

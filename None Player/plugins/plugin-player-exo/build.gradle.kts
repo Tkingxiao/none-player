@@ -29,6 +29,7 @@ dependencies {
     // L2：PlaybackService 建播放器前要读「硬件解码优先」偏好（渲染器集合在构建期定型，
     // 客户端此时还没连上来，只能由服务侧自己读设置）
     implementation(project(":core:data"))
+    implementation(project(":core:database"))
     implementation(project(":core:media-android"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.media3.exoplayer)

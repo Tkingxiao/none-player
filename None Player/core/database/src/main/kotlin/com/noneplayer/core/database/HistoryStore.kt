@@ -73,6 +73,10 @@ internal interface HistoryDao {
     @Query("SELECT * FROM playback_history WHERE media_key = :key LIMIT 1")
     suspend fun byKey(key: String): PlaybackHistoryEntity?
 
+    /** E209：系统播放恢复（onPlaybackResumption）用的冷查询；不依赖 recent 流首帧 */
+    @Query("SELECT * FROM playback_history ORDER BY last_played_at DESC LIMIT 1")
+    suspend fun mostRecent(): PlaybackHistoryEntity?
+
     @Query("SELECT position_ms FROM playback_history WHERE media_key = :key LIMIT 1")
     suspend fun positionOf(key: String): Long?
 
@@ -199,6 +203,21 @@ internal interface HistoryDao {
 
     @Query("SELECT EXISTS(SELECT 1 FROM favorites WHERE media_key = :key)")
     suspend fun isFavoriteNow(key: String): Boolean
+
+    /**
+     * E209：收藏开关的原子实现。旧实现由 Repository 先读 [isFavoriteNow] 再分两次
+     * 写，连点/并发时返回状态与表内最终状态可能相反。check 与写在同一事务里。
+     */
+    @Transaction
+    suspend fun toggleFavorite(key: String, now: Long): Boolean {
+        return if (isFavoriteNow(key)) {
+            removeFavorite(key)
+            false
+        } else {
+            addFavorite(FavoriteEntity(mediaKey = key, addedAt = now))
+            true
+        }
+    }
 }
 
 /** 一行断点及其文件指纹快照（A1-3）；指纹列为 0 表示当时未知、不参与比对 */

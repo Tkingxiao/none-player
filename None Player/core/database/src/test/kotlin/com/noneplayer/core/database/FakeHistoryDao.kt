@@ -85,6 +85,9 @@ internal class FakeHistoryDao : HistoryDao {
 
     // ---- 历史读 -----------------------------------------------------------
 
+    override suspend fun mostRecent(): PlaybackHistoryEntity? =
+        history.values.maxByOrNull { it.lastPlayedAt }
+
     override fun recent(): Flow<List<PlaybackHistoryEntity>> = flow {
         recentReadCount++
         if (recentFailuresRemaining > 0) {

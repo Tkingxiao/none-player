@@ -47,25 +47,25 @@ interface VideoPlayer {
      * 默认实现恒为 0（引擎未接入缓冲信息）。
      */
     val bufferedPositionMs: StateFlow<Long>
-        get() = MutableStateFlow(0L)
+        get() = PlayerDefaults.bufferedPositionMs
 
     /**
      * 视频宽高比（宽/高，已考虑旋转），用于 UI 按比例渲染画面；
      * 未知为 0。默认实现返回常量 0 流（无画面信息的能力）。
      */
     val videoAspectRatio: StateFlow<Float>
-        get() = MutableStateFlow(0f)
+        get() = PlayerDefaults.videoAspectRatio
 
     /** 当前实际播放倍速（UI 应以此为准显示，而非本地记忆）。默认恒为 1 */
     val speed: StateFlow<Float>
-        get() = MutableStateFlow(1f)
+        get() = PlayerDefaults.speed
 
     /**
      * 会话中当前已装载的媒体地址；未装载为 null。
      * UI 重进播放页时据此判断"会话仍在播同一视频"，避免用过期断点覆盖新进度。
      */
     val currentUri: StateFlow<String?>
-        get() = MutableStateFlow(null)
+        get() = PlayerDefaults.currentUri
 
     /**
      * 引擎「已真正装载并生效」的媒体键（`sourceId:mediaId`）。
@@ -92,21 +92,21 @@ interface VideoPlayer {
      * 无字幕时为空列表。默认实现恒为空（引擎未接入字幕输出）。
      */
     val cues: StateFlow<List<SubtitleCue>>
-        get() = MutableStateFlow(emptyList())
+        get() = PlayerDefaults.cues
 
     /**
      * 当前媒体的可选轨道（内嵌音频/字幕，批次 3 轨道面板）。
      * 空列表 = 无内嵌轨道或引擎未接入轨道枚举。默认实现恒为空。
      */
     val tracks: StateFlow<List<NpTrack>>
-        get() = MutableStateFlow(emptyList())
+        get() = PlayerDefaults.tracks
 
     /**
      * 章节列表（§12.5，1.11.0+ MP4/Matroska 章节经 metadata 通道）。
      * 空列表 = 无章节数据，UI 隐藏入口。默认实现恒为空。
      */
     val chapters: StateFlow<List<NpChapter>>
-        get() = MutableStateFlow(emptyList())
+        get() = PlayerDefaults.chapters
 
     /**
      * 起播探测给出的"提示胶囊"文案（C21）：如"该视频仅有软件解码器，可能发热/掉帧"。
@@ -114,7 +114,7 @@ interface VideoPlayer {
      * UI 只负责展示，判定与措辞归引擎（它是唯一知道解码器实际选择的一方）。
      */
     val decodeNotice: StateFlow<String?>
-        get() = MutableStateFlow(null)
+        get() = PlayerDefaults.decodeNotice
 
     /**
      * 当前媒体的 HDR 概况（起播探测自容器声明的 colorTransfer）：
@@ -122,7 +122,7 @@ interface VideoPlayer {
      * UI 据此在信息行/详情里给 HDR 标识。
      */
     val hdrLabel: StateFlow<String?>
-        get() = MutableStateFlow(null)
+        get() = PlayerDefaults.hdrLabel
 
     /**
      * 当前播放队列（同文件夹连播的来源）。默认空——不支持队列的引擎退化为单曲播放。
@@ -132,11 +132,11 @@ interface VideoPlayer {
      * UI 侧另存一份队列反而会出现两份真相（§8.2）。
      */
     val queue: StateFlow<List<com.noneplayer.core.media.MediaItem>>
-        get() = MutableStateFlow(emptyList())
+        get() = PlayerDefaults.queue
 
     /** 当前队列下标；无队列或未播放为 -1 */
     val currentIndex: StateFlow<Int>
-        get() = MutableStateFlow(-1)
+        get() = PlayerDefaults.currentIndex
 
     /**
      * 装载整个队列并从 [startIndex] 开始播放（队列连播、通知 ⏮⏭ 由此免费获得）。
@@ -222,7 +222,7 @@ interface VideoPlayer {
      * 当前循环模式；不支持的引擎默认 [NpLoopMode.OFF]（顺序播放）。
      */
     val loopMode: StateFlow<NpLoopMode>
-        get() = MutableStateFlow(NpLoopMode.OFF)
+        get() = PlayerDefaults.loopMode
 
     /** 设置循环模式（顺序/单集循环/列表循环/随机）；不支持时为空操作 */
     fun setLoopMode(mode: NpLoopMode) {}
@@ -281,6 +281,18 @@ interface VideoPlayer {
     fun setScrubbing(active: Boolean) {}
 
     /**
+     * 结束一次擦洗：退出擦洗模式、落到 [targetMs]，并按 [resume] 恢复播放。
+     *
+     * 默认实现拆成三个标准调用；Exo 实现会经**一条** `np.scrub` 私有命令在会话侧
+     * 原子完成（setSeekParameters + seek + play），避免三次跨进程往返和中间态。
+     */
+    fun finishScrub(targetMs: Long, resume: Boolean) {
+        setScrubbing(false)
+        seekTo(targetMs)
+        if (resume) play()
+    }
+
+    /**
      * 与承载播放服务的连接状态（REV-10）。
      *
      * ExoPlayer 实现里播放器驻留后台 MediaSessionService，经 MediaController 通信；
@@ -288,7 +300,7 @@ interface VideoPlayer {
      * 服务，恒为 [PlayerConnection.CONNECTED]。
      */
     val connection: StateFlow<PlayerConnection>
-        get() = MutableStateFlow(PlayerConnection.CONNECTED)
+        get() = PlayerDefaults.connection
 
     /**
      * 请求重连（REV-10）：仅在 [connection] 为 DISCONNECTED/FAILED 时有意义；
@@ -428,3 +440,20 @@ data class NpChapter(
     val endMs: Long,
     val title: String,
 )
+
+/** VideoPlayer 默认 getter 的共享容器：getter 不再每次新建 Flow（E209）。 */
+private object PlayerDefaults {
+    val bufferedPositionMs = MutableStateFlow(0L)
+    val videoAspectRatio = MutableStateFlow(0f)
+    val speed = MutableStateFlow(1f)
+    val currentUri = MutableStateFlow<String?>(null)
+    val cues = MutableStateFlow<List<SubtitleCue>>(emptyList())
+    val tracks = MutableStateFlow<List<NpTrack>>(emptyList())
+    val chapters = MutableStateFlow<List<NpChapter>>(emptyList())
+    val decodeNotice = MutableStateFlow<String?>(null)
+    val hdrLabel = MutableStateFlow<String?>(null)
+    val queue = MutableStateFlow<List<com.noneplayer.core.media.MediaItem>>(emptyList())
+    val currentIndex = MutableStateFlow(-1)
+    val loopMode = MutableStateFlow(NpLoopMode.OFF)
+    val connection = MutableStateFlow(PlayerConnection.CONNECTED)
+}

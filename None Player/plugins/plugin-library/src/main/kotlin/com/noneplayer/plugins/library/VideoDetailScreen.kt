@@ -637,11 +637,11 @@ private fun LazyListScope.siblingRows(
             Spacer(Modifier.height(6.dp))
         }
     }
-    itemsIndexed(siblings, key = { _, sibling -> sibling.id }) { index, sibling ->
+    itemsIndexed(siblings, key = { _, sibling -> sibling.identity }) { index, sibling ->
         SiblingRow(
             index = index,
             sibling = sibling,
-            current = sibling.id == item.id,
+            current = sibling.identity == item.identity,
             onSelect = onSelect,
         )
     }

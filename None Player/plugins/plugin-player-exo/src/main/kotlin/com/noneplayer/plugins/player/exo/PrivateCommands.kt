@@ -23,9 +23,16 @@ import androidx.media3.session.SessionCommand
  * 校验外没有 Android 依赖，便于在纯 JVM 单测里覆盖 UID/参数判定。
  */
 
-/** 擦洗命令：UI 拖动进度条时切换 seek 精度（会话侧 API 不在 MediaController 暴露） */
+/**
+ * 擦洗命令：UI 拖动进度条时切换 seek 精度（会话侧 API 不在 MediaController 暴露）。
+ *
+ * 起手只带 [SCRUB_ARG_ACTIVE]=true；松手/取消时带 active=false + 目标位置 + 是否恢复播放，
+ * 会话侧用**一条命令**原子完成「退出擦洗 + seek + play」，不再发三次跨进程调用。
+ */
 internal const val SCRUB_COMMAND = "np.scrub"
 internal const val SCRUB_ARG_ACTIVE = "active"
+internal const val SCRUB_ARG_TARGET_MS = "targetMs"
+internal const val SCRUB_ARG_RESUME = "resume"
 
 /** 画面裁剪命令：UI「画面」面板切换 cover/fit（同样只在会话侧暴露） */
 internal const val CROP_COMMAND = "np.crop"
@@ -97,4 +104,15 @@ internal fun validatePrivateCommandArgs(action: String?, args: Bundle): Boolean 
 internal fun validatePrivateCommandArgs(action: String?, hasBooleanArg: (String) -> Boolean): Boolean {
     val key = requiredArgKey(action) ?: return false
     return hasBooleanArg(key)
+}
+
+/**
+ * 擦洗命令的附加参数校验（纯逻辑）：起手可以不带目标；松手/取消一旦带就必须是
+ * Long/Boolean。缺键合法（起手 active=true），类型错一律拒绝。
+ */
+internal fun validateScrubArgs(active: Boolean, targetMs: Any?, resume: Any?): Boolean {
+    if (active) return true
+    if (targetMs != null && targetMs !is Long) return false
+    if (resume != null && resume !is Boolean) return false
+    return true
 }

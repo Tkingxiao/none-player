@@ -1,0 +1,49 @@
+E209 会话账目清理与契约并发 真机证据（60dd2f94，2026-10-25）
+================================================================
+
+设备 60dd2f94（小米平板 6，SD860/MIUI/API 34）。安装 release：
+adb -s 60dd2f94 install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+
+----------------------------------------------------------------
+1. 门禁读数
+----------------------------------------------------------------
+./gradlew test lint :app:assembleDebug :app:assembleRelease --offline
+BUILD SUCCESSFUL
+test：142 套件 / 1009 项 / 0 失败 / 0 error
+lint：15 份报告 / 0 issue（ResumeItems 的 Uri.parse 已改 KTX String.toUri）
+release：29,190,315 B
+debug：66,222,424 B
+
+----------------------------------------------------------------
+2. PS 回归冒烟（顺带验证 E208 的 mp2/parser 链未回退）
+----------------------------------------------------------------
+10-25 00:58:31.585 D/NpFfmpegAudio(12378): create mp2 mime=audio/mpeg-L2 rate=44100 ch=1 csd=[] blockAlign=0
+10-25 00:58:31.585 D/NpFfmpegDecoder(12378): audio create codec=mp2 parser=on
+state=PlaybackState {state=PLAYING(3), position=3727, buffered position=10517, speed=1.0, ...}
+- 0 FATAL EXCEPTION / 0 AndroidRuntime / 0 onPlaybackResumption UnsupportedOperationException。
+- 起播 deep link: noneplayer://player?uri=content%3A%2F%2Fmedia%2Fexternal%2Fvideo%2Fmedia%2F1000015396&fs=1
+
+----------------------------------------------------------------
+3. onPlaybackResumption 代码路径
+----------------------------------------------------------------
+- media3 1.11.1 的 MediaSessionImpl 调三参
+  `onPlaybackResumption(session, controller, isForPlayback=true)`；默认二参实现返回
+  failed future（UnsupportedOperationException 告警来源），本批已在
+  PlaybackService.ScrubAwareCallback 覆写三参。
+- 数据源：HistoryRepository.mostRecentForResumption() 走 DAO
+  `SELECT * FROM playback_history ORDER BY last_played_at DESC LIMIT 1` 冷查询；
+  不用 recent StateFlow.first()（无订阅者时首帧是空表）。
+- 构造 media3 条目：HistoryEntry.toResumeMediaItem()（mediaId=mediaId、uri/mime/标题/封面）。
+- 真机播放 PS 后无上述告警；**系统「媒体」面板恢复入口未人工走查**（设备可用，
+  留任务文档 §1 [P2] 取证）。媒体键 stop→play 只验证到会话从 NONE 回到播放
+  （队列仍保留，不是 resumption 场景）。
+
+----------------------------------------------------------------
+4. 未截图走查的 UI 面
+----------------------------------------------------------------
+- 进度条实体拖拽（np.scrub 结束/取消单条命令）：参数校验/旧路径由
+  PrivateCommandsTest + 编译覆盖；未在真机上做手势走查。
+- 个人页紧凑档列数与媒体库/搜索同口径：代码+编译+共享 helper；未截图对比。
+- 失败面板 retryable=false 隐藏「重试」、suggestion 展示：代码+PlaybackFailureTest；
+  未用真实失败夹具截图。
+- per-media 键淘汰只在完整扫描触发；纯函数测试覆盖，未在真机删文件后等后台清理。

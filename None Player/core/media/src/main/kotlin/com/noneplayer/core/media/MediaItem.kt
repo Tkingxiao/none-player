@@ -62,6 +62,12 @@ data class MediaItem(
 ) {
     /** 是否为 `.cue` 分轨项（引擎按此挂 ClippingConfiguration） */
     val isClipped: Boolean get() = clipStartUs > 0 || clipEndUs > 0
+
+    /**
+     * 跨来源唯一键（`sourceId:id`，与播放历史键同格式）。
+     * 合并/去重/Lazy key 必须用它；裸 [id] 会把不同来源的同 ID 条目吞掉。
+     */
+    val identity: String get() = "$sourceId:$id"
 }
 
 /** 媒体种类：由 mimeType 判定（音频/视频），UI 用它决定角标、图标与分组 */

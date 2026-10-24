@@ -183,7 +183,7 @@ class AppSettings(private val context: Context) {
         private fun audioOnlyKey(mediaKey: String) = booleanPreferencesKey("audio_only_$mediaKey")
 
         /** 手动选择的弹幕文件（批次 6）：按视频 uri 记忆，渲染层优先于同名自动匹配 */
-        private fun danmakuManualKey(videoUri: String) = stringPreferencesKey("danmaku_manual_$videoUri")
+        private fun danmakuManualKey(videoUri: String) = stringPreferencesKey("$DANMAKU_MANUAL_PREFIX$videoUri")
 
         /** 弹幕本地屏蔽词（批次 6）：换行分隔的原始串 */
         private val KEY_DANMAKU_BLOCKLIST = stringPreferencesKey("danmaku_blocklist")
@@ -225,6 +225,33 @@ class AppSettings(private val context: Context) {
          * DataStore 侧补齐后两处的约定才是一句话。
          */
         private val PER_MEDIA_PREFIXES = listOf("subtitle_", "display_", "audio_only_")
+
+        /** 弹幕手选键按视频 uri（不是 mediaKey），清理时需另给有效 uri 集 */
+        private const val DANMAKU_MANUAL_PREFIX = "danmaku_manual_"
+
+        /**
+         * 孤儿 per-media 键的纯判定（E209）：媒体已不在扫描结果里 → 删。
+         * 三族键尾是 `sourceId:id`；弹幕手选键尾是视频 uri。空尾也删。
+         */
+        internal fun perMediaOrphanKeys(
+            keyNames: Set<String>,
+            validMediaKeys: Set<String>,
+            validUris: Set<String>,
+            includeDanmaku: Boolean,
+        ): List<String> {
+            val out = ArrayList<String>()
+            for (name in keyNames) {
+                val family = PER_MEDIA_PREFIXES.firstOrNull { name.startsWith(it) }
+                if (family != null) {
+                    if (name.removePrefix(family) !in validMediaKeys) out += name
+                    continue
+                }
+                if (includeDanmaku && name.startsWith(DANMAKU_MANUAL_PREFIX)) {
+                    if (name.removePrefix(DANMAKU_MANUAL_PREFIX) !in validUris) out += name
+                }
+            }
+            return out
+        }
 
         /** 最近搜索最多保留 5 条（设计稿 searchView 的 chips 一行放得下） */
         private const val MAX_SEARCH_HISTORY = 5
@@ -322,10 +349,11 @@ class AppSettings(private val context: Context) {
 
     /** 网格列数（紧凑档用，"1"/"2"/"3"），默认双列（设计稿 `.tier-compact .grid.v`） */
     val gridColumns: Flow<Int> = context.dataStore.data
-        .map { it[KEY_GRID_COLUMNS]?.toIntOrNull() ?: 2 }
+        .map { (it[KEY_GRID_COLUMNS]?.toIntOrNull() ?: 2).coerceIn(1, 3) }
 
     suspend fun setGridColumns(columns: Int) {
-        context.dataStore.edit { it[KEY_GRID_COLUMNS] = columns.toString() }
+        // 搜索页直接消费裸流；旧值/坏值 0 会走到 GridCells.Fixed(0) 崩掉。
+        context.dataStore.edit { it[KEY_GRID_COLUMNS] = columns.coerceIn(1, 3).toString() }
     }
 
     // ---- 媒体库视图 ----
@@ -556,6 +584,33 @@ class AppSettings(private val context: Context) {
             drops.forEach { prefs.remove(it) }
             prefs[KEY_PER_MEDIA_KEY_MIGRATED] = true
         }
+    }
+
+    /**
+     * E209：按当前扫描结果淘汰 per-media 键（字幕/显示/仅听/弹幕手选）。
+     *
+     * 只应在**完整扫描**后调用；权限缺口时不可见类别的键无法区分"真删"与"本轮没看到"，
+     * 宁可本轮不删。返回删除条数（诊断用）。
+     */
+    suspend fun prunePerMediaKeys(
+        validMediaKeys: Set<String>,
+        validUris: Set<String>,
+        includeDanmaku: Boolean = true,
+    ): Int {
+        var removed = 0
+        context.dataStore.edit { prefs ->
+            val keys = prefs.asMap().keys
+            val orphans = perMediaOrphanKeys(
+                keyNames = keys.mapTo(HashSet()) { it.name },
+                validMediaKeys = validMediaKeys,
+                validUris = validUris,
+                includeDanmaku = includeDanmaku,
+            ).toHashSet()
+            if (orphans.isEmpty()) return@edit
+            keys.filter { it.name in orphans }.forEach { prefs.remove(it) }
+            removed = orphans.size
+        }
+        return removed
     }
 
     /** 清除全部播放记忆（断点续播进度 + 最近播放时间），用于设置页「清除播放缓存」。 */
