@@ -35,4 +35,14 @@ class ScanFailureMemoTest {
         repeat(10) { memo.markFailed("file:///v$it.avi") }
         assertEquals(4, memo.sizeForTest())
     }
+
+    @Test
+    fun `clear 让清除缓存后的失败项立即重试`() {
+        val memo = ScanFailureMemo(ttlMs = 60_000L, nowMs = { 1_000L })
+        memo.markFailed("file:///a.avi")
+        assertTrue(memo.hasFailed("file:///a.avi"))
+        memo.clear()
+        assertFalse(memo.hasFailed("file:///a.avi"))
+        assertEquals(0, memo.sizeForTest())
+    }
 }

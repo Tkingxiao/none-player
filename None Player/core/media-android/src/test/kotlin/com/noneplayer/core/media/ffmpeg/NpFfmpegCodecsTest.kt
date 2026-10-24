@@ -84,6 +84,53 @@ class NpFfmpegCodecsTest {
         assertNull(NpFfmpegCodecs.audioCodecInTable("audio/mp3", emptyList()))
     }
 
+    private fun wavHeader(tag: Int, blockAlign: Int, extra: ByteArray = ByteArray(0)): ByteArray {
+        val bytes = ByteArray(18 + extra.size)
+        fun put16(offset: Int, v: Int) {
+            bytes[offset] = (v and 0xff).toByte()
+            bytes[offset + 1] = ((v ushr 8) and 0xff).toByte()
+        }
+        put16(0, tag)
+        put16(12, blockAlign)
+        put16(16, extra.size)
+        extra.copyInto(bytes, 18)
+        return bytes
+    }
+
+    @Test
+    fun `WAVEFORMATEX 只在完整头时提供 tag 与 blockAlign`() {
+        val wmav1 = wavHeader(0x0160, 4096)
+        val full = NpFfmpegCodecs.waveFormatExOf(listOf(wmav1))
+        assertEquals(0x0160, full?.tag)
+        assertEquals(4096, full?.blockAlign)
+        assertTrue(NpFfmpegCodecs.hasWaveFormatEx(listOf(wmav1)))
+
+        // 只有 2 字节裸 tag（历史测试/内部用法）：能路由，但不算完整头
+        assertFalse(NpFfmpegCodecs.hasWaveFormatEx(listOf(byteArrayOf(0x60, 0x01))))
+        assertEquals(
+            "wmav1",
+            NpFfmpegCodecs.audioCodecInTable("audio/x-ms-wma", listOf(byteArrayOf(0x60, 0x01))),
+        )
+
+        // Media3Avi 的 codec-data-only 头两字节碰巧像 tag：cbSize 不自洽 → 不冒充完整头
+        val codecData = ByteArray(24).also { it[0] = 0x60; it[1] = 0x01 }
+        assertFalse(NpFfmpegCodecs.hasWaveFormatEx(listOf(codecData)))
+        assertEquals("wmav2", NpFfmpegCodecs.audioCodecInTable("audio/x-ms-wma", listOf(codecData)))
+
+        // WMA Pro/Lossless 的完整头同样可解析（解码器侧据此剥头/取 blockAlign）
+        assertEquals(0x0162, NpFfmpegCodecs.waveFormatExOf(listOf(wavHeader(0x0162, 1024)))?.tag)
+        assertEquals(0x0163, NpFfmpegCodecs.waveFormatExOf(listOf(wavHeader(0x0163, 2048)))?.tag)
+    }
+
+    @Test
+    fun `wma 族判据覆盖三个 mime`() {
+        assertTrue(NpFfmpegCodecs.isWmaFamily(MediaNames.MIME_WMA))
+        assertTrue(NpFfmpegCodecs.isWmaFamily(MediaNames.MIME_WMAPRO))
+        assertTrue(NpFfmpegCodecs.isWmaFamily(MediaNames.MIME_WMALOSSLESS))
+        assertFalse(NpFfmpegCodecs.isWmaFamily("audio/mpeg"))
+        assertFalse(NpFfmpegCodecs.isWmaFamily(null))
+    }
+
     @Test
     fun `JVM 无 native 时公开查询不冒充可解，inTable 仍反映表本身`() {
         // Robolectric/JVM 下 System.loadLibrary("npffmpeg") 必然失败 → isAvailable=false

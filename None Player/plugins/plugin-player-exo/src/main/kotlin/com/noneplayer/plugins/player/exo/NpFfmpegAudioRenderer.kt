@@ -46,6 +46,17 @@ class NpFfmpegAudioRenderer(
         if (format.cryptoType != C.CRYPTO_TYPE_NONE) {
             return C.FORMAT_UNSUPPORTED_DRM
         }
+        // WMA 族解码器 open 硬性要求 block_align；它只存在于完整 WAVEFORMATEX 里。
+        // Media3Avi 只下发 cbSize 字节的 codec data（无 tag/blockAlign），此时必须拒认，
+        // 否则 createDecoder 抛错会把整条会话打成 ERROR（宁可无音频也不要播放失败）。
+        if (NpFfmpegCodecs.isWmaFamily(mime) &&
+            !NpFfmpegCodecs.hasWaveFormatEx(format.initializationData)
+        ) {
+            return C.FORMAT_UNSUPPORTED_SUBTYPE
+        }
+        if (NpFfmpegCodecs.audioCodecName(mime, format.initializationData) == null) {
+            return C.FORMAT_UNSUPPORTED_TYPE
+        }
         if (!sinkSupportsFormat(format, C.ENCODING_PCM_16BIT)) {
             return C.FORMAT_UNSUPPORTED_SUBTYPE
         }

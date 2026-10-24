@@ -1,0 +1,121 @@
+E208 审查修复批 真机证据汇编（60dd2f94，2026-10-24）
+================================================================
+
+设备 60dd2f94（小米平板 6，SD860/MIUI/API 34）。全程静音（DND），只以
+PlaybackState/position 与 logcat 读数作证，未做听感验收。
+安装：adb -s 60dd2f94 install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+（release 29,190,315 B，2026-10-24 22:30；含 mpegaudio parser 的四 ABI 重编库）
+
+----------------------------------------------------------------
+1. PS（mpeg2video + mp2）时钟冻结修复：三层根因均已闭环
+----------------------------------------------------------------
+修复前（E207 证据 §9）：PLAYING 后 position 冻结 529ms，10s 后
+"Unexpected runtime error"；`NpFfmpegAudio create` 零日志。
+
+修复后（22:39 会话，content id 1000015396）：
+10-24 22:39:13.155 D/NpFfmpegDecoder(26257): audio decode pkt=0 in=417 out=2304 codec=mp2 (parsed)
+10-24 22:39:13.xxx ... 状态：PLAYING，position=3526，buffered=10517
+12s 后再取：state=PLAYING，position=44，buffered=10040，active item id 从 8 变 9
+——10.5s 的 PS 正片正常播完并自动连播到下一条；0 ERROR / 0 "Unexpected runtime error"。
+
+根因与修复（详见完成文档 E208）：
+① NextLib FfmpegAudioRenderer 先把 AUDIO_MPEG_L1/L2 映射到 mp3 解码器并抢在
+   自定义渲染器之前认领；NpFfmpegAudioRenderer 现插到 NextLib 之前（平台仍最前）。
+② build-ffmpeg.sh 把 parser 写成不存在的 mp3（configure 静默忽略）；MP2 的
+   PES 载荷不按帧对齐，第二个包起 avcodec_send_packet 恒 INVALIDDATA。
+   改 --enable-parser=mpegaudio，四 ABI 重编；prebuilt 里均可见
+   mpegaudio_parser.o（llvm-ar t 核对，4/4）。
+③ 音频 JNI 输入直接指向 direct buffer，没有 AV_INPUT_BUFFER_PADDING_SIZE；
+   解码前复制进 av_new_packet（自带 padding），MP2/WMA 共用。
+另外，mp2 属于本批新增白名单，平台无 L2 解码器；parser=on 是运行时证据：
+10-24 22:13:12.184 D/NpFfmpegDecoder(18406): audio create codec=mp2 parser=on
+
+----------------------------------------------------------------
+2. PS seek（回起点 + 丢包 + 等关键帧）仪器测试通过
+----------------------------------------------------------------
+新增 core/media-android androidTest：NpFfmpegPsSeekTest
+（45s 合成 PS，np-ps-seek.mpg；设备侧直接驱动 Extractor，绕开 60s 缓冲窗口）：
+
+  com.noneplayer.core.media.extract.NpFfmpegPsSeekTest:.
+  Time: 0.067
+  OK (1 test)
+
+测试内断言：seek(0, 30s) 后首个视频样本 flags 含 KEY_FRAME，pts ∈ [30s,32s)；
+首个音频样本 pts ≥ 30s。
+日志证据（22:25:58 会话）：
+  seek fallback: target=30000000 restart dataPos=0 waitKey=1
+  seek keyframe reached: pkt=30300000us
+
+修复的四个 seek 缺陷（E208）：
+① iformat->name 实际是 "mpeg"（av_find_input_format("mpegps") 只是别名），
+   旧 strcmp("mpegps") 从未命中，PS 一直走通用 avformat_seek_file，而非
+   "回起点+丢包"；
+② 关键帧等待把 npff_type_of 的 1 与 AVMEDIA_TYPE_VIDEO(=0) 比较，从未生效；
+③ 首个 ≥target 的包就把 seek_target 清掉；夹具里视频到 30.02s 时音频仍
+   29.60s，迟到音频从目标前 0.4s 开始播。目标保留到下次 seek，只丢迟到包；
+④ avformat_flush 后没有 avio_seek(0)，AVIO 旧缓冲会把旧位置数据重复吐出；
+   缓冲区内部寻位时 pending=-1，重开位置改用缓冲区末端（npff_data_pos）。
+另：SeekMap 时长为未知（RM/NUT）时不再把目标夹到 0（旧 coerceIn(0,0)）。
+
+----------------------------------------------------------------
+3. 多容器/多编码真机回归（同一 release，逐条 force-stop 后深链）
+----------------------------------------------------------------
+PS          position=3526  buffered=10517  PLAYING   （10.5s 播完自动连播）
+ASF         position=3274  buffered=10092  PLAYING   （wmv2+wmav2）
+FLV1        position=3039  buffered=10025  PLAYING   （flv1+mp3）
+H.264-FLV   position=3380  buffered=8023   PLAYING   （E207 遗留④已回归）
+WMV1+WMA    position=3336  buffered=10080  PLAYING   （WMA 完整 WAVEFORMATEX
+                                                       判据复核）
+WMV1+MP3    position=3006  buffered=10033  PLAYING   （MP3 不再带 WAVE csd；
+                                                       c2 MP3 无 Error 0xe）
+RV10        position=3199  buffered=8000   PLAYING
+RV20        position=3199  buffered=8000   PLAYING
+所有条目 0 Playback error / 0 FATAL。截图：
+screenshots/e208-2026-10-24/60dd2f94/PS.png、WMV1MP3.png。
+
+Wmv2Avi 日志：
+  wmv2 samples=685 base=9992 streams=2 idx1=true
+  emit 640x360 extra=0 durationUs=10033333
+（WMV1+MP3 走 Wmv2AviExtractor，MP3 轨 csd 为空；修复前会给整段
+WAVEFORMATEX，E207 FLV 已实锤 c2 MP3 带 WAVE 头首帧 Error 0xe。）
+
+----------------------------------------------------------------
+4. E206 回归：LegacyVideoRenderer 未加载 libnplegacy 就认领 WMV2
+----------------------------------------------------------------
+修复前（22:46:55，WMV1+WMA 播完自动连播到 wl-wmv2-regression.avi）：
+  E/.noneplayer.app(27923): No implementation found for long
+    com.noneplayer.core.media.legacy.LegacyNative.nativeCreate(...)
+  E/AndroidRuntime(27923): FATAL EXCEPTION: ExoPlayer:Playback
+  java.lang.UnsatisfiedLinkError: ... is the library loaded, e.g. System.loadLibrary?
+根因：E206 参数化 LegacyVideoRenderer 后，默认 supportsFormat 只用
+LegacyDecoderLibrary.codecName()（纯字符串映射），不再经过带 System.loadLibrary
+的 supports()/isAvailable()；冷进程先认领 WMV2，createDecoder 直接调 nativeCreate。
+修复：默认 codecNameFor 恢复 isAvailable() 闸；LegacyCodec 构造前同闸防御。
+
+修复后（22:51 会话，同一路径）：
+11s 后自动连播到 wl-wmv2-regression.avi（session metadata description 确认），
+  D/NpPerf(29321): LegacyVideoRenderer surface clone ok src=86788410 clone=161654183
+session PLAYING item 17 position=2034；0 FATAL / 0 UnsatisfiedLinkError。
+
+----------------------------------------------------------------
+5. 未收口观察：自合成 WMV2 变体在 AVI remux 布局下首包 EINVAL
+----------------------------------------------------------------
+新合成的 320x240 testsrc2 WMV2（imageio ffmpeg）及其 video-only remux：
+  ExoPlayerImplInternal: LegacyVideoRenderer error, index=3,
+    format=... video/x-np-wmv2 ...
+  Caused by: os1: 送入 -22
+同一 WMV2 位流的 E206 夹具（np-wmv2.avi，still-image 编码）在
+Wmv2PictureTest 中正常；把 np-wmv2.avi 用 -c:v copy 重新封装后也复现 -22，
+说明问题在 Wmv2AviExtractor 对这批 movi/idx1 布局的样本偏移/首帧取数，
+不是本次音频 CSD 改动。已记任务文档 §9.3 [P3] WMV2 变体夹具矩阵，不在本批展开。
+
+----------------------------------------------------------------
+6. 门禁读数（2026-10-24）
+----------------------------------------------------------------
+./gradlew test lint :app:assembleDebug :app:assembleRelease --offline
+BUILD SUCCESSFUL in 2m 8s
+test：140 套件 / 999 项 / 0 失败 / 0 error
+lint：15 份报告 / 0 issue
+release：29,190,315 B（较 E207 的 29,173,931 B +16,384 B）
+debug：66,222,424 B
+androidTest：NpFfmpegPsSeekTest OK（1/1）

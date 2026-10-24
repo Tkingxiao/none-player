@@ -34,5 +34,10 @@ internal class ScanFailureMemo(
         synchronized(failedAt) { failedAt.remove(key) }
     }
 
+    /** 用户显式「清除缓存」：进程内短 TTL 结论也要失效，否则清完 5 分钟内仍不重试。 */
+    fun clear() {
+        synchronized(failedAt) { failedAt.clear() }
+    }
+
     fun sizeForTest(): Int = synchronized(failedAt) { failedAt.size }
 }

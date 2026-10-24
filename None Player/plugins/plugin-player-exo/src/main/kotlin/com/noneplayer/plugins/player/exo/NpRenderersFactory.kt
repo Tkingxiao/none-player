@@ -12,6 +12,7 @@ import androidx.media3.exoplayer.video.VideoRendererEventListener
 import com.noneplayer.core.media.ffmpeg.NpFfmpegCodecs
 import com.noneplayer.core.media.ffmpeg.NpFfmpegVideoCodec
 import com.noneplayer.core.media.probe.PlatformDecoderSupport
+import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegAudioRenderer
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.FfmpegVideoRenderer
 import io.github.anilbeesetti.nextlib.media3ext.ffdecoder.NextRenderersFactory
 
@@ -153,15 +154,25 @@ open class NpRenderersFactory(
         // E204 白名单批音频：WMA 族（wmav1/2/wmapro/wmalossless）等 → 共享 libavcodec
         // 软解转 s16 PCM。自持 DefaultAudioSink（与 NextLib 默认构造同姿势——平台渲染器
         // 用 factory 的 sink，本渲染器不认领它们的 mime，互不干扰）。
-        out.add(
-            NpFfmpegAudioRenderer(
-                eventHandler,
-                eventListener,
-                arrayOf(
-                    // 与 ExoPlayer 默认链一致的静音跳变消除/标准化不需要：s16 直出交给 sink
-                ),
+        //
+        // **必须排在 NextLib 的 FfmpegAudioRenderer 之前**（E208 审查发现）：NextLib 的
+        // mime 表把 AUDIO_MPEG_L1/L2 也映射到 "mp3" 解码器（其源码 FfmpegLibrary），
+        // 平台无 L2 解码器时它会先认领并拿 MP3 解码器喂 MP2 帧——音频不出 PCM，媒体时钟
+        // 停在首音频包（E207 真机 PS 冻结 529ms 的根因，且 NpFfmpegAudio create 零日志）。
+        // 平台渲染器仍排在最前：设备真有 L2 硬解时优先平台。
+        val npAudio = NpFfmpegAudioRenderer(
+            eventHandler,
+            eventListener,
+            arrayOf(
+                // 与 ExoPlayer 默认链一致的静音跳变消除/标准化不需要：s16 直出交给 sink
             ),
         )
+        val nextLibAudio = out.indexOfFirst { it is FfmpegAudioRenderer }
+        if (nextLibAudio >= 0) {
+            out.add(nextLibAudio, npAudio)
+        } else {
+            out.add(npAudio)
+        }
     }
 
     private companion object {

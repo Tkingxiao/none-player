@@ -54,7 +54,20 @@ typedef struct NpFfExt {
     int eof;
     int64_t duration_us;
     int64_t seek_target_us;  /* 无 read_seek 容器的"回起点+丢包"寻位目标；<0 = 无 */
+    int seek_wait_key;       /* 回起点寻位时等视频关键帧；音频照常放行 */
+    int has_video;
 } NpFfExt;
+
+/* AVIO 缓冲区末端的**文件偏移**（= 底层输入已经读到的位置）。
+ * avformat_seek_file 若在缓冲区内部完成寻位（未触发 seek 回调），media3 重新打开的
+ * 位置必须取这个值：缓冲区里 [目标, 末端) 的数据仍然有效，从末端继续读才不会重复/错位。
+ * 旧实现只在回调发生时告诉 media3 目标；缓冲区内部寻位时 pending=-1，media3 会按
+ * SeekMap 的 0 重开，随后 AVIO 又把旧缓冲吐一遍 → E208 审查修复。 */
+static int64_t npff_data_pos(NpFfExt *E) {
+    if (!E || !E->avio || !E->avio->buffer) return 0;
+    int64_t p = E->avio->pos + (E->avio->buf_end - E->avio->buffer);
+    return p < 0 ? 0 : p;
+}
 
 static jint npff_type_of(const AVStream *st) {
     switch (st->codecpar->codec_type) {
@@ -90,8 +103,15 @@ static int64_t avio_seek_callback(void *opaque, int64_t offset, int whence) {
     NpFfExt *E = (NpFfExt *)opaque;
     JNIEnv *env = NULL;
     if ((*g_vm)->GetEnv(g_vm, (void **)&env, JNI_VERSION_1_4) != JNI_OK) return -1;
+    whence &= ~AVSEEK_FORCE;
     if (whence == AVSEEK_SIZE) {
         return (*env)->CallLongMethod(env, E->bridge.reader, E->bridge.length_mid);
+    }
+    if (whence == SEEK_END) {
+        int64_t len = (*env)->CallLongMethod(env, E->bridge.reader, E->bridge.length_mid);
+        if (len < 0) return -1;
+        offset += len;
+        whence = SEEK_SET;
     }
     if (offset < 0) return -1;
     /* whence: SEEK_SET=0 / SEEK_CUR=1（avio 内部相对寻位，归一成绝对量） */
@@ -187,6 +207,10 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffExtFindStreams(
     /* 恢复可寻址：此后的用户 seek（npffExtSeekTimeUs）发生在 avformat_seek_file
      * 返回与下一次读之间，pending_seek 会被 Kotlin 在读之前物化，不产生失步 */
     E->avio->seekable = AVIO_SEEKABLE_NORMAL;
+    E->has_video = 0;
+    for (int i = 0; i < E->fmt->nb_streams; i++) {
+        if (npff_type_of(E->fmt->streams[i]) == 1) { E->has_video = 1; break; }
+    }
     if (E->fmt->duration > 0) E->duration_us = E->fmt->duration;
     ALOG("find_stream_info ok nb_streams=%d", E->fmt->nb_streams);
     return E->fmt->nb_streams;
@@ -318,18 +342,36 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffExtRead(
             av_packet_unref(E->pkt);
             continue;
         }
-        if (E->seek_target_us >= 0) {
-            /* "回起点重读"寻位的丢包闸：目标之前的包（含早到的音频）全部丢弃 */
-            int64_t us = (E->pkt->pts == AV_NOPTS_VALUE)
+        if (E->seek_target_us >= 0 || E->seek_wait_key) {
+            int type = npff_type_of(st);
+            int key = (E->pkt->flags & AV_PKT_FLAG_KEY) != 0;
+            int64_t ts = (E->pkt->pts != AV_NOPTS_VALUE) ? E->pkt->pts : E->pkt->dts;
+            int64_t us = (ts == AV_NOPTS_VALUE)
                              ? 0
-                             : av_rescale_q(E->pkt->pts, st->time_base, (AVRational){1, 1000000});
-            if (us < E->seek_target_us) {
-                av_packet_unref(E->pkt);
-                continue;
+                             : av_rescale_q(ts, st->time_base, (AVRational){1, 1000000});
+            if (E->seek_target_us >= 0) {
+                /* "回起点重读"寻位的丢包闸：目标之前的包（含早到的音频）全部丢弃。
+                 * **不能**在第一个 ≥ target 的包上清掉目标：音频与视频交错时，
+                 * 首个 ≥ target 的往往是视频，后面还会跟一批 pts 仍 < target 的
+                 * 音频（本夹具视频 30.02s 时音频才 29.60s）。旧写法会让音频从
+                 * 目标前 0.4s 开始播；目标保留到下一次 seek，天然只丢迟到包。 */
+                if (us < E->seek_target_us) {
+                    av_packet_unref(E->pkt);
+                    continue;
+                }
             }
-            ALOG("seek fallback reached: pkt=%lldus target=%lld", (long long)us,
-                 (long long)E->seek_target_us);
-            E->seek_target_us = -1;
+            /* 注意 type 是 npff_type_of 的映射（1=视频/2=音频），不是 AVMediaType
+             * 原生枚举（AVMEDIA_TYPE_VIDEO=0）；旧写法把 1 和 0 比较，等待关键帧
+             * 从未生效（E208 真机测试发现）。 */
+            if (E->seek_wait_key && type == 1) {
+                /* 视频必须等到关键帧；音频/其它轨照常放行，别拿空白拖住媒体时钟。 */
+                if (!key) {
+                    av_packet_unref(E->pkt);
+                    continue;
+                }
+                E->seek_wait_key = 0;
+                ALOG("seek keyframe reached: pkt=%lldus", (long long)us);
+            }
         }
         E->has_packet = 1;
         return 0;
@@ -351,8 +393,10 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffExtPacketPtsUs(
     NpFfExt *E = (NpFfExt *)(intptr_t)handle;
     if (!E || !E->has_packet || !E->pkt || !E->fmt) return 0;
     AVStream *st = E->fmt->streams[E->pkt->stream_index];
-    if (E->pkt->pts == AV_NOPTS_VALUE) return 0;
-    return av_rescale_q(E->pkt->pts, st->time_base, (AVRational){1, 1000000});
+    /* pts 缺失时回退 dts：部分 PES 只在部分包上带 PTS，恒回 0 会让媒体时钟倒退。 */
+    int64_t ts = (E->pkt->pts != AV_NOPTS_VALUE) ? E->pkt->pts : E->pkt->dts;
+    if (ts == AV_NOPTS_VALUE) return 0;
+    return av_rescale_q(ts, st->time_base, (AVRational){1, 1000000});
 }
 
 JNIEXPORT jint JNICALL
@@ -378,10 +422,16 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffExtPacketData(
     (void)clazz;
     NpFfExt *E = (NpFfExt *)(intptr_t)handle;
     if (!E || !E->has_packet || !E->pkt) return 0;
-    uint8_t *out_ptr = (*env)->GetDirectBufferAddress(env, out);
-    if (!out_ptr) return 0;
-    jint n = E->pkt->size < capacity ? E->pkt->size : capacity;
-    memcpy(out_ptr, E->pkt->data, (size_t)n);
+    uint8_t *out_ptr = out ? (*env)->GetDirectBufferAddress(env, out) : NULL;
+    /* 以 direct buffer 的**真实** capacity 为准再夹一次。旧实现只信 Kotlin 传来的
+     * pendingSize，包大于缓冲时会写穿 native 堆（E208 审查发现的高危缺陷）。 */
+    jlong cap = out ? (*env)->GetDirectBufferCapacity(env, out) : 0;
+    jint n = 0;
+    if (out_ptr && cap > 0) {
+        n = E->pkt->size < capacity ? E->pkt->size : capacity;
+        if ((jlong)n > cap) n = (jint)cap;
+        memcpy(out_ptr, E->pkt->data, (size_t)n);
+    }
     av_packet_unref(E->pkt);
     E->has_packet = 0;
     return n;
@@ -396,6 +446,26 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffExtPendingSeekPos(
     int64_t p = E->pending_seek;
     E->pending_seek = -1;
     return p;
+}
+
+/** 回文件起点重读（mpegps 以及所有 avformat_seek_file 失败的容器）。
+ *
+ * **必须先 avformat_flush**：字节流回卷后 demuxer 的 relative-ts 重锚
+ * （cur_dts/first_dts 平移）会在"已消费 N 秒回到 0"上算出 +1e6s 的垃圾平移
+ * （E207 真机：视频包 pts 全体 +1e12µs，时钟冻结）。
+ * **还必须 avio_seek(0)**：avformat_flush 不清 AVIO 读缓冲，下一轮 av_read_frame
+ * 会先吐旧位置的数据 —— E208 审查发现。avio_seek 把缓冲作废，media3 重开数据源后
+ * 从 0 重新读；若 0 恰在缓冲内（缓冲从文件头开始），重开位置取缓冲末端，先消费
+ * 0..末端 的有效数据再从末端续读，不重复也不跳。 */
+static void npff_restart_from_zero(NpFfExt *E, int64_t target_us) {
+    avformat_flush(E->fmt);
+    int64_t rc = avio_seek(E->avio, 0, SEEK_SET);
+    E->seek_target_us = target_us < 0 ? 0 : target_us;
+    E->seek_wait_key = E->has_video;
+    E->eof = 0;
+    E->pending_seek = (rc >= 0) ? npff_data_pos(E) : 0;
+    ALOG("seek fallback: target=%lld restart dataPos=%lld waitKey=%d",
+         (long long)E->seek_target_us, (long long)E->pending_seek, E->seek_wait_key);
 }
 
 /** 按时间 seek：优先 demuxer 自带 read_seek（asf/rm/flv 有）；**没有 read_seek 的容器
@@ -415,28 +485,32 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffExtSeekTimeUs(
     }
     E->pending_seek = -1; /* 清残留：seek 目标由本次寻位重新记账 */
     E->eof = 0;
+    E->seek_wait_key = 0;
     int64_t target = time_us < 0 ? 0 : time_us;
     /* FFmpeg 7 起 read_seek 在内部 FFInputFormat 上，公共头看不到；我们只有五个
-     * 容器，其中仅 mpegps 没有 demuxer seek（mpeg.c 只有 read_timestamp），
-     * 按名判断即可。 */
-    if (E->fmt->iformat->name != NULL &&
-        strcmp(E->fmt->iformat->name, "mpegps") == 0) {
-        /* 回文件起点重读。**必须先 avformat_flush**：字节流回卷后 demuxer 的
-         * relative-ts 重锚（cur_dts/first_dts 平移）会在"已消费 N 秒回到 0"上
-         * 算出 +1e6s 的垃圾平移（E207 真机：视频包 pts 全体 +1e12µs，时钟冻结）；
-         * flush 把 demuxer 状态重置为"未读过"再重读，时间戳保持绝对值。 */
-        avformat_flush(E->fmt);
-        E->seek_target_us = target;
-        E->pending_seek = 0;
-        ALOG("seek fallback: target=%lld (flush + restart from 0)", (long long)target);
+     * 容器，其中仅 MPEG-PS 没有可用 demuxer seek。**按名判断必须用 "mpeg"**：
+     * `av_find_input_format("mpegps")` 能按别名找到，但 iformat->name 是 "mpeg"
+     * （libavformat/mpeg.c 的 ff_mpegps_demuxer），旧写法永远不命中，实际一直走
+     * 通用 avformat_seek_file（E208 审查发现）。 */
+    const char *iformat_name = E->fmt->iformat->name;
+    if (iformat_name != NULL &&
+        (strcmp(iformat_name, "mpeg") == 0 || strcmp(iformat_name, "mpegps") == 0)) {
+        npff_restart_from_zero(E, target);
         return target;
     }
     int rc = avformat_seek_file(E->fmt, -1, INT64_MIN, target, target, 0);
     if (rc < 0) {
-        rc = avformat_seek_file(E->fmt, -1, INT64_MIN, 0, 0, 0);
-        if (rc < 0) return -1;
-        return 0;
+        /* 该容器没有可用 seek（FLV 未开 FAST_SEEK 就走这里）：退回通用
+         * "回起点 + 丢包"，旧实现退回 seek(0) 会让拖动落到片头。 */
+        npff_restart_from_zero(E, target);
+        return target;
     }
+    E->seek_target_us = -1;
+    E->seek_wait_key = 0;
+    /* 缓冲区内部寻位不会触发回调（pending 仍是 -1）：重开位置必须取缓冲区末端，
+     * 否则 AVIO 的旧缓冲和重开数据源会重复读同一段。 */
+    E->pending_seek = npff_data_pos(E);
+    ALOG("seek ok target=%lld dataPos=%lld", (long long)target, (long long)E->pending_seek);
     return target;
 }
 

@@ -1,5 +1,6 @@
 package com.noneplayer.core.media.extract
 
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.C
 import androidx.media3.common.MimeTypes
@@ -18,6 +19,7 @@ import com.noneplayer.core.media.ffmpeg.NpFfmpegCodecs
 import com.noneplayer.core.media.ffmpeg.NpFfmpegNative
 import java.io.IOException
 import java.nio.ByteBuffer
+import kotlin.math.max
 
 /**
  * avformat 解封装（E207 avformat 批）：asf / rm / flv / mpegps / nut。
@@ -37,6 +39,14 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
 
     /** sniff 魔数（顺序无关）：name → magic */
     companion object {
+        private const val TAG = "NpFfmpegExtractor"
+
+        /** 单包上限：超过按损坏包丢弃。64MB 远高于 4K 关键帧，同时挡住伪造头 OOM。 */
+        internal const val MAX_PACKET_BYTES = 64 * 1024 * 1024
+
+        /** 包缓冲起步值：按需增长；不为未被嗅探认领的实例预分配（工厂一次造 5 个）。 */
+        internal const val INITIAL_PACKET_CAPACITY = 64 * 1024
+
         private val CONTAINERS = listOf(
             Triple("asf", byteArrayOf(0x30.toByte(), 0x26.toByte(), 0xB2.toByte(), 0x75.toByte()), "WMV (ASF)"),
             Triple("rm", byteArrayOf(0x2E, 0x52, 0x4D, 0x46), "RealMedia (RM)"),
@@ -56,8 +66,9 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
     private var pendingSize = 0
     private var durationUs = 0L
     private val bridge = NpExtractorReaderImpl()
-    private val packetBuffer = ByteBuffer.allocateDirect(2 * 1024 * 1024)
-    private val packetCopy = ByteArray(2 * 1024 * 1024)
+    private var packetBuffer: ByteBuffer? = null
+    private var packetCopy = ByteArray(0)
+    private var discardBuffer: ByteBuffer? = null
 
     private data class TrackRef(val streamIndex: Int, val output: TrackOutput, val mime: String?)
 
@@ -105,37 +116,42 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
             streamsEmitted = true
         }
 
-        // 上一个包还没交给 TrackOutput（先 drain 再读新包）
-        if (pendingStream >= 0) {
-            dispatchPending()
-            return Extractor.RESULT_CONTINUE
-        }
-
-        val rc = NpFfmpegNative.npffExtRead(handle)
-        return when (rc) {
-            0 -> {
-                pendingStream = NpFfmpegNative.npffExtPacketStream(handle)
-                pendingPtsUs = NpFfmpegNative.npffExtPacketPtsUs(handle)
-                pendingKeyframe = NpFfmpegNative.npffExtPacketFlags(handle) == 1
-                pendingSize = NpFfmpegNative.npffExtPacketSize(handle)
-                val track = trackRefFor(pendingStream)
-                if (track == null || pendingSize <= 0) {
-                    // 非认领流（字幕等）：丢包继续
-                    NpFfmpegNative.npffExtPacketData(handle, packetBuffer, packetBuffer.capacity())
-                    pendingStream = -1
-                    return read(input, seekPosition)
-                }
+        // 丢包用循环而不是递归：不支持编码的长片可以让数万包连续落到
+        // "非认领流" 分支，递归会直接爆栈。
+        while (true) {
+            if (pendingStream >= 0) {
                 dispatchPending()
-                Extractor.RESULT_CONTINUE
+                return Extractor.RESULT_CONTINUE
             }
-            1 -> {
-                val pos = NpFfmpegNative.npffExtPendingSeekPos(handle)
-                if (pos < 0) return Extractor.RESULT_END_OF_INPUT
-                seekPosition.position = pos
-                Extractor.RESULT_SEEK
+
+            when (val rc = NpFfmpegNative.npffExtRead(handle)) {
+                0 -> {
+                    val stream = NpFfmpegNative.npffExtPacketStream(handle)
+                    val size = NpFfmpegNative.npffExtPacketSize(handle)
+                    val track = trackRefFor(stream)
+                    if (track == null || size <= 0 || size > MAX_PACKET_BYTES) {
+                        if (size > MAX_PACKET_BYTES) {
+                            Log.w(TAG, "丢包：声称 $size 字节，超过上限 $MAX_PACKET_BYTES")
+                        }
+                        discardPacket()
+                        continue
+                    }
+                    pendingStream = stream
+                    pendingPtsUs = NpFfmpegNative.npffExtPacketPtsUs(handle)
+                    pendingKeyframe = NpFfmpegNative.npffExtPacketFlags(handle) == 1
+                    pendingSize = size
+                    dispatchPending()
+                    return Extractor.RESULT_CONTINUE
+                }
+                1 -> {
+                    val pos = NpFfmpegNative.npffExtPendingSeekPos(handle)
+                    if (pos < 0) return Extractor.RESULT_END_OF_INPUT
+                    seekPosition.position = pos
+                    return Extractor.RESULT_SEEK
+                }
+                -1 -> return Extractor.RESULT_END_OF_INPUT
+                else -> throw IOException("npff demux read failed")
             }
-            -1 -> Extractor.RESULT_END_OF_INPUT
-            else -> throw IOException("npff demux read failed")
         }
     }
 
@@ -143,16 +159,24 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
         trackOutputs.firstOrNull { it.streamIndex == streamIndex }
 
     private fun dispatchPending() {
-        val track = trackRefFor(pendingStream)
+        val stream = pendingStream
+        val size = pendingSize
         pendingStream = -1
-        track ?: run {
-            NpFfmpegNative.npffExtPacketData(handle, packetBuffer, packetBuffer.capacity())
+        val track = trackRefFor(stream)
+        if (track == null) {
+            discardPacket()
             return
         }
-        packetBuffer.clear()
-        val n = NpFfmpegNative.npffExtPacketData(handle, packetBuffer, pendingSize)
-        if (n <= 0) return
-        packetBuffer.get(packetCopy, 0, n)
+        val buffer = ensurePacketBuffer(size)
+        val n = NpFfmpegNative.npffExtPacketData(handle, buffer, size)
+        if (n != size) {
+            // C 侧按 direct buffer 真实 capacity 再夹一次；不一致说明容量契约坏了，
+            // 已消费的包只能丢（绝不把截断样本交给解码器）。
+            Log.w(TAG, "包拷贝不完整 expected=$size got=$n（该包丢弃）")
+            return
+        }
+        buffer.clear()
+        buffer.get(packetCopy, 0, n)
         val parsable = androidx.media3.common.util.ParsableByteArray(packetCopy, n)
         track.output.sampleData(parsable, n, TrackOutput.SAMPLE_DATA_PART_MAIN)
         track.output.sampleMetadata(
@@ -162,6 +186,24 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
             0,
             null,
         )
+    }
+
+    /** 按需扩容（不被嗅探认领的实例零分配）；容量夹在 [MAX_PACKET_BYTES]。 */
+    private fun ensurePacketBuffer(size: Int): ByteBuffer {
+        val current = packetBuffer
+        val target = packetCapacityFor(current?.capacity() ?: 0, size)
+        if (current != null && current.capacity() == target) return current
+        return ByteBuffer.allocateDirect(target).also {
+            packetBuffer = it
+            packetCopy = ByteArray(target)
+        }
+    }
+
+    /** 丢弃当前 C 侧缓存包；1 字节 direct 只是 JNI 取地址的载体。 */
+    private fun discardPacket() {
+        val buffer = discardBuffer
+            ?: ByteBuffer.allocateDirect(1).also { discardBuffer = it }
+        NpFfmpegNative.npffExtPacketData(handle, buffer, 1)
     }
 
     private fun emitStreams(streamCount: Int) {
@@ -174,6 +216,36 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
             val mime = mimeForCodecName(codecName)
             if (mime == null) continue // 不认识的编码：轨丢弃（诚实边界）
             val info = NpFfmpegNative.npffExtStreamInfo(handle, index)
+
+            // csd 只给真正消费它的路径：
+            // - WMA 三兄弟（wmav1/2/pro/lossless）吃"整段 WAVEFORMATEX"（tag@0 供路由
+            //   细分、blockAlign@12 供解码器 open，解码器侧切掉 18B 头）；
+            // - 其余 npff 表内 mime（cook/sipr/atrac3/mp2…）的 avformat extradata 已是
+            //   FFmpeg 原生形态，原样直传；
+            // - Vorbis 的平台/NextLib 解码器要 Xiph lacing 拆出的三段头，缺了会在
+            //   NextLib FfmpegAudioDecoder 里越界（E208 审查发现）；
+            // - AAC 平台解码要 AudioSpecificConfig 原样作 csd-0；
+            // - mp3 等平台轨自解析——**绝不能**把合成 WAVE 头塞给平台解码器
+            //   （E207 真机：MP3 带 WAVE csd-0 → c2 首帧 Error 0xe）。
+            val initData: List<ByteArray>? = if (type == 1) {
+                NpFfmpegNative.npffExtStreamExtraData(handle, index)?.let { listOf(it) }
+            } else {
+                when {
+                    NpFfmpegCodecs.isWmaFamily(mime) ->
+                        NpFfmpegNative.npffExtStreamWavHeader(handle, index)?.let { listOf(it) }
+                    mime == MimeTypes.AUDIO_VORBIS ->
+                        splitXiphExtradata(NpFfmpegNative.npffExtStreamExtraData(handle, index))
+                    NpFfmpegCodecs.inTable(mime) || mime == MimeTypes.AUDIO_AAC ->
+                        NpFfmpegNative.npffExtStreamExtraData(handle, index)?.let { listOf(it) }
+                    else -> null
+                }
+            }
+            if (mime == MimeTypes.AUDIO_VORBIS && initData == null) {
+                // 拿不到三段头就不能把轨交给 NextLib（其 getVorbisExtraData 按 index 取）。
+                Log.w(TAG, "vorbis csd 不是 Xiph lacing，丢轨")
+                continue
+            }
+
             val format = androidx.media3.common.Format.Builder()
                 .setSampleMimeType(mime)
                 .apply {
@@ -187,52 +259,11 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
                             setPcmEncoding(C.ENCODING_PCM_16BIT)
                         }
                     }
-                    if (mime == MediaNames.MIME_WMV3 || mime == MediaNames.MIME_VC1 ||
-                        mime == MediaNames.MIME_WMV1 || mime == MediaNames.MIME_WMV2
-                    ) {
-                        setMaxInputSize(maxOf(info[4], 1))
-                    }
+                    if (initData != null) setInitializationData(initData)
                 }
                 .build()
             val trackOutput = sink.track(trackId++, if (type == 1) C.TRACK_TYPE_VIDEO else C.TRACK_TYPE_AUDIO)
-            if (type == 1) {
-                val csd = NpFfmpegNative.npffExtStreamExtraData(handle, index)
-                if (csd != null) {
-                    trackOutput.format(format.buildUpon().setInitializationData(listOf(csd)).build())
-                } else {
-                    trackOutput.format(format)
-                }
-            } else {
-                // csd 只给真正消费它的路径。WMA 族吃"整段 WAVEFORMATEX"（tag@0 供路由
-                // 细分，解码器侧切掉 18B 头）；其余 npff 表内 mime（cook/sipr/atrac3/mp2…）
-                // 的 avformat extradata 已是 FFmpeg 原生形态，原样直传；AAC 平台解码要
-                // AudioSpecificConfig 原样作 csd-0；mp3 等平台轨自解析——**绝不能**把合成
-                // WAVE 头塞给平台解码器（E207 真机：MP3 带 WAVE csd-0 → c2 首帧 Error 0xe）
-                if (mime == MediaNames.MIME_WMA) {
-                    val wav = NpFfmpegNative.npffExtStreamWavHeader(handle, index)
-                    if (wav != null) {
-                        trackOutput.format(format.buildUpon().setInitializationData(listOf(wav)).build())
-                    } else {
-                        trackOutput.format(format)
-                    }
-                } else if (NpFfmpegCodecs.inTable(mime)) {
-                    val csd = NpFfmpegNative.npffExtStreamExtraData(handle, index)
-                    if (csd != null) {
-                        trackOutput.format(format.buildUpon().setInitializationData(listOf(csd)).build())
-                    } else {
-                        trackOutput.format(format)
-                    }
-                } else if (mime == MimeTypes.AUDIO_AAC) {
-                    val csd = NpFfmpegNative.npffExtStreamExtraData(handle, index)
-                    if (csd != null) {
-                        trackOutput.format(format.buildUpon().setInitializationData(listOf(csd)).build())
-                    } else {
-                        trackOutput.format(format)
-                    }
-                } else {
-                    trackOutput.format(format)
-                }
-            }
+            trackOutput.format(format)
             trackOutputs.add(TrackRef(index, trackOutput, mime))
         }
         val duration = durationUs
@@ -243,7 +274,7 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
             override fun getSeekPoints(timeUs: Long): SeekMap.SeekPoints =
                 // 位置哨兵 0：seek(position=0, timeUs) 的时间参数才是真值，
                 // avformat_seek_file 选点后经 AVIO 挂起 → RESULT_SEEK 落到实际偏移
-                SeekMap.SeekPoints(SeekPoint(timeUs.coerceIn(0, duration.coerceAtLeast(0)), 0))
+                SeekMap.SeekPoints(SeekPoint(seekPointTimeUs(duration, timeUs), 0))
         })
         sink.endTracks()
         tracksEnded = true
@@ -313,6 +344,62 @@ class NpFfmpegExtractor(private val iformatName: String, private val containerNa
         "pcm_s16le" -> MimeTypes.AUDIO_RAW
         else -> null
     }
+}
+
+/**
+ * 包缓冲扩容策略（纯函数便于 JVM 测试）：不缩容；需要时一步长到目标或 64KB 起步，
+ * 上限 [NpFfmpegExtractor.MAX_PACKET_BYTES]。调用方负责先拒绝超过上限的包。
+ */
+internal fun packetCapacityFor(currentCapacity: Int, packetSize: Int): Int {
+    require(packetSize > 0) { "packetSize=$packetSize" }
+    if (packetSize <= currentCapacity) return currentCapacity
+    return max(packetSize, NpFfmpegExtractor.INITIAL_PACKET_CAPACITY)
+        .coerceAtMost(NpFfmpegExtractor.MAX_PACKET_BYTES)
+}
+
+/**
+ * SeekMap 的时间钳位：**时长未知（≤0）时不能把目标夹到 0**。
+ * 旧写法 `coerceIn(0, duration.coerceAtLeast(0))` 在 RM/NUT 这类估不出时长的容器上
+ * 把每次 seek 都变成 0，E208 审查修复。
+ */
+internal fun seekPointTimeUs(durationUs: Long, requestedUs: Long): Long {
+    val requested = requestedUs.coerceAtLeast(0L)
+    return if (durationUs > 0L) requested.coerceAtMost(durationUs) else requested
+}
+
+/**
+ * Vorbis 的 AVCodecParameters.extradata = Xiph lacing 的三段头：
+ * `[包数-1][len0 7bit-varlen][h0][len1][h1][h2]`。Media3/NextLib 要的是拆开的
+ * `initializationData[0..2]`，整段直传会让 NextLib 的 getVorbisExtraData 越界。
+ * 解析失败返回 null（调用方丢轨，不把不完整头交给解码器）。
+ */
+internal fun splitXiphExtradata(csd: ByteArray?): List<ByteArray>? {
+    if (csd == null || csd.size < 4) return null
+    val packetCount = (csd[0].toInt() and 0xff) + 1
+    if (packetCount < 3) return null
+    var pos = 1
+    val lengths = IntArray(packetCount - 1)
+    for (i in lengths.indices) {
+        var len = 0
+        var shift = 0
+        while (true) {
+            if (pos >= csd.size || shift > 28) return null
+            val b = csd[pos++].toInt() and 0xff
+            len = len or ((b and 0x7f) shl shift)
+            shift += 7
+            if (b and 0x80 == 0) break
+        }
+        lengths[i] = len
+    }
+    val parts = ArrayList<ByteArray>(packetCount)
+    for (len in lengths) {
+        if (len <= 0 || pos + len > csd.size) return null
+        parts.add(csd.copyOfRange(pos, pos + len))
+        pos += len
+    }
+    if (pos >= csd.size) return null
+    parts.add(csd.copyOfRange(pos, csd.size))
+    return parts
 }
 
 /** 工厂：每个容器一个实例（sniff 各认各的 magic）。 */

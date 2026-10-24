@@ -124,6 +124,47 @@ object NpFfmpegCodecs {
     fun inTable(mime: String?): Boolean =
         mime != null && (videoCodecs.containsKey(mime) || audioCodecs.containsKey(mime))
 
+    /** WMA 三兄弟（wmav1/2 / wmapro / wmalossless）：csd 语义统一由 WAVEFORMATEX 承载。 */
+    fun isWmaFamily(mime: String?): Boolean =
+        mime == MediaNames.MIME_WMA || mime == MediaNames.MIME_WMAPRO ||
+            mime == MediaNames.MIME_WMALOSSLESS
+
+    /**
+     * 从 csd 里识别「完整 WAVEFORMATEX」并取 nBlockAlign（字节 [12..13]）。
+     *
+     * 两种生产者的 csd 语义不同，必须区分：
+     * - 本项目的 Wmv2AviExtractor / NpFfmpegExtractor：整段 WAVEFORMATEX（18B 头 + cbSize 尾）；
+     * - Media3Avi：只发 cbSize 字节的 codec data（18B 头已被剥掉，也没有 tag/blockAlign）。
+     *
+     * 判定用 cbSize 自洽（`[16..17] == size - 18`）+ tag 在 WMA 区间，避免把任意 codec data
+     * 的头两字节误读成 tag。没有完整头 = 拿不到 blockAlign（wmav1/wmav2/wmapro 解码器
+     * open 必需），调用方应放弃解码而不是猜。
+     */
+    fun waveFormatExOf(initializationData: List<ByteArray>): WaveFormatEx? {
+        val csd = initializationData.firstOrNull { it.isNotEmpty() } ?: return null
+        return waveFormatExOf(csd)
+    }
+
+    internal fun waveFormatExOf(csd: ByteArray): WaveFormatEx? {
+        if (csd.size < WAVEFORMATEX_HEADER_SIZE) return null
+        val tag = u16(csd, 0)
+        if (tag !in WMA_TAG_RANGE) return null
+        if (u16(csd, WAVEFORMATEX_HEADER_SIZE - 2) != csd.size - WAVEFORMATEX_HEADER_SIZE) return null
+        return WaveFormatEx(tag = tag, blockAlign = u16(csd, 12))
+    }
+
+    /** 是否有可用的完整 WAVEFORMATEX（决定 WMA 族能否真解码）。 */
+    fun hasWaveFormatEx(initializationData: List<ByteArray>): Boolean =
+        waveFormatExOf(initializationData) != null
+
+    data class WaveFormatEx(val tag: Int, val blockAlign: Int)
+
+    private fun u16(bytes: ByteArray, offset: Int): Int =
+        (bytes[offset].toInt() and 0xff) or ((bytes[offset + 1].toInt() and 0xff) shl 8)
+
+    private val WMA_TAG_RANGE = 0x0160..0x0163
+    private const val WAVEFORMATEX_HEADER_SIZE = 18
+
     /** 表查询（纯内存，无可用性闸）——测试与诊断用它钉「表内容」本身。 */
     internal fun videoCodecInTable(mime: String?): String? = videoCodecs[mime]
 
@@ -133,9 +174,15 @@ object NpFfmpegCodecs {
         if (mime == null || !audioCodecs.containsKey(mime)) return null
         val fromTable = audioCodecs[mime]
         return fromTable ?: run {
-            val tag = initializationData.firstOrNull()?.takeIf { it.size >= 2 }?.let { bytes ->
-                (bytes[0].toInt() and 0xff) or ((bytes[1].toInt() and 0xff) shl 8)
-            } ?: 0x0161
+            // 只在「完整 WAVEFORMATEX」或测试用的裸 tag（2 字节）时读 tag；Media3Avi 的
+            // codec-data-only csd 没有 tag，按最常见的 wmav2 兜底（真实 blockAlign 缺失
+            // 会在渲染器 supportsFormat 阶段被拒，不会带着猜的值进解码器）。
+            val csd = initializationData.firstOrNull { it.isNotEmpty() }
+            val tag = when {
+                csd == null -> 0x0161
+                csd.size == 2 -> u16(csd, 0)
+                else -> waveFormatExOf(csd)?.tag ?: 0x0161
+            }
             when (tag) {
                 0x0160 -> "wmav1"
                 0x0161 -> "wmav2"

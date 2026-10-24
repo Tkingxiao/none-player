@@ -92,8 +92,7 @@ build_one() {
       --enable-decoder=wmv2,mpeg4,wmv1,wmv3,vc1,rv10,rv20,rv30,rv40,msmpeg4v1,msmpeg4v2,msmpeg4v3,vp5,vp6,vp6a,vp6f,prores,ffv1,huffyuv,ffvhuff,cfhd,dirac,theora,svq1,svq3,indeo2,indeo3,indeo4,indeo5,fraps,flv,mjpeg,mpeg1video,mpeg2video,wmav1,wmav2,wmapro,wmalossless,wavpack,tta,als,cook,atrac1,atrac3,atrac3al,atrac3pal,sipr,mp1,mp2 \
       --enable-demuxer=asf,rm,flv,mpegps,nut \
       --enable-demuxer=mpegvideo \
-      --enable-parser=mpeg4video,mpegvideo,vc1,vorbis,aac,ac3,mp3,h264,flv \
-      --enable-parser=mpeg4video,mpegvideo \
+      --enable-parser=mpeg4video,mpegvideo,vc1,vorbis,aac,ac3,mpegaudio,h264,flv \
       --extra-cflags="-Os -fvisibility=hidden -ffunction-sections -fdata-sections -fPIC -DANDROID" \
       --extra-ldflags="-Wl,-z,max-page-size=16384 -Wl,--gc-sections"
     echo "===== license ${abi} ====="

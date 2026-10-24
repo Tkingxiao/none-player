@@ -43,14 +43,16 @@ class NpFfmpegVideoCodec(
             if (rc < 0) throw NpFfmpegDecoderException("送入 $rc")
             return
         }
-        val direct = if (data.isDirect) {
+        // nativeSendDirect 不看 Java position：非 0 时必须复制 [position, limit) 到
+        // scratch，否则会把 direct buffer 前缀当帧数据（E205 P3 余项，E208 审查补）。
+        val direct = if (data.isDirect && data.position() == 0) {
             data
         } else {
             val n = data.remaining()
             val scratch = sendScratch?.takeIf { it.capacity() >= n }
                 ?: ByteBuffer.allocateDirect(maxOf(n, 64 * 1024)).also { sendScratch = it }
             scratch.clear()
-            scratch.put(data)
+            scratch.put(data.duplicate())
             scratch.flip()
             scratch
         }

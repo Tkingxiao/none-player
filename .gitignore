@@ -67,6 +67,7 @@ bug list.txt
 **/src/androidTest/assets/*.webm
 **/src/androidTest/assets/*.ts
 **/src/androidTest/assets/*.m4v
+**/src/androidTest/assets/*.mpg
 /android-ndk-*.zip
 /ffmpeg_*.orig.tar.xz
 

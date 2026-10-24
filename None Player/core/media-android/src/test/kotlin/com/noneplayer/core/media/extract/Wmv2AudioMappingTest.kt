@@ -37,6 +37,28 @@ class Wmv2AudioMappingTest {
     }
 
     @Test
+    fun `only wma family gets WAVEFORMATEX csd`() {
+        val strf = ByteArray(24)
+        // WMA：整段 strf 作 csd（tag/flags/blockAlign 都在里面）
+        assertEquals(
+            listOf(strf),
+            wmvAudioInitializationData(MediaNames.MIME_WMA, strf),
+        )
+        assertEquals(
+            listOf(strf),
+            wmvAudioInitializationData(MediaNames.MIME_WMAPRO, strf),
+        )
+        assertEquals(
+            listOf(strf),
+            wmvAudioInitializationData(MediaNames.MIME_WMALOSSLESS, strf),
+        )
+        // MP3/PCM 绝不能带 WAVE 头（E208：c2 MP3 会首帧 Error 0xe）
+        assertNull(wmvAudioInitializationData(MimeTypes.AUDIO_MPEG, strf))
+        assertNull(wmvAudioInitializationData(MimeTypes.AUDIO_RAW, strf))
+        assertNull(wmvAudioInitializationData(MediaNames.MIME_WMA, null))
+    }
+
+    @Test
     fun `bits per sample map to media3 pcm encodings`() {
         assertEquals(C.ENCODING_PCM_8BIT, pcmEncodingForBits(8))
         assertEquals(C.ENCODING_PCM_16BIT, pcmEncodingForBits(16))

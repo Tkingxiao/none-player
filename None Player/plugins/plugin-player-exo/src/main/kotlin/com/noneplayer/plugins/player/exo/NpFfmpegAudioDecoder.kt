@@ -6,7 +6,6 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.decoder.DecoderInputBuffer
 import androidx.media3.decoder.SimpleDecoder
 import androidx.media3.decoder.SimpleDecoderOutputBuffer
-import com.noneplayer.core.media.MediaNames
 import com.noneplayer.core.media.ffmpeg.NpFfmpegCodecs
 import com.noneplayer.core.media.ffmpeg.NpFfmpegDecoderException
 import com.noneplayer.core.media.ffmpeg.NpFfmpegNative
@@ -34,7 +33,11 @@ class NpFfmpegAudioDecoder(
     private val codecName: String
     private val extraData: ByteArray?
 
+    /** WMA 族的完整 WAVEFORMATEX 解析结果；非 WMA 族或只有 codec data 时为 null */
+    private val wave: NpFfmpegCodecs.WaveFormatEx?
+
     private var handle: Long = 0
+    private var inputScratch: ByteBuffer? = null
     private var hasOutputFormat = false
     @Volatile
     private var channelCount = 0
@@ -45,18 +48,30 @@ class NpFfmpegAudioDecoder(
         val mime = format.sampleMimeType ?: throw NpFfmpegDecoderException("no mime")
         codecName = NpFfmpegCodecs.audioCodecName(mime, format.initializationData)
             ?: throw NpFfmpegDecoderException("no npffmpeg audio codec for $mime")
-        extraData = ffmpegExtraData(mime, format.initializationData)
+        wave = if (NpFfmpegCodecs.isWmaFamily(mime)) {
+            NpFfmpegCodecs.waveFormatExOf(format.initializationData)
+        } else {
+            null
+        }
+        if (NpFfmpegCodecs.isWmaFamily(mime) && wave == null) {
+            // 没有整段 WAVEFORMATEX 就拿不到 block_align（wmav*/wmapro open 硬性要求）。
+            // 渲染器 supportsFormat 已按同一判据拒绝，能走到这里说明上游漏了闸。
+            throw NpFfmpegDecoderException(
+                "WMA csd 不是完整 WAVEFORMATEX（无法取 blockAlign）：$mime",
+            )
+        }
+        extraData = ffmpegExtraData(mime, format.initializationData, wave)
         android.util.Log.d(
             "NpFfmpegAudio",
             "create $codecName mime=$mime rate=${format.sampleRate} ch=${format.channelCount} " +
-                "csd=${format.initializationData.map { it.size }}",
+                "csd=${format.initializationData.map { it.size }} blockAlign=${wave?.blockAlign ?: 0}",
         )
         handle = NpFfmpegNative.npffAudioCreate(
             codecName,
             extraData,
             format.sampleRate.takeIf { it != Format.NO_VALUE } ?: 0,
             format.channelCount.takeIf { it != Format.NO_VALUE } ?: 0,
-            wavBlockAlign(mime, format.initializationData),
+            wave?.blockAlign ?: 0,
         )
         if (handle == 0L) {
             throw NpFfmpegDecoderException("初始化 $codecName 失败")
@@ -67,22 +82,22 @@ class NpFfmpegAudioDecoder(
     override fun getName(): String = "npffAudio-$codecName"
 
     /**
-     * FFmpeg 的 wma extradata 语义 = WAVEFORMATEX **之后**的尾部（FFmpeg avidec 同款）：
-     * 我们的 csd 是整段 strf（tag 在 [0..1] 供路由读），所以 wma 族在这里切掉 18 字节
-     * 头再交给解码器——整段直传会让 wmav2 的 open 读到错位的 flags 直接 EINVAL
-     * （真机实录"初始化 wmav2 失败"）。
+     * WMA 三兄弟（wmav1/2/wmapro/wmalossless）统一剥掉 18B WAVEFORMATEX 头，只留
+     * codec-specific data；其它 mime 原样直传。Media3Avi 的 codec-data-only csd
+     * 不会走到这一步（渲染器按 [NpFfmpegCodecs.hasWaveFormatEx] 拒认）。
      */
-    /** WAVEFORMATEX.nBlockAlign（[12..13]）；非 WMA / 无 csd 返回 0 */
-    private fun wavBlockAlign(mime: String?, initializationData: List<ByteArray>): Int {
-        if (mime != MediaNames.MIME_WMA && mime != MediaNames.MIME_WMAPRO) return 0
-        val strf = initializationData.firstOrNull { it.size >= 14 } ?: return 0
-        return (strf[12].toInt() and 0xff) or ((strf[13].toInt() and 0xff) shl 8)
-    }
-
-    private fun ffmpegExtraData(mime: String?, initializationData: List<ByteArray>): ByteArray? {
+    private fun ffmpegExtraData(
+        mime: String?,
+        initializationData: List<ByteArray>,
+        wave: NpFfmpegCodecs.WaveFormatEx?,
+    ): ByteArray? {
         val csd = initializationData.firstOrNull { it.isNotEmpty() } ?: return null
-        if (mime == MediaNames.MIME_WMA && csd.size > WAVEFORMATEX_SIZE) {
-            return csd.copyOfRange(WAVEFORMATEX_SIZE, csd.size)
+        if (NpFfmpegCodecs.isWmaFamily(mime) && wave != null) {
+            return if (csd.size > WAVEFORMATEX_SIZE) {
+                csd.copyOfRange(WAVEFORMATEX_SIZE, csd.size)
+            } else {
+                null
+            }
         }
         return csd
     }
@@ -117,7 +132,19 @@ class NpFfmpegAudioDecoder(
             outputBuffer.shouldBeSkipped = true
             return null
         }
-        val result = NpFfmpegNative.npffAudioDecode(handle, inputData, inputData.limit())
+        // native 侧用 GetDirectBufferAddress + size，不看 Java position（E205 P3 余项）。
+        val size = inputData.remaining()
+        val packet = if (inputData.position() == 0) {
+            inputData
+        } else {
+            val scratch = inputScratch?.takeIf { it.capacity() >= size }
+                ?: ByteBuffer.allocateDirect(maxOf(size, 16 * 1024)).also { inputScratch = it }
+            scratch.clear()
+            scratch.put(inputData.duplicate())
+            scratch.flip()
+            scratch
+        }
+        val result = NpFfmpegNative.npffAudioDecode(handle, packet, size)
         when (result) {
             ERROR_OTHER -> return NpFfmpegDecoderException("decode 失败（见 logcat）")
             ERROR_INVALID_DATA -> {
@@ -144,10 +171,6 @@ class NpFfmpegAudioDecoder(
         return null
     }
 
-    /** 供 native 回调：输出缓冲不够时扩容（契约见 np_ffmpeg_decoder.c 音频段注释） */
-    fun growOutputBuffer(outputBuffer: SimpleDecoderOutputBuffer, requiredSize: Int): ByteBuffer =
-        outputBuffer.grow(requiredSize)
-
     override fun release() {
         super.release()
         if (handle != 0L) {
@@ -160,9 +183,6 @@ class NpFfmpegAudioDecoder(
         const val WAVEFORMATEX_SIZE = 18
         const val ERROR_INVALID_DATA = -1
         const val ERROR_OTHER = -2
-
-        /** 与 NextLib 同值：µ-law 解码的最大输出，覆盖白名单音频族的单包输出 */
-        const val INITIAL_OUTPUT_BUFFER_SIZE_16BIT = 65535
     }
 }
 

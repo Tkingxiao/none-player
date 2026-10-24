@@ -55,6 +55,16 @@ internal class ScanCoverNegativeCache(
     /** 保护下面全部可变状态：抽帧线程与 UI 侧 requestCovers 可能并发访问同一个实例。 */
     private val lock = Any()
 
+    /**
+     * 落盘串行锁（E208 审查补）：真正的 tmp 写入/原子替换只在**这把**锁里做，状态 [lock]
+     * 仍然只护内存。原因有两条：
+     * - 多个抽帧 worker 同时 `markFailed` 时，旧实现会并发写同一个 `.tmp` 并同时 rename，
+     *   可能让旧快照覆盖新快照或 rename 失败；
+     * - `clear()` 与在途落盘交错时，已经 claim 的旧 JSON 会在 clear 之后把文件写回来。
+     * 加锁顺序固定为 [ioLock] → [lock]（save/clear 都按此顺序），读取路径只拿 [lock]。
+     */
+    private val ioLock = Any()
+
     /** key → 首次判定失败的时间戳（毫秒）。插入顺序即「被发现失败」的顺序，淘汰时同毫秒按它兜底。 */
     private val entries = LinkedHashMap<String, Long>()
 
@@ -126,7 +136,7 @@ internal class ScanCoverNegativeCache(
      * 磁盘满/目录只读时不会退化成「每条失败都试一次全量写」的写放大；写失败由 dirty
      * 复位兜着，下个节流窗口或 flush() 会再试。
      */
-    private fun saveInternal(force: Boolean): Boolean {
+    private fun saveInternal(force: Boolean): Boolean = synchronized(ioLock) {
         val claim = synchronized(lock) {
             ensureLoaded()
             if (!dirty) return false
@@ -140,7 +150,7 @@ internal class ScanCoverNegativeCache(
         val (json, count) = claim
         val ok = writeClaimed(json, count)
         if (!ok) synchronized(lock) { dirty = true }
-        return ok
+        ok
     }
 
     /** 锁外执行的实际写盘：tmp + 原子替换；失败保留旧文件并置回 dirty。 */
@@ -162,14 +172,18 @@ internal class ScanCoverNegativeCache(
     }
 
     /** 清空结论并删除落盘文件（用户「清除缓存」/重置索引时调用）。 */
-    fun clear() = synchronized(lock) {
-        entries.clear()
-        dirty = false
-        lastWriteAtMs = null
-        loaded = true
-        file.delete()
-        File(file.path + TMP_SUFFIX).delete()
-        Unit
+    fun clear() {
+        // 先等在途落盘结束，再清内存+删文件：否则在途的旧 JSON 会在 clear 后把文件写回。
+        synchronized(ioLock) {
+            synchronized(lock) {
+                entries.clear()
+                dirty = false
+                lastWriteAtMs = null
+                loaded = true
+            }
+            file.delete()
+            File(file.path + TMP_SUFFIX).delete()
+        }
     }
 
     /** 当前持有的条目数（已淘汰过期项；仅用于日志/自检）。 */

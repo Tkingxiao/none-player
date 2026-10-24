@@ -11,6 +11,7 @@ $assets = @(
     @{ Path = "None Player/core/media-android/src/androidTest/assets/xvid-clip.avi"; Sha = "5462d72253352c486edf61ce1a9ac93e9f7db9fa8955aa9c94889a225d309ede"; Bytes = 195980 },
     @{ Path = "None Player/core/media-android/src/androidTest/assets/xvid-qpel.avi"; Sha = "12c87b0f70dde722455bc6631740e0827d0f494b96c877d436a90918cb6676b4"; Bytes = 195926 },
     @{ Path = "None Player/core/media-android/src/androidTest/assets/np-h264.mp4"; Sha = "e2137690a24c68d8ace9e9eec0b9b1ef426e855de248816c6b34f512c5583058"; Bytes = 616217 },
+    @{ Path = "None Player/core/media-android/src/androidTest/assets/np-ps-seek.mpg"; Sha = "2f19455ab74648b452cfbb174877e0b114b683879ef9134481ea0076bac62cdf"; Bytes = 2121728 },
     @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/np-wmv2.avi"; Sha = "97bd108fcfad92e007b677b5bf5a2e17a523661f8cfff87f1cf1b8455c8cf9f1"; Bytes = 32458 },
     @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/np-mjpeg.avi"; Sha = "8612e5d8fc58922d33d8c59c7bfcde01e99685c79f6ca97a0efa7d9a0246df2b"; Bytes = 1228608 },
     @{ Path = "None Player/plugins/plugin-player-exo/src/androidTest/assets/xvid-clip.avi"; Sha = "5462d72253352c486edf61ce1a9ac93e9f7db9fa8955aa9c94889a225d309ede"; Bytes = 195980 },

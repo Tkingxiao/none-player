@@ -679,24 +679,37 @@ static int npff_transform_error(int error_number) {
                                               : AUDIO_DECODER_ERROR_OTHER;
 }
 
-/** 音频解码包装：ctx + C 侧 s16 PCM 累积缓冲（无 JNI 回调，Kotlin 二段式取走）。 */
+/** 音频解码包装：ctx + 帧解析器 + C 侧 s16 PCM 累积缓冲（无 JNI 回调，二段式取走）。 */
 typedef struct NpFfmpegAudio {
     AVCodecContext *ctx;
+    AVCodecParserContext *parser;
     uint8_t *pcm;
     size_t pcm_size;
     size_t pcm_cap;
+    int packets;
 } NpFfmpegAudio;
 
-/** 一次 decode：send packet → receive 全部帧 → swr 转 s16 交错累积进 A->pcm。 */
-static int npff_decode_packet(NpFfmpegAudio *A, AVPacket *packet) {
+/** 喂一个**完整访问单元**：send → receive 全部帧 → swr 转 s16。返回本次产生的 PCM 字节数。 */
+static int npff_decode_access_unit(NpFfmpegAudio *A, const uint8_t *data, int size) {
     AVCodecContext *ctx = A->ctx;
-    uint8_t *output_buffer = NULL;
-    int output_size = 0;
-    int result = avcodec_send_packet(ctx, packet);
+    AVPacket *packet = av_packet_alloc();
+    if (!packet) return AUDIO_DECODER_ERROR_OTHER;
+    // FFmpeg 解码器要求输入尾部有 AV_INPUT_BUFFER_PADDING_SIZE 个零字节（SIMD 会
+    // overread）。此前直接指向 JNI direct buffer、靠后面碰巧是零，MP2 第二个 PES 包
+    // 起就恒 INVALIDDATA（E208 真机实录）。av_new_packet 自带 padding，复制一次换正确性。
+    if (av_new_packet(packet, size) < 0) {
+        av_packet_free(&packet);
+        return AUDIO_DECODER_ERROR_OTHER;
+    }
+    memcpy(packet->data, data, (size_t)size);
+    int send_rc = avcodec_send_packet(ctx, packet);
+    av_packet_free(&packet);
+    int result = send_rc;
     if (result < 0 && result != AVERROR(EAGAIN) && result != AVERROR_EOF) {
         return npff_transform_error(result);
     }
-    int out_size = 0;
+    size_t produced = 0;
+    uint8_t *output_buffer = NULL;
     while (1) {
         AVFrame *frame = av_frame_alloc();
         if (!frame) return AUDIO_DECODER_ERROR_OTHER;
@@ -704,6 +717,9 @@ static int npff_decode_packet(NpFfmpegAudio *A, AVPacket *packet) {
         if (result < 0) {
             av_frame_free(&frame);
             if (result == AVERROR(EAGAIN) || result == AVERROR_EOF) break;
+            if (A->packets <= 4) {
+                ALOG("audio receive err=%d pkt=%d send=%d", result, A->packets, send_rc);
+            }
             return npff_transform_error(result);
         }
         if (frame->nb_samples <= 0) {
@@ -750,7 +766,6 @@ static int npff_decode_packet(NpFfmpegAudio *A, AVPacket *packet) {
             A->pcm_cap = new_cap;
         }
         output_buffer = A->pcm + A->pcm_size;
-        output_size = (int)(A->pcm_cap - A->pcm_size);
         int max_out_frames = out_sample_size * channels > 0 ? chunk_bytes / (out_sample_size * channels) : 0;
         result = swr_convert(swr, &output_buffer, max_out_frames,
                              (const uint8_t **) frame->data, frame->nb_samples);
@@ -758,10 +773,50 @@ static int npff_decode_packet(NpFfmpegAudio *A, AVPacket *packet) {
         if (result < 0) {
             return AUDIO_DECODER_ERROR_INVALID_DATA;
         }
+        produced += (size_t)result * out_sample_size * channels;
         A->pcm_size += (size_t)result * out_sample_size * channels;
-        out_size = (int)A->pcm_size;
     }
-    return out_size;
+    return (int)produced;
+}
+
+/**
+ * 一次输入包：MPEG-PS 的 PES 载荷**不保证按 MP2 帧对齐**（首个 2016B 恰好含 5 帧，
+ * 之后 2019B 的包按帧边界切就是半帧，直接送 send 会恒 INVALIDDATA）。有解析器时
+ * 先用 [av_parser_parse2] 重组成完整访问单元，再逐帧解码。
+ */
+static int npff_decode_packet(NpFfmpegAudio *A, AVPacket *packet) {
+    if (!A->parser) {
+        int rc = npff_decode_access_unit(A, packet->data, packet->size);
+        int total = rc < 0 ? rc : (int)A->pcm_size;
+        if (A->packets < 4 || total == 0) {
+            ALOG("audio decode pkt=%d in=%d out=%d codec=%s", A->packets, packet->size,
+                 total, A->ctx->codec ? A->ctx->codec->name : "?");
+        }
+        A->packets++;
+        return total;
+    }
+    const uint8_t *in = packet->data;
+    int left = packet->size;
+    while (left > 0) {
+        uint8_t *out = NULL;
+        int out_size = 0;
+        int used = av_parser_parse2(A->parser, A->ctx, &out, &out_size,
+                                    in, left, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+        if (used < 0) return npff_transform_error(used);
+        in += used;
+        left -= used;
+        if (out_size > 0) {
+            int rc = npff_decode_access_unit(A, out, out_size);
+            if (rc < 0) return rc;
+        }
+        if (used == 0 && out_size == 0) break;
+    }
+    if (A->packets < 4 || A->pcm_size == 0) {
+        ALOG("audio decode pkt=%d in=%d out=%zu codec=%s (parsed)", A->packets, packet->size,
+             A->pcm_size, A->ctx->codec ? A->ctx->codec->name : "?");
+    }
+    A->packets++;
+    return (int)A->pcm_size;
 }
 
 JNIEXPORT jlong JNICALL
@@ -806,6 +861,9 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioCreate(
         return 0;
     }
     A->ctx = ctx;
+    /* 音频 PES 载荷可能不是帧对齐的：有 parser 就按帧重组（MP2/MP1 必需）。 */
+    A->parser = av_parser_init(codec->id);
+    ALOG("audio create codec=%s parser=%s", codec->name, A->parser ? "on" : "off");
     return (jlong)(intptr_t)A;
 }
 
@@ -819,13 +877,14 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioDecode(
     NpFfmpegAudio *A = (NpFfmpegAudio *)(intptr_t)handle;
     AVPacket *packet = av_packet_alloc();
     if (!packet) return AUDIO_DECODER_ERROR_OTHER;
-    /* 直接指向输入 direct buffer，不做拷贝（send 是同步消费） */
-    packet->data = input;
-    packet->size = input_size;
+    /* parser 也会 overread 输入尾部：先复制进带 padding 的 AVPacket 再解析。 */
+    if (av_new_packet(packet, input_size) < 0) {
+        av_packet_free(&packet);
+        return AUDIO_DECODER_ERROR_OTHER;
+    }
+    memcpy(packet->data, input, (size_t)input_size);
     A->pcm_size = 0; /* 每个输入 packet 一轮：先清上一轮的累积 */
     int decoded = npff_decode_packet(A, packet);
-    packet->data = NULL;
-    packet->size = 0;
     av_packet_free(&packet);
     return decoded;
 }
@@ -874,6 +933,10 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioReset(
     if (!A || !A->ctx) return 0;
     /* 白名单音频族 flush 即可（truehd 的重开特例不在白名单内） */
     avcodec_flush_buffers(A->ctx);
+    if (A->parser) {
+        av_parser_close(A->parser);
+        A->parser = av_parser_init(A->ctx->codec_id);
+    }
     A->pcm_size = 0;
     return handle;
 }
@@ -884,6 +947,7 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_npffAudioRelease(JNIEnv *en
     (void)clazz;
     NpFfmpegAudio *A = (NpFfmpegAudio *)(intptr_t)handle;
     if (!A) return;
+    if (A->parser) av_parser_close(A->parser);
     if (A->ctx) {
         if (A->ctx->opaque) swr_free((SwrContext **)&A->ctx->opaque);
         avcodec_free_context(&A->ctx);

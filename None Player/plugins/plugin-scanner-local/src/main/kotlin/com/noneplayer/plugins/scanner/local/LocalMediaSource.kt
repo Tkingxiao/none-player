@@ -309,8 +309,11 @@ class LocalMediaSource(
         val before = cacheSizeBytes()
         thumbsDir.listFiles()?.forEach { it.delete() }
         // E205⑫：否定缓存同属「可再生的缓存」——用户显式清缓存必须一并清掉，否则坏文件
-        // 的失败结论带着 7 天 TTL 存活过这次操作（clear() 的 KDoc 一直声称会接到这里）
+        // 的失败结论带着 7 天 TTL 存活过这次操作（clear() 的 KDoc 一直声称会接到这里）。
+        // 进程内 5 分钟 memo 同属该口径（E208 审查补），否则清完缓存仍不会立刻重试。
         coverNegativeCache.clear()
+        coverFailures.clear()
+        aviDurationFailures.clear()
         return before
     }
 

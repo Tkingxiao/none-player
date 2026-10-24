@@ -16,6 +16,7 @@ import androidx.media3.extractor.SeekPoint
 import androidx.media3.extractor.TrackOutput
 import com.noneplayer.core.media.AviChunk
 import com.noneplayer.core.media.MediaNames
+import com.noneplayer.core.media.ffmpeg.NpFfmpegCodecs
 import java.io.EOFException
 import java.io.IOException
 import kotlin.math.abs
@@ -546,12 +547,13 @@ class Wmv2AviExtractor : Extractor {
                             if (stream.audioMime == MimeTypes.AUDIO_RAW) {
                                 setPcmEncoding(pcmEncodingForBits(stream.bitsPerSample))
                             }
-                            // E204：WMA 族的 codec 身份（wmav1/2/pro/lossless）与解码参数
-                            // 都在 WAVEFORMATEX 里——没有这段 extradata，FFmpeg 的 wma
-                            // 解码器 open 直接 EINVAL（真机实录"初始化 wmav2 失败"）
-                            if (stream.audioExtra != null && stream.audioMime != MimeTypes.AUDIO_RAW) {
-                                setInitializationData(listOf(stream.audioExtra))
-                            }
+                            // WMA 族的 codec 身份（wmav1/2/pro/lossless）与解码参数都在
+                            // WAVEFORMATEX 里——没有这段 extradata，FFmpeg 的 wma 解码器
+                            // open 直接 EINVAL（真机实录"初始化 wmav2 失败"）。
+                            // **只给 WMA 族**：把 WAVE 头塞给 MP3 平台解码器会让首帧
+                            // Error 0xe（E207 FLV 路径同类缺陷，E208 审查补上 AVI 路径）。
+                            wmvAudioInitializationData(stream.audioMime, stream.audioExtra)
+                                ?.let { setInitializationData(it) }
                         }
                         .build()
                     val track = sink.track(stream.index, C.TRACK_TYPE_AUDIO)
@@ -879,6 +881,17 @@ internal fun pcmEncodingForBits(bitsPerSample: Int): Int = when {
     bitsPerSample <= 24 -> C.ENCODING_PCM_24BIT
     else -> C.ENCODING_PCM_32BIT
 }
+
+/**
+ * AVI 音频轨的 csd：只有 WMA 族吃整段 WAVEFORMATEX（tag/blockAlign/解码参数）。
+ * MP3 等平台轨必须为空——WAVE 头会被平台解码器当非法 csd-0（E207 的 FLV 路径
+ * 已实锤 c2 MP3 首帧 Error 0xe，E208 审查把 AVI 路径一起收口）。
+ */
+internal fun wmvAudioInitializationData(
+    mime: String?,
+    strf: ByteArray?,
+): List<ByteArray>? =
+    if (strf != null && NpFfmpegCodecs.isWmaFamily(mime)) listOf(strf) else null
 
 /** AVI WAVE tag → media3 mime（A11；纯函数便于 JVM 测试）。 */
 internal fun wmvAudioMimeForTag(tag: Int): String? = when (tag) {

@@ -18,12 +18,16 @@ class LegacyCodec(
     private var uBuffer: ByteBuffer? = null
     private var vBuffer: ByteBuffer? = null
 
-    private var handle: Long = LegacyNative.nativeCreate(
-        codecName,
-        extradata ?: ByteArray(0),
-        width,
-        height,
-    )
+    private var handle: Long = if (LegacyDecoderLibrary.isAvailable()) {
+        LegacyNative.nativeCreate(
+            codecName,
+            extradata ?: ByteArray(0),
+            width,
+            height,
+        )
+    } else {
+        0L
+    }
 
     init {
         if (handle == 0L) {
@@ -48,14 +52,17 @@ class LegacyCodec(
             if (rc < 0) throw LegacyDecoderException("送入 $rc")
             return
         }
-        val direct = if (data.isDirect) {
+        // nativeSendDirect 走 GetDirectBufferAddress + size，**不看 Java position**：
+        // direct buffer 只有 position==0 时地址才等于数据起点。position!=0 时复制
+        // [position, limit) 到 scratch，避免把前缀垃圾当帧送进解码器（E205 P3 余项）。
+        val direct = if (data.isDirect && data.position() == 0) {
             data
         } else {
             val n = data.remaining()
             val scratch = sendScratch?.takeIf { it.capacity() >= n }
                 ?: ByteBuffer.allocateDirect(maxOf(n, 64 * 1024)).also { sendScratch = it }
             scratch.clear()
-            scratch.put(data)
+            scratch.put(data.duplicate())
             scratch.flip()
             scratch
         }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate the six synthetic androidTest media assets with ffmpeg.
+"""Generate the synthetic androidTest media assets with ffmpeg.
 
 The assets are intentionally gitignored. Run this script after a clean
 checkout, before assembling/running the instrumentation tests.
@@ -11,6 +11,7 @@ Assets and the tests that consume them:
   xvid-clip.avi        LegacyPlaybackTest, QpelCodecProbeTest, Mpeg4ProfileProbeTest
   xvid-qpel.avi        LegacyPlaybackTest, QpelCodecProbeTest, Mpeg4ProfileProbeTest
   subtitle-queue.mp4   SubtitleQueueTest (video only; the SRT is written by the test)
+  np-ps-seek.mpg       NpFfmpegPsSeekTest（core 专用：MPEG-PS 30s 回起点 seek）
 
 The WMV2 fixture must be six vertical color bars (red, green, yellow, blue,
 magenta, cyan) because Wmv2PictureTest samples those bars at y=230.
@@ -39,6 +40,9 @@ ASSETS = (
     "xvid-qpel.avi",
     "subtitle-queue.mp4",
 )
+
+# 只给 core 的提取器测试用（plugin-player-exo 不需要，避免重复 2MB）
+CORE_ONLY_ASSETS = ("np-ps-seek.mpg",)
 
 
 def ffmpeg_bin() -> str:
@@ -127,6 +131,16 @@ def build(ffmpeg: str, out: Path) -> None:
         "-pix_fmt", "yuv420p", "-an",
         str(out / "subtitle-queue.mp4"),
     )
+    # MPEG-PS：45s 足够让「回起点+丢包」seek 到 30s；音视频都有，seek 后要验证关键帧等待。
+    run(
+        ffmpeg,
+        "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=45",
+        "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=45",
+        "-c:v", "mpeg2video", "-b:v", "250k",
+        "-c:a", "mp2", "-b:a", "96k",
+        "-f", "vob",
+        str(out / "np-ps-seek.mpg"),
+    )
 
 
 def main() -> int:
@@ -140,6 +154,13 @@ def main() -> int:
             data = (out / name).read_bytes()
             (CORE_OUT / name).write_bytes(data)
             (PLUGIN_OUT / name).write_bytes(data)
+            print(
+                f"{name} bytes={len(data)} "
+                f"sha256={hashlib.sha256(data).hexdigest()}"
+            )
+        for name in CORE_ONLY_ASSETS:
+            data = (out / name).read_bytes()
+            (CORE_OUT / name).write_bytes(data)
             print(
                 f"{name} bytes={len(data)} "
                 f"sha256={hashlib.sha256(data).hexdigest()}"

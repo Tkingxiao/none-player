@@ -747,7 +747,7 @@ object FormatProbe {
                     val audioQuery = platformAudioDecoderQuery(audio)
                     val audioDecodable = audioQuery == true ||
                         ffmpegSupports(audio.sampleMimeType) ||
-                        npFfmpegAudioSupports(audio.sampleMimeType)
+                        npFfmpegAudioSupports(audio)
                     if (audioDecodable) {
                         return ProbeOutcome(
                             Result.Playable(
@@ -799,7 +799,7 @@ object FormatProbe {
             val audioUnsupported = audio != null &&
                 audioQuery == false &&
                 !ffmpegSupports(audio.sampleMimeType) &&
-                !npFfmpegAudioSupports(audio.sampleMimeType)
+                !npFfmpegAudioSupports(audio)
             android.util.Log.d(
                 "FormatProbe",
                 "decide platform=$platformVideo ffmpeg=$ffmpegVideo bitmap=$bitmapVideo " +
@@ -953,8 +953,17 @@ object FormatProbe {
     private fun npFfmpegVideoSupports(mime: String?): Boolean =
         mime != null && NpFfmpegCodecs.videoCodecName(mime) != null
 
-    private fun npFfmpegAudioSupports(mime: String?): Boolean =
-        mime != null && NpFfmpegCodecs.audioCodecName(mime, emptyList()) != null
+    private fun npFfmpegAudioSupports(format: androidx.media3.common.Format?): Boolean {
+        val mime = format?.sampleMimeType ?: return false
+        // 与播放链同一道闸：WMA 族没有完整 WAVEFORMATEX 就取不到 blockAlign，解码器
+        // 无法 open（Media3Avi 只发 codec data 的路径就在这里诚实判「音频不支持」）。
+        if (NpFfmpegCodecs.isWmaFamily(mime) &&
+            !NpFfmpegCodecs.hasWaveFormatEx(format.initializationData)
+        ) {
+            return false
+        }
+        return NpFfmpegCodecs.audioCodecName(mime, format.initializationData) != null
+    }
 }
 
 // ---------------------------------------------------------------------------

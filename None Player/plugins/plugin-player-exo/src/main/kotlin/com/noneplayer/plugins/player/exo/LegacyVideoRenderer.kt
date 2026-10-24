@@ -45,8 +45,17 @@ class LegacyVideoRenderer(
     eventListener: VideoRendererEventListener?,
     maxDroppedFramesToNotify: Int,
     private val rendererName: String = "LegacyVideoRenderer",
-    /** mime → 解码器名；null = 不认领（渲染器 supportsFormat 的唯一判据） */
-    private val codecNameFor: (String?) -> String? = { LegacyDecoderLibrary.codecName(it) },
+    /**
+     * mime → 解码器名；null = 不认领（渲染器 supportsFormat 的唯一判据）。
+     *
+     * 默认（legacy 后端）必须把 [LegacyDecoderLibrary.isAvailable] 带进来：E206 参数化时
+     * 只留了 `codecName()`（纯字符串映射），supportsFormat 于是会在 `libnplegacy` 尚未
+     * 加载时认领 WMV2/ASP，createDecoder 里 `LegacyNative.nativeCreate` 直接
+     * UnsatisfiedLinkError 崩溃（E208 真机：WMV1+WMA 播完自动连播到 WMV2 条目时复现）。
+     */
+    private val codecNameFor: (String?) -> String? = { mime ->
+        legacyClaimableCodec(mime, LegacyDecoderLibrary.isAvailable())
+    },
     private val codecFactory: (codecName: String, extradata: ByteArray?, width: Int, height: Int) -> VideoCodec =
         { name, extra, w, h -> LegacyCodec(name, extra, w, h) },
 ) : DecoderVideoRenderer(
@@ -110,6 +119,13 @@ class LegacyVideoRenderer(
         super.onRelease()
     }
 }
+
+/**
+ * legacy 后端的能力判据（纯函数，便于 JVM 钉住语义）：库不可用时**不得**认领
+ * WMV2/ASP，否则 createDecoder 会直接打 JNI 并 UnsatisfiedLinkError（E208）。
+ */
+internal fun legacyClaimableCodec(mime: String?, libraryAvailable: Boolean): String? =
+    LegacyDecoderLibrary.codecName(mime)?.takeIf { libraryAvailable }
 
 @OptIn(UnstableApi::class)
 private class LegacyVideoDecoder(

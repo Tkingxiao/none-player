@@ -27,7 +27,7 @@
 ## 门禁与体积
 
 - 完整门禁：`assembleDebug` + `test` + `assembleRelease`（R8 + shrinkResources 全开）+ 全模块 lint。
-- 当前读数：test 116 套件 / 782 项 / 0 失败；lint 15 份 0 issue；release 19,687,445 B；debug 47,222,040 B。
+- 当前读数：test 140 套件 / 999 项 / 0 失败；lint 15 份 0 issue；release 29,190,315 B；debug 66,222,424 B。
 - 体积上限 100MB（104,857,600 B）；单轮增量 >0.5MB 需写明来源但不判红。
 - 门禁命令不得 `| head`（SIGPIPE 会顶替退出码）；`classes.jar` 文件锁/kspCaches 冲突 → `gradlew --stop` 后重跑；签名配置 `local.properties` 可选，未配齐回落 debug 签名并打日志。
 - 不因跑测试安装/下载新依赖；优先复用本机 SDK/Gradle 缓存，离线缺项记录阻塞原因。
