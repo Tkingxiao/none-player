@@ -353,8 +353,10 @@ class PlaybackSession(
         if (item.id.isEmpty()) return
         scope.launch {
             val key = mediaMemoryKey(item.sourceId, item.id)
+            // scanFolderUris 是 Flow<List<String>>：first() 返回全部授权树（不是第一棵）。
+            val authorizedTrees = settings.scanFolderUris.first()
             val source = settings.subtitleUri(key).first()
-                ?: resolveSiblingSubtitle(context, item.uri, settings.scanFolderUris.first())
+                ?: resolveSiblingSubtitle(context, item.uri, authorizedTrees)
                     ?.also { hit -> settings.setSubtitleUri(key, hit) }
                 ?: return@launch
             val prepared = prepareSubtitleUri(context, source.toUri())

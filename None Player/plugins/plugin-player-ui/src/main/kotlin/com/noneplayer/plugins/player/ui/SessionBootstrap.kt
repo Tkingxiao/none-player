@@ -144,11 +144,13 @@ internal suspend fun ensureSessionPlaying(
             val savedSubtitle = settings.subtitleUri(keyedSubtitle).first()
             // 同名字幕自动挂载（批次 3 §12.6）：无记忆时按 ASS > SSA > SRT > VTT
             // 找同目录同名文件；命中即记忆，之后与手动挂载走同一恢复链路
+            // E140：MediaStore 对非媒体文件不可见，主力路径是**全部**已授权的 SAF 树
+            // （settings.scanFolderUris 是 Flow<List<String>>，first() 取到的是整张表）。
+            val authorizedTrees = settings.scanFolderUris.first()
             val subtitle = savedSubtitle ?: resolveSiblingSubtitle(
                 context,
                 item.uri,
-                // E140：MediaStore 对非媒体文件不可见，主力路径是已授权的 SAF 树
-                settings.scanFolderUris.first(),
+                authorizedTrees,
             )?.also {
                 onSubtitleMatched?.invoke(keyedSubtitle, it)
             }

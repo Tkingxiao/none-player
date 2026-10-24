@@ -3273,13 +3273,6 @@ fun PlayerScreen(
                             fileInfoVisible = true
                         },
                     )
-                    // 库侧删除尚未落地（与收藏同一批数据层缺口），
-                    // 先给 danger 形态 + 诚实提示，不做假动作。
-                    add(
-                        QuickTileSpec(NpIcon.Trash, "移除", danger = true) {
-                            toast.show("从库中移除尚未支持")
-                        },
-                    )
                 }
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(top = 16.dp),
