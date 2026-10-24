@@ -232,8 +232,16 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
             }
             val fontMetrics = remember { android.graphics.Paint.FontMetrics() }
             // 逐帧 measureText 是纯排版热（CJK 每次都要走 shaping）；
-            // 窗口内文字在字号不变时宽度恒定，按 (文字, 字号) 记忆
-            val textWidth = remember { TextWidthCache(textPaint) }
+            // 窗口内文字宽度只取决于 (文本, 字号)，按两元组记忆（measure 的 paint
+            // 字号设置收进 lambda，缓存本体不依赖 android.graphics，JVM 可测）
+            val textWidth = remember(textPaint) {
+                TextWidthCache(
+                    measure = { sizePx, text ->
+                        textPaint.textSize = sizePx
+                        textPaint.measureText(text)
+                    },
+                )
+            }
             // plan 的入参对象也提到组合期：Config 是纯数据、measure 是稳定函数引用，
             // 每帧新建等于把 GC 压力挂在 60fps 上（E122）
             val planConfig = remember(areaFraction, speed, maxOnScreen) {
@@ -348,26 +356,28 @@ private fun ByteArray.decodeText(): String {
 
 /**
  * 文字宽度缓存：`Paint.measureText` 每次都要走一遍排版 shaping，而弹幕窗口内的
- * 文字宽度在字号不变时恒定——逐帧重算是叠加在刷新率上的纯浪费（CJK 尤甚）。
- * 按字号分代记忆：字号一变整体失效重算，退化为"不缓存"但绝不产出错值。
+ * 文字宽度只取决于 (文本, 字号)——逐帧重算是叠加在刷新率上的纯浪费（CJK 尤甚）。
+ *
+ * 键 = 文本 + 字号（E215）：字号分桶（accessOrder LRU，至多 [maxBuckets] 桶），
+ * 桶内记 文本→宽度，每桶至多 [maxEntries] 条、超限清桶重来——同屏窗口只有几十条，
+ * 超限说明输入异常，绝不产出错值。总条目上限 = maxBuckets × maxEntries = 4096。
+ * 旧实现"字号一变整体失效重算"：源文件带字号档（Danmaku.fontScale）时档位交替
+ * 会让缓存退化为"不缓存"；分桶后各档共存，交替抖动的最坏情形等同旧行为。
  */
-private class TextWidthCache(private val paint: Paint) {
-    private var sizePx = Float.NaN
-    private val widths = HashMap<String, Float>()
-
-    fun width(text: String, textSizePx: Float): Float {
-        if (textSizePx != sizePx) {
-            widths.clear()
-            sizePx = textSizePx
-        }
-        widths[text]?.let { return it }
-        if (widths.size >= MAX_ENTRIES) widths.clear()
-        paint.textSize = textSizePx
-        return paint.measureText(text).also { widths[text] = it }
+internal class TextWidthCache(
+    private val measure: (textSizePx: Float, text: String) -> Float,
+    private val maxBuckets: Int = 4,
+    private val maxEntries: Int = 1_024,
+) {
+    private val buckets = object : LinkedHashMap<Float, HashMap<String, Float>>(8, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Float, HashMap<String, Float>>): Boolean =
+            size > maxBuckets
     }
 
-    private companion object {
-        /** 记忆上限：同屏窗口只有几十条；超限说明输入异常，丢弃重来即可 */
-        const val MAX_ENTRIES = 4_096
+    fun width(text: String, textSizePx: Float): Float {
+        val bucket = buckets[textSizePx] ?: HashMap<String, Float>().also { buckets[textSizePx] = it }
+        bucket[text]?.let { return it }
+        if (bucket.size >= maxEntries) bucket.clear()
+        return measure(textSizePx, text).also { bucket[text] = it }
     }
 }
