@@ -22,7 +22,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 
 /**
  * E65 修复：此前未配置 corruptionHandler——偏好文件一旦因异常关机/存储故障等损坏，
@@ -158,28 +157,6 @@ class AppSettings(private val context: Context) {
 
     /** A25：设置侧共享 stateIn 的作用域（进程级，不随页面取消）。 */
     private val settingsScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    init {
-        // E211 一次性迁移：旧版本的扫描目录在主设置文件里。先复制到独立文件，再删旧键；
-        // 复制走 DataStore.edit 的原子读改写，与 setScanFolders 并发时不会覆盖用户新值。
-        settingsScope.launch {
-            runCatching {
-                val legacy = context.dataStore.data.first()
-                val legacyValue = legacy[KEY_SCAN_FOLDERS] ?: legacy[KEY_SCAN_FOLDER]
-                context.safFoldersStore.edit { prefs ->
-                    if (prefs[KEY_SCAN_FOLDERS] == null && legacyValue != null) {
-                        prefs[KEY_SCAN_FOLDERS] = legacyValue
-                    }
-                }
-                if (context.safFoldersStore.data.first()[KEY_SCAN_FOLDERS] != null) {
-                    context.dataStore.edit {
-                        it.remove(KEY_SCAN_FOLDERS)
-                        it.remove(KEY_SCAN_FOLDER)
-                    }
-                }
-            }
-        }
-    }
 
     companion object {
         private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
@@ -540,6 +517,26 @@ class AppSettings(private val context: Context) {
             legacySingle = prefs[KEY_SCAN_FOLDER],
         )
     }.distinctUntilChanged().onEach { _scanFolderUrisSnapshot.value = it }
+
+    /**
+     * E211 一次性迁移：把旧版本存在主设置里的扫描目录搬到独立文件并删旧键。
+     *
+     * 由扫描器在 IO 启动路径调用（`LocalMediaSource.scan`），**不放在构造器里**：
+     * 构造器里起异步 DataStore 写者会在 Robolectric 复用文件/多实例场景留下
+     * 未完成的写者，与下一次构造的单例互锁（本轮全量门禁实复现）。
+     * 复制走 `edit` 的原子读改写，与 `setScanFolders` 并发时不会覆盖用户新值。
+     */
+    suspend fun migrateScanFoldersFromLegacy() {
+        val legacy = context.dataStore.data.first()
+        val legacyValue = legacy[KEY_SCAN_FOLDERS] ?: legacy[KEY_SCAN_FOLDER] ?: return
+        context.safFoldersStore.edit { prefs ->
+            if (prefs[KEY_SCAN_FOLDERS] == null) prefs[KEY_SCAN_FOLDERS] = legacyValue
+        }
+        context.dataStore.edit {
+            it.remove(KEY_SCAN_FOLDERS)
+            it.remove(KEY_SCAN_FOLDER)
+        }
+    }
 
     /**
      * 写独立文件后清掉主设置里的旧键：否则换机恢复时旧键会绕过备份排除规则，

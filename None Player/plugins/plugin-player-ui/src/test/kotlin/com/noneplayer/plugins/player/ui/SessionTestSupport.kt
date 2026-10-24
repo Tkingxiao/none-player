@@ -76,14 +76,18 @@ internal fun testItem(
  */
 internal object DataStoreTestReset {
     fun reset() {
-        runCatching {
-            val fileClass = Class.forName("com.noneplayer.core.data.AppSettingsKt")
-            val delegateField = fileClass.getDeclaredField("dataStore\$delegate")
-            delegateField.isAccessible = true
-            val delegate = delegateField.get(null) ?: return
-            val instanceField = delegate.javaClass.getDeclaredField("INSTANCE")
-            instanceField.isAccessible = true
-            instanceField.set(delegate, null)
+        // E211 起 AppSettings 有两份 DataStore（主设置 + SAF 目录）；两份都要清掉，
+        // 否则后一份会继续指向上一个 Robolectric 测试已删除的临时目录。
+        listOf("dataStore\$delegate", "safFoldersStore\$delegate").forEach { fieldName ->
+            runCatching {
+                val fileClass = Class.forName("com.noneplayer.core.data.AppSettingsKt")
+                val delegateField = fileClass.getDeclaredField(fieldName)
+                delegateField.isAccessible = true
+                val delegate = delegateField.get(null) ?: return@forEach
+                val instanceField = delegate.javaClass.getDeclaredField("INSTANCE")
+                instanceField.isAccessible = true
+                instanceField.set(delegate, null)
+            }
         }
     }
 }

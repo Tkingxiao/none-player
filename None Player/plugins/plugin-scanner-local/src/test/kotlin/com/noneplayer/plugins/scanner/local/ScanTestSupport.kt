@@ -622,14 +622,18 @@ internal object TestDispatcherProvider : DispatcherProvider {
  */
 internal object DataStoreTestReset {
     fun reset() {
-        runCatching {
-            val fileClass = Class.forName("com.noneplayer.core.data.AppSettingsKt")
-            val delegateField = fileClass.getDeclaredField("dataStore\$delegate")
-            delegateField.isAccessible = true
-            val delegate = delegateField.get(null) ?: return
-            val instanceField = delegate.javaClass.getDeclaredField("INSTANCE")
-            instanceField.isAccessible = true
-            instanceField.set(delegate, null)
+        // E211 起 AppSettings 有两份 DataStore（主设置 + SAF 目录）；只清主设置会让
+        // saf_folders 单例继续指向上一个测试的临时目录，跨用例复用扫描目录。
+        listOf("dataStore\$delegate", "safFoldersStore\$delegate").forEach { fieldName ->
+            runCatching {
+                val fileClass = Class.forName("com.noneplayer.core.data.AppSettingsKt")
+                val delegateField = fileClass.getDeclaredField(fieldName)
+                delegateField.isAccessible = true
+                val delegate = delegateField.get(null) ?: return@forEach
+                val instanceField = delegate.javaClass.getDeclaredField("INSTANCE")
+                instanceField.isAccessible = true
+                instanceField.set(delegate, null)
+            }
         }
     }
 }

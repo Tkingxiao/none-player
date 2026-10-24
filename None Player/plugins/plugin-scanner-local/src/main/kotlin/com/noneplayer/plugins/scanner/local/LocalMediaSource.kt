@@ -519,6 +519,9 @@ class LocalMediaSource(
         // 阶段 1/6（PREPARING）：等闸门 + 解析授权目录 + 算增量基线
         _scanProgress.value = ScanProgress(active = true, phase = ScanPhase.PREPARING)
         try {
+            // E211：旧版本的扫描目录在主设置里；扫描是本应用唯一消费方，
+            // 在 IO 这段启动路径做一次性迁移（构造器里做会留下异步 DataStore 写者）。
+            settings.migrateScanFoldersFromLegacy()
             val folderUriStrs = settings.scanFolderUris.first()
             if (folderUriStrs.isEmpty()) {
                 return@withContext ScanResult(sourceId, added = 0, updated = 0, removed = 0, durationMs = 0)
