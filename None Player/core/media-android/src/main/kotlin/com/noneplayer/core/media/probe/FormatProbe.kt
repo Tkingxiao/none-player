@@ -572,8 +572,11 @@ object FormatProbe {
     }
 
     /** 认领文件的是哪个解封装器 → 容器显示名（补 MediaStore 地址无扩展名的缺口） */
-    private fun containerFromExtractor(extractor: Extractor): String? =
-        when (extractor.javaClass.simpleName) {
+    private fun containerFromExtractor(extractor: Extractor): String? {
+        if (extractor is com.noneplayer.core.media.extract.NpFfmpegExtractor) {
+            return extractor.containerDisplayName
+        }
+        return when (extractor.javaClass.simpleName) {
             "AviExtractor", "Wmv2AviExtractor", "Mp4vAspRewritingExtractor" -> "AVI"
             "MatroskaExtractor" -> "Matroska (MKV)"
             "Mp4Extractor", "FragmentedMp4Extractor" -> "MP4"
@@ -590,6 +593,7 @@ object FormatProbe {
             "Ac4Extractor" -> "AC-4"
             else -> null
         }
+    }
 
     /** 本地文件字节长度；拿不到返回 null（用探测预算兜底）。不抛异常。 */
     private fun localLength(context: Context, uri: Uri): Long? = runCatching {

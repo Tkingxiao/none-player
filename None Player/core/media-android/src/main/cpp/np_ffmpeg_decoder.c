@@ -414,11 +414,18 @@ Java_com_noneplayer_core_media_ffmpeg_NpFfmpegNative_nativeSendDirect(
         }
         r = avcodec_send_packet(L->ctx, L->pkt);
     }
+    if (r == AVERROR_INVALIDDATA) {
+        // A19 同款（E207 真机 rv20 夹具实录）：编码器产出的个别帧解码器拒不收
+        // （send 阶段即 INVALIDDATA）——丢这一包继续，不把整条流打成终态错误。
+        ALOG("send invalid data, dropping packet pts=%lld size=%d", (long long)pts_us, size);
+        av_packet_unref(L->pkt);
+        L->eof = 0;
+        return drain(L);
+    }
     av_packet_unref(L->pkt);
     if (r < 0) {
-        ALOG("send failed rc=%d size=%d ctx=%p w=%d h=%d codec=%s opened=%d", r, size,
-             (void*)L->ctx, L->ctx ? L->ctx->width : -1, L->ctx ? L->ctx->height : -1,
-             L->ctx ? L->ctx->codec->name : "?", L->ctx ? avcodec_is_open(L->ctx) : -1);
+        ALOG("send failed rc=%d size=%d codec=%s", r, size,
+             L->ctx->codec ? L->ctx->codec->name : "?");
         return r;
     }
     L->eof = 0;

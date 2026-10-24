@@ -25,12 +25,28 @@ class NpFfmpegCodecsTest {
         assertEquals("vc1", NpFfmpegCodecs.videoCodecInTable(MediaNames.MIME_VC1))
         assertEquals("msmpeg4v2", NpFfmpegCodecs.videoCodecInTable("video/mp42"))
         assertEquals("msmpeg4", NpFfmpegCodecs.videoCodecInTable("video/mp43"))
+        // E207 avformat 批：一个解码器一个 mime（vp6/rv 各变体是独立解码器 ID）。
+        // flv 的流编码名是 "flv1"（描述符名），解码器注册名是 "flv"——表值取后者
+        assertEquals("flv", NpFfmpegCodecs.videoCodecInTable("video/x-flv1"))
+        assertEquals("vp6", NpFfmpegCodecs.videoCodecInTable("video/x-vp6"))
+        assertEquals("vp6f", NpFfmpegCodecs.videoCodecInTable("video/x-vp6f"))
+        assertEquals("vp6a", NpFfmpegCodecs.videoCodecInTable("video/x-vp6a"))
+        assertEquals("rv10", NpFfmpegCodecs.videoCodecInTable("video/x-pn-realvideo"))
+        assertEquals("rv20", NpFfmpegCodecs.videoCodecInTable("video/x-pn-realvideo2"))
+        assertEquals("rv30", NpFfmpegCodecs.videoCodecInTable("video/x-pn-realvideo3"))
+        assertEquals("rv40", NpFfmpegCodecs.videoCodecInTable("video/x-pn-realvideo4"))
+        assertEquals("ffv1", NpFfmpegCodecs.videoCodecInTable("video/x-ffv1"))
+        assertEquals("theora", NpFfmpegCodecs.videoCodecInTable("video/theora"))
+        // PS 的 mpeg1/2 走 npff 专属 mime（平台 OMX mpeg2 实测坏，见提取器注释）
+        assertEquals("mpeg1video", NpFfmpegCodecs.videoCodecInTable("video/x-np-mpeg1"))
+        assertEquals("mpeg2video", NpFfmpegCodecs.videoCodecInTable("video/x-np-mpeg2"))
         // WMV2 走 libnplegacy 专用链（既定裁定），不得被 npffmpeg 抢
         assertNull(NpFfmpegCodecs.videoCodecInTable(MediaNames.MIME_WMV2))
         // libnplegacy 的 ASP mime 同理
         assertNull(NpFfmpegCodecs.videoCodecInTable(MediaNames.MIME_MPEG4_ASP))
         // 标准集仍在 NextLib FfmpegRenderer，不归本表
         assertNull(NpFfmpegCodecs.videoCodecInTable("video/avc"))
+        assertNull(NpFfmpegCodecs.videoCodecInTable("video/mpeg2"))
     }
 
     @Test
@@ -52,6 +68,18 @@ class NpFfmpegCodecsTest {
             "wmalossless",
             NpFfmpegCodecs.audioCodecInTable(MediaNames.MIME_WMALOSSLESS, emptyList()),
         )
+        // E207：RM/NUT 音频族按"一个解码器一个 mime"直接入表
+        assertEquals("cook", NpFfmpegCodecs.audioCodecInTable("audio/x-cook", emptyList()))
+        assertEquals("sipr", NpFfmpegCodecs.audioCodecInTable("audio/x-sipr", emptyList()))
+        assertEquals("atrac3", NpFfmpegCodecs.audioCodecInTable("audio/x-atrac3", emptyList()))
+        assertEquals("wavpack", NpFfmpegCodecs.audioCodecInTable("audio/x-wavpack", emptyList()))
+        assertEquals("tta", NpFfmpegCodecs.audioCodecInTable("audio/x-tta", emptyList()))
+        // atrac3al/pal 提取器产出独立 mime 但不入表：留给探测给 A11 提示，不错误路由
+        assertNull(NpFfmpegCodecs.audioCodecInTable("audio/x-atrac3al", emptyList()))
+        assertNull(NpFfmpegCodecs.audioCodecInTable("audio/x-atrac3pal", emptyList()))
+        // mp1/mp2 由 npff 软解补位（平台普遍无 L2 解码器，无人认领会冻结媒体时钟）
+        assertEquals("mp1", NpFfmpegCodecs.audioCodecInTable("audio/mpeg-L1", emptyList()))
+        assertEquals("mp2", NpFfmpegCodecs.audioCodecInTable("audio/mpeg-L2", emptyList()))
         // 表外 mime 一律 null
         assertNull(NpFfmpegCodecs.audioCodecInTable("audio/mp3", emptyList()))
     }

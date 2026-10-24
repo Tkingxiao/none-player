@@ -33,7 +33,12 @@ class NpExtractorsFactory : ExtractorsFactory {
                 extractor
             }
         }
-        return arrayOf(Wmv2AviExtractor(), *wrapped.toTypedArray())
+        // E207：avformat 解封装（asf/rm/flv/mpegps/nut）插在 media3 defaults 之前——
+        // 这些容器里 media3 没有解封装器（ASF/RM）或实现不覆盖白名单编码（FLV 的 VP6）
+        return arrayOf(Wmv2AviExtractor(), NpFfmpegExtractor("asf", "WMV (ASF)"),
+            NpFfmpegExtractor("rm", "RealMedia (RM)"), NpFfmpegExtractor("flv", "FLV"),
+            NpFfmpegExtractor("mpegps", "MPEG-PS"), NpFfmpegExtractor("nut", "NUT"),
+            *wrapped.toTypedArray())
     }
 
     private companion object {

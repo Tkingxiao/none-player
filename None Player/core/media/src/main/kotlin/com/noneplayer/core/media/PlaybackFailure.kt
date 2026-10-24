@@ -200,6 +200,18 @@ object MediaNames {
         "video/x-flv" to "Sorenson H.263 (FLV1)",
         "video/mjpeg" to "Motion JPEG",
         "video/theora" to "Theora",
+        // E207 avformat 批：NpFfmpegExtractor 产出的轨 mime（与 NpFfmpegCodecs 表同源）
+        "video/x-flv1" to "Sorenson H.263 (FLV1)",
+        "video/x-vp6" to "VP6",
+        "video/x-vp6f" to "VP6",
+        "video/x-vp6a" to "VP6 (alpha)",
+        "video/x-pn-realvideo" to "RealVideo 1.0",
+        "video/x-pn-realvideo2" to "RealVideo G2",
+        "video/x-pn-realvideo3" to "RealVideo 8",
+        "video/x-pn-realvideo4" to "RealVideo 9",
+        "video/x-ffv1" to "FFV1",
+        "video/x-np-mpeg1" to "MPEG-1",
+        "video/x-np-mpeg2" to "MPEG-2",
     )
 
     private val AUDIO_CODECS = mapOf(
@@ -220,5 +232,16 @@ object MediaNames {
         "audio/amr" to "AMR",
         "audio/alac" to "ALAC",
         "audio/midi" to "MIDI",
+        // E207 avformat 批：RM/NUT 音频族
+        "audio/x-cook" to "RealAudio (Cook)",
+        "audio/x-sipr" to "RealAudio (SIPR)",
+        "audio/x-atrac3" to "ATRAC3",
+        "audio/x-atrac3al" to "ATRAC3 AL",
+        "audio/x-atrac3pal" to "ATRAC3+ LP",
+        "audio/x-wavpack" to "WavPack",
+        "audio/x-tta" to "TTA",
+        // PS 的 MPEG-1/2 层音频（npff 软解补位）
+        "audio/mpeg-L1" to "MP1",
+        "audio/mpeg-L2" to "MP2",
     )
 }

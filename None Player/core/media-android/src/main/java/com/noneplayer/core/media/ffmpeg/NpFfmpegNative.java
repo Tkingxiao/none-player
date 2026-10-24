@@ -85,4 +85,55 @@ public final class NpFfmpegNative {
 
     /** 编译进共享 libavcodec 的解码器是否存在（能力表运行时的真相源） */
     public static native boolean npffHasDecoder(String codecName);
+
+    // ---- 解封装（npffExt*；E207 avformat 批）----
+
+    /**
+     * 打开容器。reader = 读桥（readFully/length，接口方法受 proguard keep 保护）。
+     *
+     * @return handle；0 = 打开失败
+     */
+    public static native long npffExtOpen(Object reader, String iformatName);
+
+    /** @return 流数量；负数 = 错误 */
+    public static native int npffExtFindStreams(long handle);
+
+    /** @return 1=视频 2=音频 0=其它/越界 */
+    public static native int npffExtStreamType(long handle, int index);
+
+    /** avcodec_get_name（mime 路由用） */
+    public static native String npffExtStreamCodecName(long handle, int index);
+
+    /** {width, height, sampleRate, channels, blockAlign, codecTag} */
+    public static native int[] npffExtStreamInfo(long handle, int index);
+
+    /** codecpar->extradata（视频 csd） */
+    public static native byte[] npffExtStreamExtraData(long handle, int index);
+
+    /** 音频流：合成完整 WAVEFORMATEX（18B 头 + extradata），csd 语义与 AVI 路径一致 */
+    public static native byte[] npffExtStreamWavHeader(long handle, int index);
+
+    public static native long npffExtDurationUs(long handle);
+
+    /** @return 0=包已缓存 1=需要 seek（PendingSeekPos 取目标） -1=EOF -2=错误 */
+    public static native int npffExtRead(long handle);
+
+    public static native int npffExtPacketStream(long handle);
+
+    public static native long npffExtPacketPtsUs(long handle);
+
+    /** @return 1=关键帧 */
+    public static native int npffExtPacketFlags(long handle);
+
+    public static native int npffExtPacketSize(long handle);
+
+    /** 拷贝包数据（容量不足时截断）；包随即消费释放 */
+    public static native int npffExtPacketData(long handle, ByteBuffer out, int capacity);
+
+    public static native long npffExtPendingSeekPos(long handle);
+
+    /** 按时间 seek；返回目标 us（AVIO seek 挂起由 npffExtRead 上报） */
+    public static native long npffExtSeekTimeUs(long handle, long timeUs);
+
+    public static native void npffExtClose(long handle);
 }

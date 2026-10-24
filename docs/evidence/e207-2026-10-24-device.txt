@@ -1,0 +1,317 @@
+E207 avformat 解封装批 真机证据汇编（60dd2f94，2026-10-24）
+================================================================
+
+设备 60dd2f94（小米平板 6，SD860/MIUI/API 34）。以下摘录行均从仓库根取证日志原样拷贝
+（时间戳 + PID/TID + tag + 原文），行后括注来源文件。日志按会话时间排列：
+dlf2(16:17 FLV拦截) → msflv2/msflv3(16:50 flv1=false) → msflv4(17:07) → msflv5(17:12 flv=true+csd误发)
+→ msps1/msps4/msps5(17:28-17:47 seek回跳+EOF误映射) → msps2/msps3(17:35-17:37 probe缺) 
+→ msps6/msps7/msps8(17:54-17:57 OMX硬解损坏) → msps9/msps10(18:09-18:11 mp2音频无人认领)
+→ ps-stream/ps-stream2(18:12-18:27 修复后验证)。
+
+----------------------------------------------------------------
+1. FLV 起播前被探测拦截（dlf2.txt，16:17 会话）
+----------------------------------------------------------------
+结论：NpFfmpegCodecs 路由表当时缺 video/x-flv1 → FormatProbe decide 五路全 false →
+Unplayable 拦截：abandonAudioFocus、无 playback error、状态直接 NONE/STOPPED。
+后续同日志可见第二次尝试：NpFfmpegRenderer 认领了 x-flv1（surface clone ok），
+但会话无任何 Playback error 直接 STOPPED——与"解码路由缺表项"的判断一致。
+
+10-24 16:17:59.146 30281 30347 D NpFfmpegExtractor: npff open ok streams=0 (dlf2.txt)
+10-24 16:17:59.152 30281 30347 D FormatProbe: matched=zm2 ch=seekable expectedMime=video/x-flv expectVideo=true reads=1 formats=2 mimes=[audio/mpeg, video/x-flv1] (dlf2.txt)
+10-24 16:17:59.153 30281 30347 D FormatProbe: decide platform=false ffmpeg=false bitmap=false legacy=false npff=false (dlf2.txt)
+10-24 16:17:59.157  8642  8755 I ActiveSessionRecord_export-api: onPlaybackStateChanged: PlaybackState {state=NONE(0), position=0, buffered position=0, speed=0.0, updated=61671326, actions=7339653, custom actions=[], active item id=0, error=null} (dlf2.txt)
+10-24 16:17:59.158  1999  3497 I MediaFocusControl: abandonAudioFocus() from uid/pid 10257/30281 clientId=android.media.AudioManager@3e021dk@a76ac46 (dlf2.txt)
+10-24 16:17:59.220 30281 30414 D NpPerf  : NpFfmpegRenderer surface clone ok src=33338822 clone=85977479 (dlf2.txt)
+10-24 16:17:59.226  8642  8755 I ActiveSessionRecord_export-api: onPlaybackStateChanged: PlaybackState {state=STOPPED(1), position=0, buffered position=0, speed=0.0, updated=61671395, actions=7339653, custom actions=[], active item id=0, error=null} (dlf2.txt)
+
+16:50 会话（msflv3.txt，msflv2.txt 同段）复现同一拦截，说明单改路由表未生效（见 §2）：
+10-24 16:50:23.706 32668 32709 D FormatProbe: matched=zm2 ch=seekable expectedMime=video/x-flv expectVideo=true reads=1 formats=2 mimes=[audio/mpeg, video/x-flv1] (msflv3.txt)
+10-24 16:50:23.746 32668 32709 D FormatProbe: decide platform=false ffmpeg=false bitmap=false legacy=false npff=false (msflv3.txt)
+
+----------------------------------------------------------------
+2. 白名单 flv1 被 configure 静默忽略 + 3. 运行时注册名是 "flv" 不是 "flv1"
+----------------------------------------------------------------
+结论：FFmpeg 7.1.1 里 FLV1 解码器的 configure 组件名是 flv
+（flv_decoder_select="h263_decoder"），写 flv1 无效——解码库在（其余全 true）而
+名字不对，是 FFmpeg 7.1.1 的命名分裂（avcodec_get_name 流名 flv1 /
+find_decoder_by_name 注册名 flv）。重编后（ff_flv_decoder 符号入静态库），
+17:12 会话 hasDecoder 检查名改为注册名 flv，结果 true。
+
+重编前（msflv2.txt 16:50，msflv3.txt/msflv4.txt 17:07 同段同值）：
+10-24 16:50:23.690 32668 32709 I NpFfmpeg: npff hasDecoder(msmpeg4)=true (msflv2.txt)
+10-24 16:50:23.690 32668 32709 I NpFfmpeg: npff hasDecoder(flv1)=false (msflv2.txt)
+10-24 16:50:23.690 32668 32709 I NpFfmpeg: npff hasDecoder(vp6)=true (msflv2.txt)
+10-24 16:50:23.690 32668 32709 I NpFfmpeg: npff hasDecoder(vp6f)=true (msflv2.txt)
+10-24 16:50:23.690 32668 32709 I NpFfmpeg: npff hasDecoder(rv40)=true (msflv2.txt)
+10-24 16:50:23.690 32668 32709 I NpFfmpeg: npff hasDecoder(ffv1)=true (msflv2.txt)
+
+重编后（msflv5.txt 17:12；检查名已按注册名 flv 查询）：
+10-24 17:12:35.231  4997  5046 I NpFfmpeg: npff hasDecoder(msmpeg4)=true (msflv5.txt)
+10-24 17:12:35.231  4997  5046 I NpFfmpeg: npff hasDecoder(flv)=true (msflv5.txt)
+10-24 17:12:35.231  4997  5046 I NpFfmpeg: npff hasDecoder(vp6)=true (msflv5.txt)
+
+最终构建（ps-stream.txt 18:26 冷启动）含 mpeg1/2/mp1/mp2 白名单：
+10-24 18:26:11.489 16132 16173 I NpFfmpeg: npff hasDecoder(mpeg1video)=true (ps-stream.txt)
+10-24 18:26:11.489 16132 16173 I NpFfmpeg: npff hasDecoder(mpeg2video)=true (ps-stream.txt)
+10-24 18:26:11.489 16132 16173 I NpFfmpeg: npff hasDecoder(mp1)=true (ps-stream.txt)
+10-24 18:26:11.489 16132 16173 I NpFfmpeg: npff hasDecoder(mp2)=true (ps-stream.txt)
+
+注：所有日志中均无 hasDecoder(flv1)=true 字样——重编后检查项即按注册名 flv 查询；
+flv 解码器实际可用的直接证据是 FLV 正片出画（见"验证通过项"及 flv-playing.png）。
+
+----------------------------------------------------------------
+4. 合成 WAVEFORMATEX csd 误发给平台 MP3 解码器（msflv5.txt，17:12 会话）
+----------------------------------------------------------------
+结论：FLV 的 mp3 轨带出 18 字节合成 WAVEFORMATEX（00 00 01 00 44 ac ... 即
+wfFormatTag/wfChannels/wfSamplesPerSec 44100/wfAvgBytesPerSec...）被当 csd-0 发给
+c2.android.mp3.decoder，首帧即 work failed to complete: 14（Error 0xe），会话 ERROR。
+修复：csd 只发给 npff 音频表内 mime；AAC 发原始 AudioSpecificConfig。
+修复后所有日志（msps6 起至 ps-stream2）均无 csd-0 dump、无 Error 0xe。
+
+10-24 17:12:35.613  4997  5166 I MediaCodec: [mId: 0] [audio-debug-dec] configure: ClientName: com.noneplayer.app ComponentName: c2.android.mp3.decoder (msflv5.txt)
+10-24 17:12:35.613  4997  5166 I MediaCodec:   string mime = "audio/mpeg" (msflv5.txt)
+10-24 17:12:35.613  4997  5166 I MediaCodec:   Buffer csd-0 = { (msflv5.txt)
+10-24 17:12:35.613  4997  5166 I MediaCodec:     00000000:  00 00 01 00 44 ac 00 00  80 3e 00 00 00 00 10 00  ....D....>...... (msflv5.txt)
+10-24 17:12:35.613  4997  5166 I MediaCodec:     00000010:  00 00                                             .. (msflv5.txt)
+10-24 17:12:35.613  4997  5166 I MediaCodec:   } (msflv5.txt)
+10-24 17:12:35.626  1842  5199 E C2SoftMp3Dec: Error in parse mp3 header during outSize estimation (msflv5.txt)
+10-24 17:12:35.629  4997  5181 D CCodecBufferChannel: [c2.android.mp3.decoder#941] work failed to complete: 14 (msflv5.txt)
+10-24 17:12:35.629  4997  5181 E MediaCodec: Codec reported trivial err 0xe/14 (Unknown error -14), actionCode 0, while in state 6/STARTED (msflv5.txt)
+10-24 17:12:35.637  4997  5166 E MediaCodecAudioRenderer:   android.media.MediaCodec$CodecException: Error 0xe (msflv5.txt)
+10-24 17:12:35.641  4997  5166 E ExoPlayerImplInternal:   yu0: MediaCodecAudioRenderer error, index=5, format=Format(null, null, null, audio/mpeg, null, -1, null, [-1, -1, -1.0, null], [1, -1, 44100]), format_supported=YES (msflv5.txt)
+
+----------------------------------------------------------------
+5. avformat 内部回跳 seek 失步（msps1.txt，17:28 会话；对比 ps-stream2.txt）
+----------------------------------------------------------------
+结论：mpegps find_stream_info 的 PTS 估时回跳（696176→446176→0）在"只记账不物化"
+的 AVIO seek 桥下读到错误位置数据 → 视频流定型失败（codec NONE 被丢轨，
+formats 只剩 audio/mpeg-L2）。修复：open/find_stream_info 期间 AVIO seekable=0
+（流模式），之后恢复。修复后回跳消失（对比件中 whence=0 的回跳行为零条）。
+
+修复前（msps1.txt；msps4.txt/msps5.txt 同段同值）：
+10-24 17:28:38.298  7291  7379 D NpFfmpegExtractor: avio seek whence=0 off=696176 -> target=696176 (pending=-1) (msps1.txt)
+10-24 17:28:38.299  7291  7379 D NpFfmpegExtractor: avio seek whence=0 off=446176 -> target=446176 (pending=696176) (msps1.txt)
+10-24 17:28:38.299  7291  7379 D NpFfmpegExtractor: avio seek whence=0 off=0 -> target=0 (pending=446176) (msps1.txt)
+10-24 17:28:38.300  7291  7379 D NpFfmpegExtractor: find_stream_info ok nb_streams=2 duration=-9223372036854775808 pending=0 (msps1.txt)
+10-24 17:28:38.300  7291  7379 D FormatProbe: matched=zm2 ch=seekable expectedMime=video/mp2p expectVideo=true reads=1 formats=1 mimes=[audio/mpeg-L2] (msps1.txt)
+
+中间态（msps2.txt 17:35 会话：回跳已消失、但探测器仍缺，视频流仍 NONE → 见 §6）：
+10-24 17:35:53.957  8261  8304 D NpFfmpegExtractor: find_stream_info ok nb_streams=2 duration=-9223372036854775808 pending=-1 (msps2.txt)
+10-24 17:35:53.959  8261  8304 D FormatProbe: matched=zm2 ch=seekable expectedMime=video/mp2p expectVideo=true reads=1 formats=1 mimes=[audio/mpeg-L2] (msps2.txt)
+
+修复后（ps-stream2.txt 18:15 会话；find_stream_info 前只有 SIZE 查询，无 whence=0 回跳）：
+10-24 18:15:29.784 D/NpFfmpegExtractor(14965): avio seek SIZE -> 946176 (ps-stream2.txt)
+10-24 18:15:29.784 D/NpFfmpegExtractor(14965): find_stream_info ok nb_streams=2 duration=-9223372036854775808 pending=-1 (ps-stream2.txt)
+10-24 18:15:29.784 D/NpFfmpegExtractor(14965): stream 0 type=0 codec_id=2 name=mpeg2video (ps-stream2.txt)
+10-24 18:15:29.785 D/FormatProbe(14965): matched=zm2 ch=seekable expectedMime=video/mp2p expectVideo=true reads=1 formats=2 mimes=[video/x-np-mpeg2, audio/mpeg-L2] (ps-stream2.txt)
+10-24 18:15:29.800 D/FormatProbe(14965): decide platform=false ffmpeg=false bitmap=false legacy=false npff=true (ps-stream2.txt)
+
+注：日志里 type=0 是 AV media type 原生枚举 0=VIDEO、1=AUDIO（非 AVMEDIA_TYPE 语义错位）。
+
+----------------------------------------------------------------
+6. codec 探测缺探测器（msps3.txt 17:37 → ps-stream.txt 18:12）
+----------------------------------------------------------------
+结论：mpegps 视频流 request_probe=1 需要 "mpegvideo" 裸流 demuxer 的 probe 函数
+（set_codec_from_probe_data 按 demuxer 名匹配），--disable-everything 下缺失 →
+视频流 codec 恒 NONE。修复：--enable-demuxer=mpegvideo。修复后 codec_id=2
+name=mpeg2video 定型成功。
+
+修复前（msps3.txt；此时 seek 回跳已修、pending=-1，排除 §5 干扰）：
+10-24 17:37:45.920  8651  8754 D NpFfmpegExtractor: find_stream_info ok nb_streams=2 duration=-9223372036854775808 pending=-1 (msps3.txt)
+10-24 17:37:45.920  8651  8754 D NpFfmpegExtractor: stream 0 type=0 codec_id=0 name=none (msps3.txt)
+10-24 17:37:45.920  8651  8754 D NpFfmpegExtractor: stream 1 type=1 codec_id=86016 name=mp2 (msps3.txt)
+10-24 17:37:45.923  8651  8754 D FormatProbe: matched=zm2 ch=seekable expectedMime=video/mp2p expectVideo=true reads=1 formats=1 mimes=[audio/mpeg-L2] (msps3.txt)
+
+修复后（ps-stream.txt 18:12 会话）：
+10-24 18:12:42.110 13920 14404 D NpFfmpegExtractor: stream 0 type=0 codec_id=2 name=mpeg2video (ps-stream.txt)
+10-24 18:12:42.110 13920 14404 D NpFfmpegExtractor: stream 1 type=1 codec_id=86016 name=mp2 (ps-stream.txt)
+
+----------------------------------------------------------------
+7. 读桥 EOF 映射错误（msps4.txt，17:47 会话）
+----------------------------------------------------------------
+结论：Kotlin 桥 EOF 返回 -1，被 avio 当 AVERROR_UNKNOWN 透传，av_read_frame 返回
+-1 → Kotlin 侧 throw IOException → 播放会话 "Unexpected runtime error"（探测路径被
+try/catch 掩盖，故此前只表现为静默失败）。修复：C 读回调 EOF 返 AVERROR_EOF。
+修复后（ps-stream*.txt、msps6 起）只有 read EOF (pending=-1)，read err 绝迹。
+
+修复前（msps4.txt；msps5.txt 同段同值）：
+10-24 17:47:32.009 10238 10544 D NpFfmpegExtractor: readFully len=60090 n=-1 head=f70737ab9295 (msps4.txt)
+10-24 17:47:32.009 10238 10544 D NpFfmpegExtractor: read err rc=-1 (Operation not permitted) (msps4.txt)
+10-24 17:47:42.253  8642  8755 I ActiveSessionRecord_export-api: onPlaybackStateChanged: PlaybackState {state=ERROR(7), position=529, buffered position=529, speed=0.0, updated=67056787, actions=7340029, custom actions=[], active item id=6, error=Unexpected runtime error} (msps4.txt)
+
+修复后（ps-stream.txt 18:15 会话播放读循环走到文件尾的干净收束）：
+10-24 18:15:30.361 14965 15089 D NpFfmpegExtractor: readFully len=65536 n=1721 head=000000000000 (ps-stream.txt)
+10-24 18:15:30.361 14965 15089 D NpFfmpegExtractor: read EOF (pending=-1) (ps-stream.txt)
+
+（read err rc=-1 仅存在于 msps4.txt 与 msps5.txt〔17:47 会话的超集捕获〕；msps6 及以后全部日志无此行。）
+
+----------------------------------------------------------------
+8. SD860 平台 OMX mpeg2 硬解损坏（msps8.txt，17:57 会话）
+----------------------------------------------------------------
+结论：修好探测后 mpeg2video 走平台路由（mimes=[video/mpeg2,...] decide platform=true），
+OMX.qcom.video.decoder.mpeg2 配置成功但 10 秒只渲染 1 帧，position 冻结在首帧 529ms
+后报 "Unexpected runtime error"。修复：mpeg1/2 视频改走 npff 专属 mime
+（video/x-np-mpeg1/2）软解。修复后 msps9/msps10/ps-stream* 中
+mimes=[video/x-np-mpeg2, ...] decide npff=true。
+
+10-24 17:57:29.792 11184 11810 D FormatProbe: matched=zm2 ch=seekable expectedMime=video/mp2p expectVideo=true reads=1 formats=2 mimes=[video/mpeg2, audio/mpeg-L2] (msps8.txt)
+10-24 17:57:29.792 11184 11810 D FormatProbe: decide platform=true ffmpeg=true bitmap=false legacy=false npff=false (msps8.txt)
+10-24 17:57:29.866  1797 23475 I OMX-VDEC-1080P: component_init: OMX.qcom.video.decoder.mpeg2 : fd=7 (msps8.txt)
+10-24 17:57:29.878 11184 11426 I MediaCodec: [mId: 3] [video-debug-dec] configure: ClientName: com.noneplayer.app ComponentName: OMX.qcom.video.decoder.mpeg2 (msps8.txt)
+10-24 17:57:40.024 11184 12501 I MediaCodec: [mId: 3] [video-debug-dec] Qinput: 21, DQinput: 0 success out of 0 tries (msps8.txt)
+10-24 17:57:40.024 11184 12501 I MediaCodec: [mId: 3] [video-debug-dec] Render: 1, Drop: 0, DQoutput: 0 success out of 0 tries (msps8.txt)
+10-24 17:57:40.024 11184 12501 I MediaCodec: [mId: 3] [video-debug-dec] Avg Input Interval: 482ms, Avg Render Interval: 10133ms (msps8.txt)
+10-24 17:57:40.026  8642  8755 I ActiveSessionRecord_export-api: onPlaybackStateChanged: PlaybackState {state=ERROR(7), position=529, buffered position=529, speed=0.0, updated=67654560, actions=7340029, custom actions=[], active item id=6, error=Unexpected runtime error} (msps8.txt)
+
+修复后（msps9.txt 18:09 会话；msps10/ps-stream*/ps-stream2 同）：
+10-24 18:09:31.875 13920 13950 D FormatProbe: matched=zm2 ch=seekable expectedMime=video/mp2p expectVideo=true reads=1 formats=2 mimes=[video/x-np-mpeg2, audio/mpeg-L2] (msps9.txt)
+10-24 18:09:31.891 13920 13950 D FormatProbe: decide platform=false ffmpeg=false bitmap=false legacy=false npff=true (msps9.txt)
+
+----------------------------------------------------------------
+9. mp2 音频无人认领 → 媒体时钟冻结（msps9.txt/msps10.txt，18:09-18:11）
+----------------------------------------------------------------
+结论：audio/mpeg-L2 平台无解码器、NextLib 不含、npff 表无 → 音频轨 unselected、
+媒体时钟无推进者。现象：PLAYING 后 position 只走到 529ms 就冻结（视频仅首帧缓冲量），
+10 秒超时后报 "Unexpected runtime error"。修复：白名单加 mp1/mp2 解码器 +
+audioCodecs 表加 audio/mpeg-L1/L2（修复后 18:26 构建 hasDecoder(mp1/mp2)=true，见 §2）。
+
+msps9.txt（18:09 会话：PLAYING 起 0ms，10.08 秒后冻结于 529ms 转 ERROR）：
+10-24 18:09:32.092  8642  8755 I ActiveSessionRecord_export-api: onPlaybackStateChanged: PlaybackState {state=PLAYING(3), position=0, buffered position=10517, speed=1.0, updated=68366627, actions=7340027, custom actions=[], active item id=6, error=null} (msps9.txt)
+10-24 18:09:42.170  8642  8755 I ActiveSessionRecord_export-api: onPlaybackStateChanged: PlaybackState {state=ERROR(7), position=529, buffered position=529, speed=0.0, updated=68376701, actions=7340029, custom actions=[], active item id=6, error=Unexpected runtime error} (msps9.txt)
+
+msps10.txt（18:10 会话同现象复现）：
+10-24 18:10:56.925  8642  8755 I ActiveSessionRecord_export-api: onPlaybackStateChanged: PlaybackState {state=PLAYING(3), position=0, buffered position=10500, speed=1.0, updated=68451460, actions=7340027, custom actions=[], active item id=6, error=null} (msps10.txt)
+10-24 18:11:06.937  8642  8755 I ActiveSessionRecord_export-api: onPlaybackStateChanged: PlaybackState {state=ERROR(7), position=529, buffered position=529, speed=0.0, updated=68461472, actions=7340029, custom actions=[], active item id=6, error=Unexpected runtime error} (msps10.txt)
+
+================================================================
+验证通过项读数
+================================================================
+
+1) ASF（wmv2+wmav2，此前已过；dl7/dl8/dlf.txt，16:09-16:11）
+   npff open ok streams=2，PLAYING position 94→230→251→2923ms 推进，自然结束转
+   STOPPED/连播；其后的 ERROR 是连播到设备既有 xvid-clip.avi（video/mp4v-es 320x240）
+   失败——既有行为，非本批问题。截图：asf-recheck.png（16:10，testsrc2 彩条+时间码出画）。
+   10-24 16:10:01.488 28893 29316 D NpFfmpegExtractor: npff open ok streams=2 (dl8.txt)
+   10-24 16:09:51.629  2902  3790 D Avrcp_ext: updatePlayerStateAndPosition, old=PlaybackState {state=PLAYING(3), position=94, buffered position=9984, speed=1.0, updated=61183662, actions=7340027, custom actions=[], active item id=10, error=null}, state=PlaybackState {state=PLAYING(3), position=230, buffered position=9984, speed=1.0, updated=61183798, actions=7340027, custom actions=[], active item id=10, error=null} (dl7.txt)
+   10-24 16:10:56.220  2902  3790 D Avrcp_ext: updatePlayerStateAndPosition, old=PlaybackState {state=PLAYING(3), position=2923, buffered position=4066, speed=1.0, updated=61196800, actions=7340027, custom actions=[], active item id=11, error=null}, state=PlaybackState {state=STOPPED(1), position=0, buffered position=0, speed=0.0, updated=61248386, actions=7339653, custom actions=[], active item id=0, error=null} (dlf.txt)
+   10-24 16:10:56.169  2902  3790 D Avrcp_ext: isMusicActive = false mAudioPlaybackIsActive = false player state = PlaybackState {state=ERROR(7), position=0, buffered position=0, speed=0.0, updated=61248337, actions=7339653, custom actions=[], active item id=0, error=MediaCodecVideoRenderer error, index=0, format=Format(0, null, null, video/mp4v-es, null, -1, null, [320, 240, 15.0, null], [-1, -1, -1]), format_supported=YES} (dlf.txt)
+
+2) FLV（flv1+mp3）出画+推进+自然结束连播：截图 flv-playing.png（18:01）。
+   注意：17:57:49（msps8 尾）至 18:09:31（msps9 头）之间无 logcat 捕获文件，
+   该时段的 FLV 成功现场只有截图为证（修复点 2/3/4 均在此前的 17:12 会话实锤）。
+
+3) PS 视频出画：截图 ps3.png（18:11，testsrc2 时间码 00:00:00.36 帧可见）。
+   对应会话（msps10.txt）视频已定型并出画，但 mp2 音频未修复前媒体时钟冻结
+   （见 §9），position=529 ERROR 是该构建的预期未完成态。
+
+4) 提取器读完整文件仅 0.6s、干净 EOF（ps-stream2.txt，18:15 最后一次冷启动捕获；
+   进程 14965，ExoPlayerImpl Init 18:15:29.710 → npff open 18:15:29.778 →
+   读到 946176 字节文件尾 read EOF 18:15:30.361，全程 0.58s）：
+   10-24 18:15:29.778 D/NpFfmpegExtractor(14965): npff open: iformat(mpegps)=0x0 (ps-stream2.txt)
+   10-24 18:15:29.778 D/NpFfmpegExtractor(14965): readFully len=65536 n=12 head=000001ba4400 (ps-stream2.txt)
+   10-24 18:15:30.361 D/NpFfmpegExtractor(14965): readFully len=65536 n=1721 head=000000000000 (ps-stream2.txt)
+   10-24 18:15:30.361 D/NpFfmpegExtractor(14965): read EOF (pending=-1) (ps-stream2.txt)
+
+5) Surface 迟到 9.5s（第二次深链才创建）：ps-stream2.txt 中上一条 read EOF
+   （18:15:30.361）与下一条 NpFfmpegVideoRenderer surface clone ok（18:15:39.621，
+   src=186364044，第二次深链的新播放器实例）之间日志完全空窗 9.26s——
+   mp2 音频未修复前媒体时钟冻结，首链会话虽在 18:15:29.895/29.966 有 surface clone
+   （src=138245899）但无帧推进，第二次深链后视频才出画：
+   10-24 18:15:30.361 D/NpFfmpegExtractor(14965): read EOF (pending=-1) (ps-stream2.txt)
+   10-24 18:15:39.621 D/NpPerf  (14965): NpFfmpegRenderer surface clone ok src=186364044 clone=48038869 (ps-stream2.txt)
+   10-24 18:15:39.621 D/NpPerf  (14965): NpFfmpegVideoRenderer surface clone ok src=186364044 clone=24197559 (ps-stream2.txt)
+
+================================================================
+设备与环境备注
+================================================================
+- 设备 60dd2f94（小米平板 6）。进程指纹（ps-stream2.txt 首行附近）：
+  10-24 18:15:29.710 I/ExoPlayerImpl(14965): Init 13f0499 [AndroidXMedia3/1.11.1] [pipa, 23043RP34C, Xiaomi, 34] (ps-stream2.txt)
+- 安装：adb -s 60dd2f94 install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+- 深链播放（MSYS_NO_PATHCONV=1 必带，否则 Git Bash 改写路径）：
+  MSYS_NO_PATHCONV=1 adb shell "am start -a android.intent.action.VIEW -d 'noneplayer://player?uri=content%3A%2F%2Fmedia%2Fexternal%2Fvideo%2Fmedia%2F<id>&mime=video%2Favi' com.noneplayer.app"
+- 全程静音：adb shell "cmd notification set_dnd on"（结束 set_dnd off）。
+- 冷启动深链可能被吞，需二次发送：ps-stream.txt 里 18:12:42 / 18:14:36 / 18:15:29
+  三个冷启动（PID 13920/14657/14965）各只有一轮探测读数且无后续播放状态，
+  18:15:29 会话的 surface 更是 9.5s 后（第二次深链）才创建（见"验证通过项"5）。
+- 设备息屏会影响视频观察：msps4.txt 17:35 会话期间设备锁屏——
+  10-24 17:35:35.502  4309  7146 I GameBoosterService: screen locked! (msps4.txt)
+  10-24 17:47:32.009  8642  8755 I ActiveSessionRecord_export-api: onMediaMetaChange, screen locked (msps4.txt)
+- 夹具：fixtures/e207/（wl-wmv2-wmav2.asf / wl-flv1-mp3.flv / wl-mpeg2-mp2.mpg / wl-ffv1.nut），
+  设备 content id：asf=1000015394、flv=1000015395、mpg=1000015396。
+- NUT（wl-ffv1.nut）本批未完成 MediaStore 入库验证；ffv1 解码器白名单已就位
+  （hasDecoder(ffv1)=true），预期边界为"探测可读、视频无解码器的诚实失败"，留待收尾。
+- 全局 adb 偶发双设备（60dd2f94 平板 + HUBQRGI7B6VGVGY9），统一 export ANDROID_SERIAL=60dd2f94；
+  adb logcat -d 偶发只回 2 行，用 adb shell "logcat -d" 重试（lcc.txt 即失败现场）。
+
+================================================================================
+10. rm 夹具生成与真机验证（20:0x 会话；本批新增）
+================================================================================
+- 交接文档预期"本地 ffmpeg 无 RealMedia 编码器"过时：imageio-ffmpeg 构建实有
+  rv10/rv20 编码器，夹具已生成并回读校验：
+  fixtures/e207/wl-rv10.rm  Stream #0:0: Video: rv10 (RV10 / 0x30315652), yuv420p, 320x240, 15 fps
+  fixtures/e207/wl-rv20.rm  Stream #0:0: Video: rv20 (RV20 / 0x30325652), yuv420p, 320x240, 15 fps
+- 设备入库：MediaStore video 表 id rv10=1000015410 / rv20=1000015411（.rm 不入
+  video 表，以 .mp4 扩展名推送绕过——容器识别按 magic，与扩展名无关）。
+
+10.1 rv10 探测+播放通过（20:02:27 会话）
+-----
+10-24 20:02:27.939 ... D NpFfmpegExtractor: npff open: iformat(rm)=0x7da10902a8
+10-24 20:02:27.939 ... D NpFfmpegExtractor: npff open ok streams=1
+10-24 20:02:27.942 ... D FormatProbe: matched=zm2 ch=seekable expectedMime=video/mp4 expectVideo=true reads=1 formats=1 mimes=[video/x-pn-realvideo]
+10-24 20:02:27.973 ... D FormatProbe: decide platform=false ffmpeg=false bitmap=false legacy=false npff=true
+10-24 20:02:36 poll: state=PLAYING(3), position=23, buffered position=8000
+- rv10 完整播完 8s 并自动连播到 rv20（position 5639 为 rv20 轨）。
+
+10.2 rv20 send 阶段 INVALIDDATA（修复前，20:02:49）
+-----
+10-24 20:02:49.682 ... E ExoPlayerImplInternal: Playback error
+10-24 20:02:49.682 ... E ExoPlayerImplInternal:   yu0: NpFfmpegVideoRenderer error, index=4, format=Format(null, null, null, video/x-pn-realvideo2, ...)
+10-24 20:02:49.682 ... E ExoPlayerImplInternal:   Caused by: xx0: 送入 -1094995529
+- -1094995529 = AVERROR_INVALIDDATA：编码器产出的个别帧解码器 send_packet
+  即拒收。A19 的"坏帧跳过"只护了 receive（drain），send 路径把整条流打成终态。
+- 修复：nativeSendDirect 对 send 返回 AVERROR_INVALIDDATA 丢包继续（A19 同款），
+  日志 "send invalid data, dropping packet pts=… size=…"。
+
+10.3 rv20 修复后通过（20:0x 会话）
+-----
+t=9s  state=PLAYING(3), position=6454
+t=11s state=PLAYING(3), position=1491   （连播队列推进）
+t=13s state=PLAYING(3), position=4491
+t=15s state=PLAYING(3), position=7500   （8s 片播至末段）
+- 出画证据：rv20-playing.png（testsrc2 网格+彩条+时间码 00:00:07:20 满屏）。
+
+================================================================================
+11. PS 媒体时钟冻结 —— 边界定性（19:1x–19:4x 会话）
+================================================================================
+- 视频链路全通：npff mpeg2 软解出画（ps3.png 时间码 00:00:00.36 帧）；
+  提取器侧包时间戳干净（原始 pts 48600/90kHz=540000µs）；
+  探测 formats=2 mimes=[video/x-np-mpeg2, audio/mpeg-L2]。
+- 伪线索澄清：渲染器收到的 pts=1000000540000 带 +1e12µs 偏移，字节码定位为
+  MediaPeriodQueue.DEFAULT_RENDERER_OFFSET（media3 1.11 固定常量，首个 period
+  一律加）——正常行为，FLV 同样带此偏移且正常推进，非缺陷。
+- 真实病症：position 冻结在 529ms（= 首音频包 pts 47618/90kHz=529089µs），
+  PLAYING 状态 10s 后 "Unexpected runtime error"。
+- 已排除：时长假说（getDurationUs 伪造成 10s 后依旧冻结，已回退 TIME_UNSET）；
+  断点污染假说（新文件名 wl-ps-fresh.mpg 全新状态复现）；npff 音频认领
+  （supportsFormatInternal 实测 audio/mpeg-L2 -> HANDLED ch=1 rate=44100）；
+  mpegps seek 失步（media3 装载期 extractor.seek 未达 native 侧，无 fallback 日志）。
+- 未钉死：mp2 音频渲染器被选中后解码器未创建（"NpFfmpegAudio create" 零日志），
+  时钟锚定后无 PCM 推进——mpegps+mp2 组合特有的 media3 深层行为，留待下批带
+  debugger 复刻（E207 按边界收口：视频可解/出画、路由正确、时钟冻结）。
+- 防御性修复（随批保留）：mpegps 无 read_seek，npffExtSeekTimeUs 走
+  "avformat_flush + 回文件起点重读 + 按目标时间丢包"，绕开通用寻位的
+  relative-ts 重锚垃圾平移（字节流回卷后 cur_dts/first_dts 会算出 +1e6s 平移，
+  使此后视频包 pts 全体 +1e12µs——与 DEFAULT_RENDERER_OFFSET 同量级，叠加后
+  无法从渲染器读数区分，已在 C 侧 pts 插桩实锤平移来源）。
+
+================================================================================
+12. NUT —— 边界定性（19:5x 会话）
+================================================================================
+- MediaProvider 不认 .nut 进 video 表（scan_volume 后仍无行）；file 表
+  id=1000015397 的深链（content://media/external/file/…）无响应；
+  .mp4 扩展名改推（wl-ffv1-x.mp4，video 表 id=1000015409）深链同样不触发探测
+  （FormatProbe/NpFfmpegExtractor 零日志）——同批同法推送的 rv10/rv20 正常，
+  差异在应用侧条目解析，不在播放链。
+- 已就绪并钉住：NUTM magic sniff、nut demuxer、ffv1/theora 解码器
+  （hasDecoder=true）、路由表与显示名——单测覆盖；端到端播放待下批以可入库
+  夹具（如 theora-ogg 对照或 UI 内点播）复测。

@@ -11,9 +11,17 @@ import com.noneplayer.core.media.MediaNames
  * 都查这张表，两边天然同源；表里的解码器是否真的编译进了随包的共享 libavcodec，
  * 由 [hasDecoder] 在运行时用 `avcodec_find_decoder_by_name` 复核（表只是意图，库才是真相）。
  *
- * **只收当前有解封装通路的 mime**（AVI 经 Wmv2AviExtractor/Media3Avi、MKV 的 VC-1）；
- * prores/theora/tta 等解码器虽已编译进共享库，但现有提取器不产出对应 mime——
- * 等 §9.3 的 avformat 批接上后再入表（提前入表只会让探测对"解不出来"的容器误报可播）。
+ * **只收当前有解封装通路的 mime**（AVI 经 Wmv2AviExtractor/Media3Avi、MKV 的 VC-1；
+ * E207 起 avformat 五容器 asf/rm/flv/mpegps/nut 产出 FLV1/VP6/RV/FFV1/Theora/Real 系音频）。
+ * prores/huffyuv 等 NUT 理论可载但无夹具验证的编码暂不映射——提取器不产出 mime，
+ * 探测按"编码无法识别"诚实失败。
+ *
+ * E207 口径：**一个解码器一个 mime**。vp6/vp6f/vp6a、rv10–rv40、atrac3/al/pal 在
+ * FFmpeg 是独立解码器 ID，提取器按流内编码名产出精确 mime（本表是唯一消费方），
+ * 表项与流内编码名严格互逆——这比 WMA 族"一个 mime + extradata 细分"更简单直接
+ * （WMA 那样做是因为 Media3Avi 的生产端不可改；本提取器是我们自己的）。
+ * 表里的解码器是否真的编译进了随包的共享 libavcodec，
+ * 由 [hasDecoder] 在运行时用 `avcodec_find_decoder_by_name` 复核（表只是意图，库才是真相）。
  *
  * libnplegacy 保持在 WMV2 / MPEG-4 ASP 两个专用 mime 上不动（既定裁定）。
  */
@@ -23,13 +31,33 @@ object NpFfmpegCodecs {
 
     private const val RETRY_MS = 30_000L
 
-    /** mime → 解码器名（视频）。WVC1 是 VC-1 Advanced Profile 的 AVI/MKV fourcc。 */
+    /** mime → 解码器名（视频）。WVC1 是 VC-1 Advanced Profile 的 AVI/MKV fourcc。
+     * E207：avformat 五容器的编码按"一个解码器一个 mime"入表（见类注释）。 */
     private val videoCodecs: Map<String, String> = mapOf(
         MediaNames.MIME_WMV3 to "wmv3",
         MediaNames.MIME_WMV1 to "wmv1",
         MediaNames.MIME_VC1 to "vc1",
         "video/mp42" to "msmpeg4v2",
         "video/mp43" to "msmpeg4", // FFmpeg 里 v3 解码器的注册名就是 msmpeg4（历史别名）
+        // FLV（NpFfmpegExtractor flv demuxer）。注意 FFmpeg 7.1 命名分裂：流的编码名
+        // （avcodec_get_name，描述符表）是 "flv1"，而解码器注册名（find_decoder_by_name）是
+        // "flv"——configure 组件名同为 "flv"（build-ffmpeg.sh 同坑，曾误写 flv1 被静默忽略）
+        "video/x-flv1" to "flv",
+        "video/x-vp6" to "vp6",
+        "video/x-vp6f" to "vp6f",
+        "video/x-vp6a" to "vp6a",
+        // RM（rv demuxer）：四代 RealVideo 是四个独立解码器
+        "video/x-pn-realvideo" to "rv10",
+        "video/x-pn-realvideo2" to "rv20",
+        "video/x-pn-realvideo3" to "rv30",
+        "video/x-pn-realvideo4" to "rv40",
+        // NUT
+        "video/x-ffv1" to "ffv1",
+        "video/theora" to "theora",
+        // MPEG-1/2 视频（PS 容器）：平台 OMX mpeg2 在部分设备（SD860/MIUI）实测坏，
+        // npff 软解为准——见 NpFfmpegExtractor.mimeForCodecName 注释
+        "video/x-np-mpeg1" to "mpeg1video",
+        "video/x-np-mpeg2" to "mpeg2video",
     )
 
     /** mime → 解码器名（音频，codec 名还依赖 extradata 里的 WAVE tag 时给 null）。 */
@@ -37,6 +65,17 @@ object NpFfmpegCodecs {
         MediaNames.MIME_WMA to null, // wmav1/wmav2 按 extradata 的 tag 细分
         MediaNames.MIME_WMAPRO to "wmapro",
         MediaNames.MIME_WMALOSSLESS to "wmalossless",
+        // E207：RM/NUT 的音频族（atrac3al/pal 提取器产出独立 mime 但不入表——
+        // 没有对应路由的独立解码器，留给探测给 A11"音频不支持"提示）
+        "audio/x-cook" to "cook",
+        "audio/x-sipr" to "sipr",
+        "audio/x-atrac3" to "atrac3",
+        "audio/x-wavpack" to "wavpack",
+        "audio/x-tta" to "tta",
+        // PS 的 mp1/mp2（mp2 音频平台普遍无 L2 解码器、NextLib 也不含——
+        // npff 软解补位；无人认领会导致媒体时钟冻结，E207 真机实录）
+        "audio/mpeg-L1" to "mp1",
+        "audio/mpeg-L2" to "mp2",
     )
 
     @Volatile

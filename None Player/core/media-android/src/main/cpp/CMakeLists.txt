@@ -36,6 +36,8 @@ if(NOT EXISTS ${PREBUILT}/lib/libswresample.a)
     message(FATAL_ERROR "missing ${PREBUILT}/lib/libswresample.a — run build-ffmpeg.sh（白名单批重编）")
 endif()
 
+add_library(npavformat STATIC IMPORTED)
+set_target_properties(npavformat PROPERTIES IMPORTED_LOCATION ${PREBUILT}/lib/libavformat.a)
 add_library(npavcodec STATIC IMPORTED)
 set_target_properties(npavcodec PROPERTIES IMPORTED_LOCATION ${PREBUILT}/lib/libavcodec.a)
 add_library(npavutil STATIC IMPORTED)
@@ -43,12 +45,12 @@ set_target_properties(npavutil PROPERTIES IMPORTED_LOCATION ${PREBUILT}/lib/liba
 add_library(npswr STATIC IMPORTED)
 set_target_properties(npswr PROPERTIES IMPORTED_LOCATION ${PREBUILT}/lib/libswresample.a)
 
-add_library(npffmpeg SHARED np_ffmpeg_decoder.c)
+add_library(npffmpeg SHARED np_ffmpeg_decoder.c np_ffmpeg_extractor.c)
 set_property(TARGET npffmpeg APPEND PROPERTY LINK_DEPENDS
         ${CMAKE_CURRENT_SOURCE_DIR}/npffmpeg.map)
 target_include_directories(npffmpeg PRIVATE ${PREBUILT}/include)
 target_compile_options(npffmpeg PRIVATE -fvisibility=hidden -Os -ffunction-sections -fdata-sections)
-target_link_libraries(npffmpeg npavcodec npavutil npswr m z atomic android log)
+target_link_libraries(npffmpeg npavformat npavcodec npavutil npswr m z atomic android log)
 target_link_options(npffmpeg PRIVATE
         "-Wl,-z,max-page-size=16384"
         "-Wl,--gc-sections"

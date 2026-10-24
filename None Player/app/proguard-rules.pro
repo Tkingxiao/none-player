@@ -34,3 +34,7 @@
 -keep,allowobfuscation interface com.noneplayer.kernel.ui.api.ScreenProvider
 -keep,allowobfuscation interface com.noneplayer.kernel.ui.api.SettingsProvider
 -keep,allowobfuscation interface com.noneplayer.kernel.ui.api.TabProvider
+
+# ---- E207 avformat 解封装：AVIO 读桥（JNI GetObjectClass+GetMethodID 依赖
+# 类名/方法名恒定——R8 类合并会拆掉 keepclassmembers 语义，必须整类 keep）----
+-keep class com.noneplayer.core.media.ffmpeg.NpExtractorReaderImpl { *; }
