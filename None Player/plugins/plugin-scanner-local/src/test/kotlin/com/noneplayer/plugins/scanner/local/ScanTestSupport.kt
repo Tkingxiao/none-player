@@ -777,8 +777,8 @@ internal class ScanHarness(
         }.getOrNull()
     }
 
-    /** 真机/单测共用的扫描时间线文件（ScanTrace 落盘于 filesDir）。 */
-    fun scanTraceFile(): File = File(context.filesDir, "scan_trace.log")
+    /** 真机/单测共用的扫描时间线文件（E216 起 ScanTrace 落外部专属目录，见 resolveScanTraceDir）。 */
+    fun scanTraceFile(): File = File(resolveScanTraceDir(context), "scan_trace.log")
 
     /** 目录遍历索引文件（用例里应给独立临时路径，避免跨用例串味）。 */
     fun walkIndexFileOnDisk(): File = walkIndexFile

@@ -1,0 +1,52 @@
+E216 扫描取证可移植性 真机证据（60dd2f94，2026-10-25）
+================================================================
+
+设备 60dd2f94（小米平板 6，MIUI/API 34）。安装 release（最终构建）：
+adb -s 60dd2f94 install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+
+----------------------------------------------------------------
+1. 改动
+----------------------------------------------------------------
+- `ScanTrace` 落盘目录从 internal `filesDir` 挪到**应用外部专属目录**
+  （`getExternalFilesDir(null)`，`/sdcard/Android/data/<pkg>/files/`）——
+  internal 目录在 release 非 debuggable 包上 adb 拉不出来（E204 教训：
+  取证产物留在设备里等于没留）；外部专属目录 adb shell 可直读，无需 root。
+- `resolveScanTraceDir(context)`：外部不可用（挂载中）回落 filesDir；
+  旧 internal 的 `scan_trace.log` / `scan_trace.log.1` 升级时 copy+delete
+  迁移过去（跨卷 `renameTo` 静默失败，必须 copy）；全步 runCatching，
+  幂等。文件名字面量收成一处（object 与目录解析共用）。
+- 测试支撑 `ScanTestSupport.scanTraceFile()` 同步改走 `resolveScanTraceDir`；
+  新增 `ScanTraceDirTest` 3 项（解析落外部目录 / 迁移两份文件且幂等 /
+  外部不可用回落 filesDir——ContextWrapper 注入 null）。
+
+----------------------------------------------------------------
+2. 门禁读数
+----------------------------------------------------------------
+./gradlew assembleDebug test assembleRelease lint（最终源码全跑）
+test：147 套件 / 1029 项 / 0 失败（基线 146/1026 + ScanTraceDirTest 3 项）
+lint：15 份报告 / 0 issue
+release：29,208,295 B（与 E215 相同——改动被同一 16KB 对齐桶吸收）
+debug：66,222,573 B
+
+----------------------------------------------------------------
+3. 真机现象
+----------------------------------------------------------------
+- 覆盖安装后冷启应用（触发扫描），外部目录出现两份文件：
+  `scan_trace.log`（176,037 B，新写入）与 `scan_trace.log.1`（262,181 B，
+  满额 256KB 轮转件——从旧 internal 位置迁移而来，证明迁移路径真跑过）。
+- `adb pull /sdcard/Android/data/com.noneplayer.app/files/scan_trace.log`
+  一次成功（12.4 MB/s），文件头是 06:06 旧批次的时间线（迁移内容），
+  尾部是本次冷启的完整扫描（`scan done elapsed=505ms items=96`、
+  `lane presets saved=true WALK=15`）——release 非 debuggable 包上
+  无 root 取证闭环成立。
+- 拉取件留档 `screenshots/e216-2026-10-25/scan_trace-pulled.log`。
+
+----------------------------------------------------------------
+4. 过程记录 / 边界
+----------------------------------------------------------------
+- 全模块批跑时 `ScanWalkParallelismBenchTest` 偶发挂死一次（runBlocking 在
+  Robolectric 主线程 joinBlocking 35 分钟无进展；单跑 44s、全量复跑 3.5 分钟
+  均通过）——与 E216 改动无关（挂点在 walk 基准的调度，本批未触碰），
+  已记任务文档 §7 [P3] 观察项。
+- 备份排除规则（E211）里 internal scan_trace.log 的排除项就此空置：
+  外部专属目录本来就不进 Auto Backup，规则保留作意图说明，未删。

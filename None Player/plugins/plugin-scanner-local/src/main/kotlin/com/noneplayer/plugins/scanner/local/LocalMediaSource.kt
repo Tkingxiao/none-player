@@ -501,8 +501,9 @@ class LocalMediaSource(
     override suspend fun isAvailable(): Boolean = MediaAccessPolicy.current(context, sdkInt).isAvailable
 
     init {
-        // 取证落盘（filesDir/scan_trace.log）：真机上 logcat 抓不到时还能 adb pull 回来看
-        ScanTrace.install(context.filesDir)
+        // 取证落盘（E216：应用外部专属目录 scan_trace.log）——internal 在 release
+        // 非 debuggable 包上 adb 拉不出来；外部专属目录 adb shell 可直读，无需 root。
+        ScanTrace.install(resolveScanTraceDir(context))
     }
 
     override suspend fun scan(): ScanResult = withContext(dispatchers.io) {
@@ -647,7 +648,8 @@ class LocalMediaSource(
             " coverStart=" + coverStart
         Log.i(TAG, "scan prepare " + laneDescribe + " folders=" + folderUriStrs.size)
         ScanTrace.log("scan prepare " + laneDescribe + " folders=" + folderUriStrs.size)
-        // 取证：六阶段的进入/离开与耗时。真机上 logcat 抓不到时，adb pull filesDir/scan_trace.log 即可
+        // 取证：六阶段的进入/离开与耗时。真机上 logcat 抓不到时，adb pull
+        // /sdcard/Android/data/<pkg>/files/scan_trace.log 即可（E216 外部专属目录）
         var phaseMark = System.currentTimeMillis()
         fun tracePhase(msg: String) {
             val now = System.currentTimeMillis()

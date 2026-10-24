@@ -10,7 +10,12 @@ import java.util.concurrent.LinkedBlockingQueue
  *
  * 背景：真机上 `adb logcat` 的用法/过滤方式一变，关键日志就抓不到；排查「这一轮扫描到底走到哪、
  * 隐藏目录遍历有没有重复入队、慢在哪一段」时不能依赖 logcat 是否可用。本对象把同样的消息
- * append 到 `filesDir/scan_trace.log`，随包带走、可事后 adb pull。
+ * append 到 [resolveScanTraceDir] 给出的目录下 `scan_trace.log`，可事后 adb pull。
+ *
+ * E216：落盘目录从 internal `filesDir` 挪到**应用外部专属目录**
+ * （`getExternalFilesDir`，`/sdcard/Android/data/<pkg>/files/`）——internal 目录在
+ * release 非 debuggable 包上 adb 拉不出来（E204 教训：取证产物留在设备里等于没留），
+ * 外部专属目录 adb shell 可直读，无需 root。外部存储不可用时回落 filesDir。
  *
  * E205⑥：落盘改由**单条后台写线程**异步完成（调用线程只入队）。旧实现每次 [log] 都在
  * 调用线程上 `File.length()+FileOutputStream+close`，且要与扫描工作线程的写盘争同一把锁——
@@ -30,12 +35,6 @@ import java.util.concurrent.LinkedBlockingQueue
 internal object ScanTrace {
 
     private const val TAG = "ScanTrace"
-
-    /** 落盘文件名（[install] 的目录下） */
-    private const val FILE_NAME = "scan_trace.log"
-
-    /** 轮转后的文件名（只保留一份旧的） */
-    private const val ROTATED_NAME = "scan_trace.log.1"
 
     /** 单个文件上限：256KB，一轮扫描 <200 行，够存上千轮 */
     private const val MAX_BYTES = 256L * 1024L
@@ -100,10 +99,10 @@ internal object ScanTrace {
                         val msg = pending.poll() ?: return@synchronized false
                         val target = dir ?: return@synchronized true
                         runCatching {
-                            val file = File(target, FILE_NAME)
+                            val file = File(target, FILE)
                             if (file.length() > MAX_BYTES) {
                                 // 轮转：先删旧的 .1 再改名，保证磁盘上最多两份
-                                val rotated = File(target, ROTATED_NAME)
+                                val rotated = File(target, ROTATED)
                                 rotated.delete()
                                 file.renameTo(rotated)
                             }
@@ -138,3 +137,30 @@ internal object ScanTrace {
         }
     }
 }
+
+/**
+ * 取证目录解析（E216）：优先应用**外部专属目录**（release 可 `adb pull`，
+ * 无需 root/debuggable），外部存储不可用（挂载中/被用户关掉）回落 internal `filesDir`。
+ *
+ * 升级迁移：旧版本把 trace 落在 filesDir，internal→external 是**跨卷**，
+ * `renameTo` 会静默失败，所以 copy+delete 搬过去（≤两份 × 256KB，一次性）；
+ * 任何一步失败都不影响返回值（取证工具绝不抛）。幂等：搬完 internal 不再存在，
+ * 二次调用空转。
+ */
+internal fun resolveScanTraceDir(context: android.content.Context): File {
+    val external = runCatching { context.getExternalFilesDir(null) }.getOrNull() ?: context.filesDir
+    runCatching {
+        for (name in listOf(FILE, ROTATED)) {
+            val internal = File(context.filesDir, name)
+            if (internal.isFile) {
+                internal.copyTo(File(external, name), overwrite = true)
+                internal.delete()
+            }
+        }
+    }
+    return external
+}
+
+/** ScanTrace 与目录解析共用的文件名（防两处字面量漂移） */
+private val FILE = "scan_trace.log"
+private val ROTATED = "scan_trace.log.1"
