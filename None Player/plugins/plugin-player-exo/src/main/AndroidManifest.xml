@@ -23,11 +23,10 @@
 
         <!-- E157：不再声明 media3 的 MediaButtonReceiver。
              会话活着时，系统媒体键直接投给 MediaSession；PiP 的暂停/下一集走下面
-             自建的 NpMediaActionReceiver。清单接收器只在“服务未运行”时冷启动
-             PlaybackService——本应用尚未实现 onPlaybackResumption，冷启动拿到 PLAY
-             会拉起一个空会话，5s 内没有可发的前台通知，系统直接抛
-             ForegroundServiceDidNotStartInTimeException 杀进程（E156-1 实测）。
-             在补 resumption 之前，冷启动媒体键明确不支持，优先不崩溃。 -->
+             自建的 NpMediaActionReceiver。E209 已实现 onPlaybackResumption（系统媒体
+             恢复卡）。但冷启动 MEDIA_BUTTON 仍不声明：没有恢复数据时该路径会先拉起
+             前台服务再收到空播放指令，5s 内无可发通知会被系统杀进程（E156-1 实测）；
+             系统恢复入口应由 SystemUI 的 resumption 卡走绑定，而不是媒体键广播。 -->
         <receiver
             android:name=".NpMediaActionReceiver"
             android:exported="false" />

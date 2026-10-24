@@ -405,13 +405,21 @@ class PlaybackService : MediaSessionService() {
             isForPlayback: Boolean,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> {
             val history = PlaybackResumeHistory.repository
-                ?: return Futures.immediateFuture(
-                    MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L),
-                )
+                ?: run {
+                    Log.i(SERVICE_LOG_TAG, "onPlaybackResumption 无 HistoryRepository，返回空队列")
+                    return Futures.immediateFuture(
+                        MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L),
+                    )
+                }
             val future = SettableFuture.create<MediaSession.MediaItemsWithStartPosition>()
             CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
                 runCatching { history.mostRecentForResumption() }
                     .onSuccess { entry ->
+                        Log.i(
+                            SERVICE_LOG_TAG,
+                            "onPlaybackResumption isForPlayback=$isForPlayback " +
+                                "media=${entry?.mediaKey} pos=${entry?.positionMs}",
+                        )
                         future.set(
                             if (entry == null) {
                                 MediaSession.MediaItemsWithStartPosition(emptyList(), 0, 0L)

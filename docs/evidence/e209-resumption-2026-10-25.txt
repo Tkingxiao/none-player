@@ -1,0 +1,66 @@
+E209 系统「媒体」恢复入口人工走查（60dd2f94，2026-10-25）
+================================================================
+
+目标：验证 E209 的 `PlaybackService.onPlaybackResumption()` 能被系统媒体恢复入口拉起，
+并回到上次播放条目与断点（任务文档 §1 [P2]）。
+
+结论：**本机 MIUI SystemUI 未启用媒体恢复（`useMediaResumption: false`），系统入口不存在，
+无法在本设备完成验收**。实现路径与数据链路保持代码 + 单测覆盖，恢复入口待 AOSP 设备补证。
+
+----------------------------------------------------------------
+1. 环境读数
+----------------------------------------------------------------
+- 设备 60dd2f94（小米平板 6，MIUI/HyperOS，Android 14/API 34），release 包。
+- SystemUI MediaDataManager：
+  adb shell dumpsys activity service com.android.systemui | grep useMediaResumption
+  → useMediaResumption: false
+  （AOSP 恢复卡由该开关总控；关闭时不会生成可点击的 resumption 媒体卡。）
+- 控制中心样式：settings secure use_control_panel=1、force_use_control_panel=1。
+
+----------------------------------------------------------------
+2. 走查步骤与观察
+----------------------------------------------------------------
+① 正常会话（对照组）
+   deep link 起播 wl-mpeg2-mp2.mpg，暂停在 position=5754ms。
+   展开控制中心：媒体卡显示该片封面与标题、暂停键可用。
+   截图：screenshots/e209-resumption-2026-10-25/60dd2f94/qs_paused_session.png
+
+② force-stop 后（模拟进程被终止）
+   adb shell am force-stop com.noneplayer.app
+   展开控制中心：媒体卡变成「暂无播放」占位（无应用标题/封面），三颗键仍在。
+   点击播放键 (1386,400)：launcher 保持在前台，dumpsys media_session 0 个
+   com.noneplayer.app 会话，无 PlaybackService 启动，logcat 无 onPlaybackResumption。
+   截图：qs_force_stopped.png
+
+③ 重启后（AOSP 恢复卡的典型场景）
+   - 第一轮：暂停在 5754ms 后重启。开机展开控制中心 =「暂无播放」。
+   - 第二轮：确认 PLAYING（active item 9, position=5107ms）后直接重启。
+     开机展开控制中心仍为「暂无播放」；adb shell cmd media_session list-sessions 为空。
+   点击播放键无任何会话拉起。
+   截图：qs_after_reboot.png
+
+④ 旁证
+   - QS 日志仅记录 `getLastPlayingAppPackageName(): last_playing_package_name
+     com.noneplayer.app`，说明系统记住了包名，但不生成可恢复的媒体卡。
+   - force-stop 前会话正常（`state=PAUSED/PLAYING`、`actions` 含 PLAY_PAUSE），
+     Media3 服务与通知通路无异常。
+
+----------------------------------------------------------------
+3. 代码侧补强（本批）
+----------------------------------------------------------------
+- `PlaybackService.onPlaybackResumption` 增加两处诊断日志（成功/无仓储）：
+  `onPlaybackResumption isForPlayback=? media=? pos=?`
+  仅在回调真正被系统调用时打印，便于 AOSP 设备取证时直接确认。
+- 触发条件（media3 1.11.1 源码）：媒体控制器在**播放列表为空**时请求 play()，
+  `MediaSessionImpl.handleMediaControllerPlayRequestInternal` 调
+  `callback.onPlaybackResumption(..., isForPlayback=true)`，成功后 set items + play。
+  系统恢复卡点击播放走的就是这条路径。
+
+----------------------------------------------------------------
+4. 边界 / 待办
+----------------------------------------------------------------
+- 本机无法验证「恢复后从断点起播」与「条目/封面正确」——入口不存在，不是实现失败。
+- 后续在 AOSP/Pixel 设备上：安装 release → 播一条 → 暂停/重启 → 控制中心媒体卡
+  点播放 → 期望 `PlaybackService` 出现 `onPlaybackResumption isForPlayback=true
+  media=<id> pos=<ms>`，且会话从该 position 起播。
+- 若届时仍无恢复卡，检查该设备的 `useMediaResumption` 与 MediaControls 锁定设置。
