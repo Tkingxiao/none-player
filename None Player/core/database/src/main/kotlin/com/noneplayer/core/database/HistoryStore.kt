@@ -5,11 +5,11 @@ import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
 import androidx.room.Insert
+import androidx.room.Transaction
 import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
-import androidx.room.Transaction
 import androidx.room.Update
 import android.content.Context
 import androidx.room.Room
@@ -98,6 +98,17 @@ internal interface HistoryDao {
 
     @Query("DELETE FROM playback_history WHERE media_key = :key")
     suspend fun delete(key: String)
+
+    /**
+     * E220：删除前取整行（撤销复插用）。读与删必须一个事务——否则「读到行 → 别处
+     * 更新了进度 → 删掉新行」会把较新的断点连同旧快照一起冲掉。
+     */
+    @Transaction
+    suspend fun deleteReturning(key: String): PlaybackHistoryEntity? {
+        val row = byKey(key) ?: return null
+        delete(key)
+        return row
+    }
 
     /** L16：全量键（孤儿清理用——只取键，不把整行收下来） */
     @Query("SELECT media_key FROM playback_history")

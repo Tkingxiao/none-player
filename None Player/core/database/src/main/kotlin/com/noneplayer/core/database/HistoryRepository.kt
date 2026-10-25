@@ -87,6 +87,9 @@ class HistoryRepository private constructor(
 
     private val dao: HistoryDao by lazy { daoProvider() }
 
+    /** E220：removeHistory 的撤销留底（键 → 被删整行）；撤销即取走，进程死则丢（toast 窗口内的语义足够） */
+    private val lastRemovedForUndo = java.util.concurrent.ConcurrentHashMap<String, PlaybackHistoryEntity>()
+
     /** REV-06：持久化健康的可观察状态（设置页副题 / 日志 / 验收测试用） */
     private val _storageStatus = MutableStateFlow(HistoryStorageStatus())
 
@@ -304,6 +307,31 @@ class HistoryRepository private constructor(
      * DataStore 旧键——用户数据还在 Room 里）
      */
     suspend fun clearHistory(): Boolean = storageWrite("clearHistory") { dao.clear() } != null
+
+    /**
+     * E220：单条移除（个人页「播放历史」长按）。行不存在返回 false（不报错——
+     * 双击/并发下第二次调用是正常路径）。
+     *
+     * 被删整行留在内存 [lastRemovedForUndo] 供 [undoRemoveHistory] 复插：撤销要在
+     * toast 存续期（约 4s）内把断点/时间戳**原样**还原，不能靠 UI 侧重放——实体类型
+     * 不出本模块（internal），留底只能放这里。
+     */
+    suspend fun removeHistory(key: String): Boolean {
+        val removed = storageWrite("removeHistory") { dao.deleteReturning(key) }
+        if (removed != null) lastRemovedForUndo[key] = removed
+        return removed != null
+    }
+
+    /**
+     * E220：撤销最近一次 [removeHistory]——把留底整行原样插回（REPLACE 语义，
+     * 与 [record] 同一写入口径）。没有留底（没删过/已撤销过/进程重启）返回 false。
+     */
+    suspend fun undoRemoveHistory(key: String): Boolean {
+        // 留底查找在 storageWrite 之外：没有留底不是存储故障（块内 return false
+        // 会被 `!= null` 判成"写成功"），是"没有可撤销的"业务语义。
+        val row = lastRemovedForUndo.remove(key) ?: return false
+        return storageWrite("undoRemoveHistory") { dao.insert(row) } != null
+    }
 
     /**
      * L16：清孤儿记录（数据卫生）。

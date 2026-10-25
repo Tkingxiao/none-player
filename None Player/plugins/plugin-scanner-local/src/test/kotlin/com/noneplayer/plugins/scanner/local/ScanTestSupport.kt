@@ -663,6 +663,14 @@ internal class ScanHarness(
     val walkIndexTtlMs: Long = ScanWalkIndex.DEFAULT_TTL_MS,
     // 默认文件名与生产一致（LocalMediaSource.walkIndexFile / scan-contract §3）：scan_walk_index.json。
     val walkIndexFile: File = File(context.filesDir, "scan_walk_index.json"),
+    /**
+     * 调度器可注入（E220）：缺省 [TestDispatcherProvider]（main/default=Unconfined）。
+     * Unconfined 续体链偶发把"扫描完成"的最后一跳排进**停泊 IO worker 的
+     * ThreadLocalEventLoop**——那个循环只有该 worker 再领到任务才会被服务，
+     * 批跑下偶发死锁（runBlocking 主线程等一个永远不会被服务的续体）。
+     * 需要确定性线程模型的用例（如并行基准）传全 IO 的 provider 规避。
+     */
+    dispatchers: DispatcherProvider = TestDispatcherProvider,
 ) {
 
     val eventBus = RecordingEventBus()
@@ -670,7 +678,7 @@ internal class ScanHarness(
 
     val source: LocalMediaSource = LocalMediaSource(
         context = context,
-        dispatchers = TestDispatcherProvider,
+        dispatchers = dispatchers,
         eventBus = eventBus,
         settings = settings,
         registry = registry,

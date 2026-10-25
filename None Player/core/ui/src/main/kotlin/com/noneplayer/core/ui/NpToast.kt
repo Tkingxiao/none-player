@@ -8,6 +8,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -38,13 +39,31 @@ class NpToastState {
     var message by mutableStateOf<String?>(null)
         private set
 
+    /** E220：动作钮文案（如「撤销」）；纯文本 show 时为 null。随文案一起替换/清除。 */
+    var actionLabel by mutableStateOf<String?>(null)
+        private set
+
+    var action by mutableStateOf<(() -> Unit)?>(null)
+        private set
+
     /** 连续 show 直接替换文案并重新计时（与设计稿 clearTimeout+setTimeout 行为一致）。 */
     fun show(text: String) {
         message = text
+        actionLabel = null
+        action = null
+    }
+
+    /** E220：带动作的 toast（如「已从播放历史移除 · 撤销」）。动作触发即清 toast。 */
+    fun show(text: String, actionLabel: String, onAction: () -> Unit) {
+        message = text
+        this.actionLabel = actionLabel
+        action = onAction
     }
 
     fun clear() {
         message = null
+        actionLabel = null
+        action = null
     }
 }
 
@@ -82,11 +101,9 @@ fun NpToastHost(
         ) {
             val message = state.message.orEmpty()
             val shape = RoundedCornerShape(NpRadius.chip)
-            Text(
-                text = message,
-                style = NpTypography.bodySmall,
-                color = ink.fg,
-                maxLines = 2,
+            // E220：动作钮（撤销）与文案同胶囊；命中区 44dp 红线由行高内边距保证
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier
                     .padding(bottom = 28.dp)
                     // E129：阴影在**胶囊底之外**（同 NpGlass / NpMenuSurface）——
@@ -94,9 +111,30 @@ fun NpToastHost(
                     .npShadow(ink, shape, elevation = 12.dp)
                     .clip(shape)
                     .background(ink.surface)
-                    .border(1.dp, ink.border, shape)
-                    .padding(horizontal = 18.dp, vertical = 11.dp),
-            )
+                    .border(1.dp, ink.border, shape),
+            ) {
+                Text(
+                    text = message,
+                    style = NpTypography.bodySmall,
+                    color = ink.fg,
+                    maxLines = 2,
+                    modifier = Modifier.padding(start = 18.dp, top = 11.dp, bottom = 11.dp),
+                )
+                state.actionLabel?.let { label ->
+                    Text(
+                        text = label,
+                        style = NpTypography.bodySmall,
+                        color = ink.accent,
+                        modifier = Modifier
+                            .padding(start = 12.dp, end = 14.dp)
+                            .npClickable {
+                                state.action?.invoke()
+                                state.clear()
+                            }
+                            .padding(horizontal = 4.dp, vertical = 11.dp),
+                    )
+                }
+            }
         }
     }
 }

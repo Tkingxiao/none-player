@@ -6,7 +6,10 @@ import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import android.provider.DocumentsContract
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -53,10 +56,20 @@ class ScanWalkParallelismBenchTest {
     /** 每次 children 查询注入的延迟（毫秒），约等于一次真实 binder 往返的量级。 */
     private val perQueryDelayMs = 5L
 
+    /** 全 IO 调度器：见 setUp 里对 Unconfined 事件循环陷阱的说明 */
+    private val BenchDispatchers = object : com.noneplayer.core.common.DispatcherProvider {
+        override val main: CoroutineDispatcher = Dispatchers.IO
+        override val default: CoroutineDispatcher = Dispatchers.IO
+        override val io: CoroutineDispatcher = Dispatchers.IO
+    }
+
     @Before
     fun setUp() {
         DataStoreTestReset.reset()
-        harness = ScanHarness()
+        // E220：基准用全 IO 调度器——缺省的 Unconfined 续体链偶发把扫描收尾的
+        // 最后一跳排进停泊 worker 的 ThreadLocalEventLoop（批跑下两次死锁，
+        // 单跑恒过），全 IO 无此队列陷阱；线程模型对计时断言无害（更贴生产）。
+        harness = ScanHarness(dispatchers = BenchDispatchers)
         docs = DelayingDocsProvider(perQueryDelayMs)
         // harness init 里注册的 FakeDocumentsProvider 被这里的同 authority 覆盖
         ShadowContentResolver.registerProviderInternal(ScanTestTree.DOCS_AUTHORITY, docs)
@@ -64,6 +77,17 @@ class ScanWalkParallelismBenchTest {
 
     @Test
     fun `400 个目录各注入 5ms IPC 延迟时并行遍历明显快于串行下界`() = runBlocking {
+        // E220 观察项修根：批跑下本用例偶发挂死（今日两次，单跑恒过）——
+        // runBlocking 把 Robolectric 主线程占成阻塞事件循环，扫描编排的续体
+        // 偶发排进"要等主线程空转才能服务"的队列即成死锁。把测试体整体挪到
+        // Dispatchers.IO 上跑，主线程事件循环保持空闲，死锁类随之消除；
+        // 影子 ContentResolver 与车道计时对线程没有约束（扫描本就跑在 IO 上）。
+        withContext(Dispatchers.IO) {
+            bench()
+        }
+    }
+
+    private suspend fun bench() {
         harness.grantAllMediaPermissions()
         harness.setFolders(ScanTestTree.MAIN_TREE)
         // 预热：吞掉首轮 JIT / Robolectric 影子类加载 / DataStore 首次写入等一次性开销

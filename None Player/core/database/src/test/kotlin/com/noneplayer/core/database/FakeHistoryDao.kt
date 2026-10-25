@@ -145,6 +145,12 @@ internal class FakeHistoryDao : HistoryDao {
         history.remove(key)
     }
 
+    override suspend fun deleteReturning(key: String): PlaybackHistoryEntity? {
+        writeCalls += "deleteReturning:$key"
+        maybeFail(deleteError)
+        return history.remove(key)
+    }
+
     override suspend fun allHistoryKeys(): List<String> {
         maybeFail(allHistoryKeysError)
         return history.keys.toList()

@@ -1,6 +1,11 @@
 package com.noneplayer.plugins.profile
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,10 +26,15 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -37,8 +47,15 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import coil.request.videoFrameMillis
 import com.noneplayer.core.data.AppSettings
+import kotlinx.coroutines.launch
 import com.noneplayer.core.database.HistoryEntry
 import com.noneplayer.core.database.HistoryRepository
+import com.noneplayer.core.ui.NpMediaPalette
+import com.noneplayer.core.ui.NpRadius
+import com.noneplayer.core.ui.NpToastHost
+import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.npClickable
+import com.noneplayer.core.ui.rememberNpToastState
 import com.noneplayer.core.media.MediaItem
 import com.noneplayer.core.media.MediaKind
 import com.noneplayer.core.media.cardTitle
@@ -174,7 +191,38 @@ private fun ProfileScreen(navigator: Navigator) {
     // 与首页两块读同一份派生结果，两处不会再各排一次序。
     val pageItems = if (page == ProfileSubPage.FAVORITES) favoriteItems else playedItems
 
-    NpPageScaffold(
+    // E220：历史删除的反馈走 NpToast（带「撤销」动作）；宿主挂在页根 Box 上。
+    val toast = rememberNpToastState()
+    val scope = rememberCoroutineScope()
+    var confirmClearHistory by remember { mutableStateOf(false) }
+
+    /** 长按历史卡：删单条（留底可撤销）。失败（写库错误）按 REV-06 口径如实提示。 */
+    fun removeHistoryItem(item: MediaItem) {
+        val key = HistoryEntry.keyOf(item)
+        scope.launch {
+            if (history.removeHistory(key)) {
+                toast.show("已从播放历史移除", "撤销") {
+                    scope.launch { history.undoRemoveHistory(key) }
+                }
+            } else {
+                toast.show("移除失败")
+            }
+        }
+    }
+
+    /** 批量清空（走 NpConfirm 确认后）：清全部播放历史记录。 */
+    fun clearAllHistory() {
+        scope.launch {
+            if (history.clearHistory()) {
+                toast.show("已清空播放历史")
+            } else {
+                toast.show("清空失败")
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        NpPageScaffold(
         maxContentWidth = if (compact) Dp.Unspecified else windowInfo.maxContentWidth,
         topBar = {
             if (page == null) {
@@ -185,10 +233,26 @@ private fun ProfileScreen(navigator: Navigator) {
                     subtitle = "${pageItems.size} 项",
                     compact = compact,
                     onBack = { subPage = null },
+                    // E220：批量清空只挂播放历史页（收藏没有清空语义）
+                    trailing = {
+                        if (page == ProfileSubPage.HISTORY && pageItems.isNotEmpty()) {
+                            NpMoreLink(text = "清空", onClick = { confirmClearHistory = true })
+                        }
+                    },
                 )
             }
         },
     ) { contentModifier ->
+        if (page == ProfileSubPage.HISTORY && confirmClearHistory) {
+            ClearHistoryConfirmDialog(
+                count = pageItems.size,
+                onDismiss = { confirmClearHistory = false },
+                onConfirm = {
+                    confirmClearHistory = false
+                    clearAllHistory()
+                },
+            )
+        }
         if (page != null) {
             ProfileSubPage(
                 page = page,
@@ -198,6 +262,7 @@ private fun ProfileScreen(navigator: Navigator) {
                 compact = compact,
                 gridColumns = gridColumns,
                 onOpen = { openPlayer(navigator, it) },
+                onRemoveHistory = ::removeHistoryItem,
             )
             return@NpPageScaffold
         }
@@ -365,6 +430,14 @@ private fun ProfileScreen(navigator: Navigator) {
                 // 在这里再放一遍，等于同一件事有三个入口，且把用户内容挤到下面。
             }
         }
+        }
+        // E220：删除/清空的「撤销」反馈宿主（覆盖在页面上，底部居中）
+        NpToastHost(
+            state = toast,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth(),
+        )
     }
 }
 
@@ -422,6 +495,8 @@ private fun ProfileSubPage(
     compact: Boolean,
     gridColumns: Int,
     onOpen: (MediaItem) -> Unit,
+    /** E220：历史页长按卡片 → 移除该条（收藏页为 null，长按不注册） */
+    onRemoveHistory: ((MediaItem) -> Unit)? = null,
 ) {
     val staggerWindow = npStaggerWindow()
     Box(
@@ -457,6 +532,10 @@ private fun ProfileSubPage(
                         item = item,
                         onOpen = { onOpen(item) },
                         progress = fractionOf(item, positions),
+                        // E220：播放历史页长按 = 移除该条（撤销走 toast）
+                        onLongClick = onRemoveHistory
+                            ?.takeIf { page == ProfileSubPage.HISTORY }
+                            ?.let { cb -> { cb(item) } },
                         modifier = Modifier.npStaggeredEntry(index, staggerWindow),
                     )
                 }
@@ -498,6 +577,8 @@ private fun RecentCard(
     onOpen: () -> Unit,
     progress: Float = 0f,
     modifier: Modifier = Modifier,
+    /** E220：长按（播放历史页 = 移除单条）；null = 不注册长按 */
+    onLongClick: (() -> Unit)? = null,
 ) {
     val isAudio = item.kind == MediaKind.AUDIO
     val hue = NpMediaColor.itemHue(item.folder, isAudio)
@@ -518,6 +599,7 @@ private fun RecentCard(
             item.videoCodec?.let { add(it) }
         },
         onClick = onOpen,
+        onLongClick = onLongClick,
         cover = {
             NpCoverBox(
                 placeholderHue = hue,
@@ -594,4 +676,81 @@ private fun openPlayer(navigator: Navigator, item: MediaItem) {
             "&mime=${enc(item.mimeType)}" +
             "&id=${enc(item.id)}",
     )
+}
+
+
+/**
+ * E220：清空播放历史的确认卡（设计：批量清空走确认，不提供撤销）。
+ * 结构仿媒体库 DeleteConfirmDialog 的 Dialog 窗口壳（遮罩盖住底栏/迷你条、
+ * 返回只关确认框），文案与动作换成「清空」。
+ */
+@Composable
+private fun ClearHistoryConfirmDialog(
+    count: Int,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val ink = LocalNpInk.current
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        BackHandler { onDismiss() }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.45f))
+                .npClickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = 32.dp)
+                    .clip(RoundedCornerShape(NpRadius.sheet))
+                    .background(ink.surface)
+                    .border(1.dp, ink.border, RoundedCornerShape(NpRadius.sheet))
+                    .padding(20.dp),
+            ) {
+                Text(
+                    text = "清空播放历史",
+                    style = NpTypography.titleMedium,
+                    color = ink.fg,
+                )
+                Text(
+                    text = "全部 $count 条播放记录将被移除，此操作不可撤销。媒体文件不受影响。",
+                    style = NpTypography.bodySmall,
+                    color = ink.muted,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 18.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "取消",
+                        style = NpTypography.bodyMedium,
+                        color = ink.fg,
+                        modifier = Modifier
+                            .npClickable(onClick = onDismiss)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    )
+                    Text(
+                        text = "清空",
+                        style = NpTypography.bodyMedium,
+                        color = NpMediaPalette.onMediaDanger,
+                        modifier = Modifier
+                            .npClickable(onClick = onConfirm)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    )
+                }
+            }
+        }
+    }
 }
