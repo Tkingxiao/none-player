@@ -748,8 +748,16 @@ object FormatProbe {
             val audioName = MediaNames.audioCodecName(audio?.sampleMimeType)
 
             if (video == null) {
-                // 纯音频文件（audio/* 预期）：音频轨在、且本机解得动 → 可播
-                if (expectVideo == false && audio != null) {
+                // E231（错扩展名，mp3 改名 .mp4）：expectVideo 只是**扩展名 mime** 的推断
+                // （MediaStore 按后缀给 video/mp4），而"认领文件的解封装器已 endTracks、
+                // 轨道表里只有音频轨"是内容层事实——两者打架时以内容为准，按音频文件判读，
+                // 不再误拦"没有受支持的视频编码"（真机实锤：探测日志 formats=[audio/mpeg]
+                // 却因 expectVideo=true 落进下面的瞬态拦截）。tracksEnded 未到（读被截断）
+                // 不在此列：那种轨道表可能不全，维持旧语义拿不准。
+                // release 构建的 extractor 类名被混淆，不能按认领者身份判——内容证据可靠。
+                val contentAudioOnly = tracksEnded && audio != null
+                if ((expectVideo == false || contentAudioOnly) && audio != null) {
+                    // 纯音频内容（audio/* 预期，或 E231 的内容判定）：音频轨在、且本机解得动 → 可播
                     // A17：平台查询三态——查询异常不能当「支持」，也不能当「不支持」
                     val audioQuery = platformAudioDecoderQuery(audio)
                     val audioDecodable = audioQuery == true ||
