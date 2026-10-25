@@ -197,19 +197,23 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
             val text = cues.firstNotNullOfOrNull { it.text }?.trim()?.replace('\n', ' ').orEmpty()
             val positionMs = anchor.displayMs(playbackState)
             // E223：倒退 seek 检测——旧 spawned 的显示位置全部失效且 cue 会重复
-            // spawn，整表清空等当前 cue 重新出（重建走 nextSpawnedOnCue 的
-            // 时间升序不变量）
+            // spawn，整表清空（不管本 cue 是否 spawn：先清，当前 cue 若可出会
+            // 在下面按新表 spawn）
             val backwardSeek = lastPositionMs >= 0 && isBackwardSeek(positionMs, lastPositionMs)
             lastPositionMs = positionMs
-            if (text.isNotEmpty() && text != lastText) {
-                lastText = text
-                spawned = nextSpawnedOnCue(
-                    current = spawned,
-                    spawned = Danmaku(positionMs, DanmakuMode.Scroll, 1f, 0xFFFFFF, text),
-                    backwardSeek = backwardSeek,
-                )
-            } else if (backwardSeek) {
-                spawned = emptyList()
+            if (backwardSeek) spawned = emptyList()
+            // E224：屏蔽词与文件通路同口径（去重/屏蔽/放行三态决策）
+            when (embeddedCueDecision(text, lastText, blocklist)) {
+                EmbeddedCueDecision.Spawn -> {
+                    lastText = text
+                    spawned = nextSpawnedOnCue(
+                        current = spawned,
+                        spawned = Danmaku(positionMs, DanmakuMode.Scroll, 1f, 0xFFFFFF, text),
+                        backwardSeek = false,
+                    )
+                }
+                EmbeddedCueDecision.SkipBlocked -> lastText = text
+                EmbeddedCueDecision.SkipDuplicate -> Unit
             }
         }
     }

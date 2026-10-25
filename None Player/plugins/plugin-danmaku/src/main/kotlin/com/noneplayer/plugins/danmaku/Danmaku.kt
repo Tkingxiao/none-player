@@ -118,3 +118,27 @@ fun nextSpawnedOnCue(
 /** E223：倒退 seek 判定——比上次 position 小超过阈值（毫秒）才算（普通抖动/同位刷新不算） */
 fun isBackwardSeek(newPositionMs: Long, lastPositionMs: Long, thresholdMs: Long = 1_500L): Boolean =
     newPositionMs < lastPositionMs - thresholdMs
+
+/** E224：内嵌 cue 的 spawn 决策（屏蔽词与文件通路同口径） */
+sealed interface EmbeddedCueDecision {
+    /** 生成弹幕 */
+    object Spawn : EmbeddedCueDecision
+
+    /** 与上一条同文本（不重复生成，也不把空文本记成 lastText） */
+    object SkipDuplicate : EmbeddedCueDecision
+
+    /** 命中屏蔽词（记 lastText：同一条屏蔽文本不重复过筛） */
+    object SkipBlocked : EmbeddedCueDecision
+}
+
+/**
+ * E224：内嵌 cue 的 spawn 决策。屏蔽词此前只过滤**文件**通路
+ * （[parseDanmakuFile]），内嵌 cue 直接 spawn 绕过了它——同一份屏蔽词对
+ * 两条通路必须同口径。空文本视为「无 cue」：跳过且不更新 lastText。
+ */
+fun embeddedCueDecision(text: String, lastText: String?, blocklist: List<String>): EmbeddedCueDecision =
+    when {
+        text.isEmpty() || text == lastText -> EmbeddedCueDecision.SkipDuplicate
+        DanmakuBlocklist.isBlocked(text, blocklist) -> EmbeddedCueDecision.SkipBlocked
+        else -> EmbeddedCueDecision.Spawn
+    }
