@@ -1,6 +1,7 @@
 package com.noneplayer.plugins.danmaku
 
 import android.content.Intent
+import android.util.Log
 import android.graphics.Paint
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -340,6 +341,14 @@ private fun loadFileSource(
         // E98：解析失败（畸形文件、平台正则差异）只丢这一个来源——弹幕是增益功能，
         // 任何解析异常都不许冒到播放主链路（此前一个坏 .ass 就让整进程闪退）
         val items = runCatching { parseDanmakuFile(text, format, blocklist) }.getOrDefault(emptyList())
+        // E221：「空结果给原因」——ASS 有 Dialogue 行却全被丢时，把原因写进
+        // logcat（排障用）；uri 进日志便于多候选时分辨是哪一份
+        if (items.isEmpty() && format == DanmakuFormat.Ass) {
+            val detail = runCatching { DanmakuParsers.parseAssDetailed(text) }.getOrNull()
+            if (detail != null && detail.emptyReason != null) {
+                Log.i("DanmakuSource", "ass 空结果：${detail.emptyReason}（dialogues=${detail.dialogues}）file=$uri")
+            }
+        }
         if (items.isNotEmpty()) {
             val name = java.net.URLDecoder.decode(uri.substringAfterLast('/'), "UTF-8")
             return DanmakuSource.File(items, name)

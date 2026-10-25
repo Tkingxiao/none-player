@@ -172,3 +172,83 @@ class DanmakuLocatorTest {
         assertNull(DanmakuFormat.fromFileName("c.srt"))
     }
 }
+
+
+/**
+ * E221：ASS 解析加固——节限定、Comment 统计、\move 起始 y 判模式、
+ * 段数不一致丢整行（既有行为钉住）、空结果给原因。
+ */
+class DanmakuAssHardeningTest {
+
+    /** 最小 ASS 骨架：样式节里故意放一行带 Start/Text 字样的 Format（限节测试用） */
+    private fun ass(body: String): String = """
+        [Script Info]
+        PlayResY: 1080
+
+        [V4+ Styles]
+        Format: Name, Fontname, Fontsize, PrimaryColour, Start, Text
+        Style: 陷阱行,Arial,25,&HFFFFFF,,0,0
+
+        [Events]
+        Format: Layer, Start, End, Style, Text
+        $body
+    """.trimIndent()
+
+    @Test
+    fun `style 节的 format 行不污染 events 字段序`() {
+        // 样式节里那行 Format 恰好带 Start/Text——若不限节会污染字段序，
+        // Dialogue 按它切分就全错（本用例同时钉住：正确的 Events Format 仍生效）
+        val result = DanmakuParsers.parseAssDetailed(
+            ass("Dialogue: 0,0:00:01.00,0:00:05.00,R2L,滚动弹幕"),
+        )
+        assertEquals(1, result.items.size)
+        assertEquals(DanmakuMode.Scroll, result.items.single().mode)
+    }
+
+    @Test
+    fun `comment 行跳过并计数`() {
+        val result = DanmakuParsers.parseAssDetailed(
+            ass("Comment: 0,0:00:00.00,0:00:01.00,R2L,这是注释") + "\n" +
+                "Dialogue: 0,0:00:02.00,0:00:05.00,R2L,真弹幕",
+        )
+        assertEquals(1, result.items.size)
+        assertEquals(1, result.comments)
+    }
+
+    @Test
+    fun `move 的起始 y 参与顶底判定`() {
+        // 无样式名信号，\move 起始 y=100 < PlayResY/2(540) → 顶
+        val top = DanmakuParsers.parseAssDetailed(
+            ass("Dialogue: 0,0:00:01.00,0:00:05.00,,{\\move(200,100,400,100)}顶部移动"),
+        )
+        assertEquals(DanmakuMode.Top, top.items.single().mode)
+        // y=800 > 540 → 底
+        val bottom = DanmakuParsers.parseAssDetailed(
+            ass("Dialogue: 0,0:00:01.00,0:00:05.00,,{\\move(200,800,400,800)}底部移动"),
+        )
+        assertEquals(DanmakuMode.Bottom, bottom.items.single().mode)
+    }
+
+    @Test
+    fun `段数不一致丢整行`() {
+        // Dialogue 字段数比 Format 少一段（少 Style）→ 整行丢
+        val result = DanmakuParsers.parseAssDetailed(
+            ass("Dialogue: 0,0:00:01.00,0:00:05.00,缺一段"),
+        )
+        assertTrue(result.items.isEmpty())
+        assertEquals(1, result.droppedFieldMismatch)
+    }
+
+    @Test
+    fun `空结果给出原因`() {
+        // 时间戳全坏 → 0 条；统计里给出原因
+        val result = DanmakuParsers.parseAssDetailed(
+            ass("Dialogue: 0,bad,0:00:05.00,R2L,坏时间戳") + "\n" +
+                "Dialogue: 0,0:00:xx,0:00:05.00,R2L,坏时间戳二",
+        )
+        assertTrue(result.items.isEmpty())
+        assertEquals(2, result.dialogues)
+        assertEquals(2, result.droppedTimestamp)
+        assertTrue(result.emptyReason!!.contains("时间戳无效"))
+    }
+}

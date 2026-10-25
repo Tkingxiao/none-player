@@ -39,6 +39,7 @@ object DanmakuParsers {
     private val ASS_COLOR_TAG = Regex("\\\\1?c&H([0-9a-fA-F]{2,8})&")
     private val ASS_FONT_SIZE_TAG = Regex("\\\\fs([0-9.]+)")
     private val ASS_POS_TAG = Regex("\\\\pos\\(([0-9.-]+),([0-9.-]+)")
+    private val ASS_MOVE_TAG = Regex("\\\\move\\(([0-9.-]+),([0-9.-]+)")
     private val ASS_TIMESTAMP = Regex("(\\d+):(\\d+):(\\d+(?:\\.\\d+)?)")
     private val HTML_NUMERIC_ENTITY = Regex("&#(\\d+);")
 
@@ -162,25 +163,88 @@ object DanmakuParsers {
 
     // ---- ASS ----
 
-    fun parseAss(content: String): List<Danmaku> {
+    fun parseAss(content: String): List<Danmaku> = parseAssDetailed(content).items
+
+    /**
+     * E221：带统计的 ASS 解析。返回条目 + 丢弃统计（「空结果给原因」的读数）。
+     *
+     * 加固三件（任务 §5）：
+     * - **Format/Dialogue 只认 `[Events]` 节**——按节头行切换当前节；此前任何
+     *   位置的 `Format:`/`Dialogue:` 都会被认（样式节里恰好带 Start/Text 字样
+     *   的 Format 行会污染字段序）；
+     * - **`Comment:` 事件行显式跳过并计数**（此前静默落空，统计里看不见）；
+     * - **`\move(x1,y1,…)` 的起始 y 参与 顶/底 判定**（与 `\pos` 同口径；
+     *   此前 \move 行一律兜底滚动，顶部飘过的移动弹幕挂错车道）。
+     * 「段数不一致丢整行」既有行为由用例钉住（[parseAssDialogue]）。
+     */
+    fun parseAssDetailed(content: String): AssParseResult {
         var playResY = 0f
         var formatFields: List<String> = emptyList()
+        var currentSection = ""
         val result = mutableListOf<Danmaku>()
+        var dialogues = 0
+        var comments = 0
+        var droppedTimestamp = 0
+        var droppedFieldMismatch = 0
         content.lineSequence().forEach { rawLine ->
             val line = rawLine.trim()
+            if (line.startsWith("[") && line.endsWith("]")) {
+                currentSection = line.lowercase()
+                return@forEach
+            }
             when {
                 line.startsWith("PlayResY:", ignoreCase = true) ->
                     playResY = line.substringAfter(':').trim().toFloatOrNull() ?: 0f
-                line.startsWith("Format:", ignoreCase = true) &&
+                currentSection == "[events]" && line.startsWith("Format:", ignoreCase = true) &&
                     line.contains("Start", ignoreCase = true) &&
                     line.contains("Text", ignoreCase = true) ->
                     formatFields = line.substringAfter(':').split(',').map { it.trim().lowercase() }
-                line.startsWith("Dialogue:", ignoreCase = true) ->
-                    parseAssDialogue(line.substringAfter(':'), formatFields, playResY)?.let(result::add)
+                currentSection == "[events]" && line.startsWith("Comment:", ignoreCase = true) ->
+                    comments++
+                currentSection == "[events]" && line.startsWith("Dialogue:", ignoreCase = true) -> {
+                    dialogues++
+                    when (val outcome = parseAssDialogue(line.substringAfter(':'), formatFields, playResY)) {
+                        is AssDialogueOutcome.Kept -> result += outcome.danmaku
+                        AssDialogueOutcome.DroppedTimestamp -> droppedTimestamp++
+                        AssDialogueOutcome.DroppedFieldMismatch -> droppedFieldMismatch++
+                        AssDialogueOutcome.DroppedEmptyText -> Unit
+                    }
+                }
             }
         }
-        return result
+        val reason = if (result.isEmpty() && dialogues > 0) {
+            buildList {
+                if (droppedTimestamp > 0) add("$droppedTimestamp 条时间戳无效")
+                if (droppedFieldMismatch > 0) add("$droppedFieldMismatch 条与 Format 段数不一致")
+                if (comments > 0) add("另有 $comments 条注释行")
+            }.joinToString(";").ifBlank { "原因未归类" }
+        } else {
+            null
+        }
+        return AssParseResult(
+            items = result,
+            dialogues = dialogues,
+            comments = comments,
+            droppedTimestamp = droppedTimestamp,
+            droppedFieldMismatch = droppedFieldMismatch,
+            emptyReason = reason,
+        )
     }
+
+    /** E221：ASS 解析统计（[parseAssDetailed] 的返回）。 */
+    data class AssParseResult(
+        val items: List<Danmaku>,
+        /** [Events] 里的 Dialogue 行总数（含被丢的） */
+        val dialogues: Int,
+        /** Comment: 注释行数 */
+        val comments: Int,
+        /** 时间戳无效被丢的条数 */
+        val droppedTimestamp: Int,
+        /** 字段段数与 Format 不一致被丢的条数 */
+        val droppedFieldMismatch: Int,
+        /** items 为空且有过 Dialogue 时的原因描述；其余为 null */
+        val emptyReason: String?,
+    )
 
     /**
      * 一条 `Dialogue:` 行。`Format:` 行给出的字段里 Text 恒为最后一个且本身可含逗号，
@@ -188,11 +252,20 @@ object DanmakuParsers {
      * 没有 Format 行或字段对不上则整行丢弃。样式/标签都判不出模式时按滚动处理
      * （danmaku2ass 的主流形态）。
      */
-    private fun parseAssDialogue(body: String, fields: List<String>, playResY: Float): Danmaku? {
-        if (fields.size < 2) return null
+    /** E221：单条 Dialogue 的解析结局（统计要分清「为什么被丢」） */
+    private sealed interface AssDialogueOutcome {
+        data class Kept(val danmaku: Danmaku) : AssDialogueOutcome
+        object DroppedTimestamp : AssDialogueOutcome
+        object DroppedFieldMismatch : AssDialogueOutcome
+        object DroppedEmptyText : AssDialogueOutcome
+    }
+
+    private fun parseAssDialogue(body: String, fields: List<String>, playResY: Float): AssDialogueOutcome {
+        if (fields.size < 2) return AssDialogueOutcome.DroppedFieldMismatch
         val parts = body.split(',', limit = fields.size)
-        if (parts.size != fields.size) return null
-        val startSec = assTimestamp(parts[fields.indexOf("start")]) ?: return null
+        if (parts.size != fields.size) return AssDialogueOutcome.DroppedFieldMismatch
+        val startSec = assTimestamp(parts[fields.indexOf("start")])
+            ?: return AssDialogueOutcome.DroppedTimestamp
         val style = parts.getOrNull(fields.indexOf("style"))?.trim().orEmpty()
         val textRaw = parts.last()
         // E98：闭合 `}` 必须转义——JVM 正则容忍裸 `}`，Android 的 ICU 实现
@@ -203,7 +276,7 @@ object DanmakuParsers {
             .replace("\\N", " ")
             .replace("\\n", " ")
             .trim()
-        if (text.isEmpty()) return null
+        if (text.isEmpty()) return AssDialogueOutcome.DroppedEmptyText
 
         val colorBgr = ASS_COLOR_TAG.find(overrides)?.groupValues?.get(1)
         val color = colorBgr?.takeIf { it.length >= 6 }
@@ -211,12 +284,14 @@ object DanmakuParsers {
             ?: 0xFFFFFF
         val fontSize = ASS_FONT_SIZE_TAG.find(overrides)?.groupValues?.get(1)?.toFloatOrNull()
 
-        return Danmaku(
-            timeMs = (startSec * 1000).roundToLong(),
-            mode = assMode(overrides, style, playResY),
-            fontScale = fontSize?.takeIf { it > 0 }?.div(BASE_FONT_SIZE) ?: 1f,
-            colorArgb = 0xFF000000.toInt() or (color and 0xFFFFFF),
-            text = text,
+        return AssDialogueOutcome.Kept(
+            Danmaku(
+                timeMs = (startSec * 1000).roundToLong(),
+                mode = assMode(overrides, style, playResY),
+                fontScale = fontSize?.takeIf { it > 0 }?.div(BASE_FONT_SIZE) ?: 1f,
+                colorArgb = 0xFF000000.toInt() or (color and 0xFFFFFF),
+                text = text,
+            ),
         )
     }
 
@@ -225,16 +300,19 @@ object DanmakuParsers {
         ((v and 0xFF) shl 16) or (v and 0x00FF00) or ((v shr 16) and 0xFF)
 
     private fun assMode(overrides: String, style: String, playResY: Float): DanmakuMode {
-        // danmaku2ass 的样式名是权威信号；没有样式名再看 \pos 的纵向位置
+        // danmaku2ass 的样式名是权威信号；没有样式名再看 \pos / \move 的纵向位置
         val s = style.uppercase()
         when {
             s.contains("R2L") || s.contains("L2R") -> return DanmakuMode.Scroll
             s.contains("TOP") -> return DanmakuMode.Top
             s.contains("POP") || s.contains("BTM") || s.contains("BOT") -> return DanmakuMode.Bottom
         }
-        val pos = ASS_POS_TAG.find(overrides)
-        if (pos != null && playResY > 0) {
-            return if (pos.groupValues[2].toFloat() < playResY / 2f) DanmakuMode.Top else DanmakuMode.Bottom
+        // \pos 与 \move 同口径：拿纵坐标与 PlayResY 中线比（E221：\move 此前
+        // 一律兜底滚动，顶部飘过的移动弹幕会被挂错车道）
+        val y = ASS_POS_TAG.find(overrides)?.groupValues?.get(2)
+            ?: ASS_MOVE_TAG.find(overrides)?.groupValues?.get(2)
+        if (y != null && playResY > 0) {
+            return if (y.toFloat() < playResY / 2f) DanmakuMode.Top else DanmakuMode.Bottom
         }
         return DanmakuMode.Scroll
     }
