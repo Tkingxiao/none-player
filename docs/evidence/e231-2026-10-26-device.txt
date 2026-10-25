@@ -1,0 +1,74 @@
+E231 设备取证 —— 60dd2f94（小米 Pad 6 / pipa，HyperOS，1800x2880 @400dpi）
+日期：2026-10-26　构建：release（install -r 覆盖装，数据保留）
+
+== 设备 / 安装 / 夹具 ==
+- 安装：adb install -r app-release.apk → Success（两次：首轮三修 + 手势轮）
+- 夹具：
+  - e231-fake.mp4 = 真 MP3 内容（ffmpeg lavfi sine + libmp3lame，ID3 头）改名 .mp4，
+    push /sdcard/Movies 后 MEDIA_SCANNER_SCAN 入库，MediaStore mime_type=video/mp4、duration=8046ms
+  - e231-hidden/ 隐藏目录（.e231-hidden，内含 hidden.mp3 / hiddenvideo.mp4）
+  - 播放测体：1080p官方中字.mp4（2:22:03，片库既有）
+
+== V1 mp3 改 mp4 后缀无法播放（修复前 → 后） ==
+修复前（0.1.0 既有构建）：
+  点 e231-fake.mp4 → 错误面板「无法播放此文件 ｜ 音频：MP3 ｜ 没有解析到受支持的
+  视频编码（常见于 WMV / VC-1 / RealVideo 等旧编码）。」
+  logcat FormatProbe: matched=rf2(release混淆名) expectedMime=video/mp4 expectVideo=true
+  reads=1 formats=1 mimes=[audio/mpeg]
+修复后（本批构建）：
+  同一点击 → 正常起播；8s 片尾自动连播下一条（logcat 第二条 formats=[video/avc,
+  audio/mp4a-latm] 即下集真视频）。
+  修复方式：FormatProbe.ProbeOutput.decide 对"已 endTracks 且只有音频轨"按音频文件
+  判读（内容证据优先于扩展名 mime），不再误报"没有受支持的视频编码"。
+  单测：FormatProbeAudioOnlyDecisionTest 3/3（VIDEO_DECODE→AUDIO_DECODE 分支走向）。
+
+== V2 竖屏进文件夹转横屏回根层（复现 → 修复） ==
+复现（修复前，密度 640 强制 Compact 档）：
+  竖屏 文件夹 Tab → Movies → 转横屏 → 直接落回总文件夹根层
+  （dump 读数：只剩 "94 个视频 / Movies / 96 项 / 存储位置"，层级丢失）。
+  根因：KernelTabScaffold 的 isCompact 两组合分支互换时，内层 NavHost 子树整体
+  丢弃，rememberSaveable 的文件夹层级无人存档。
+  注：平板原生密度（竖 720dp Medium / 横 1152dp Expanded）两档都非 Compact，
+  修复前不复现；手机竖↔横（Compact↔非 Compact）必现。
+修复后：
+  - Compact 档：竖屏进 Movies → 转横屏仍在 Movies（"77 个视频" + 标题 Movies）；
+    再转回竖屏层级保持。
+  - 原生密度（Medium↔Expanded）双向旋转层级同样保持。
+  修复方式：movableContentOf 包裹内层 NavHost，两分支间携带状态搬移。
+
+== V3 列表模式（封面角标/时长遮挡 + 行高） ==
+- 视图切换：视图菜单 → 列表（此前两次点击未生效系右栏在播、菜单坐标漂移，重取坐标后正常）。
+- 元信息行读数（dump）：「第 231 集 · 0:08 · 126 KB · 今天」——时长位于大小之前 ✓；
+  既有条目如「0:10 · 2 MB · 10月24日」同口径 ✓。
+- 截图判读（e231-list2.png）：列表行封面无任何叠放角标/时长 ✓；标题左侧有类型
+  小图标（胶片/音符）✓；行高明显加大（缩略图 160dp/124dp，近满行高）✓。
+- 隐藏目录边界：.e231-hidden 已建并入 MediaStore 扫描广播，但 ScanTrace
+  「hidden walk done dirs=3 entries=0」未产出条目（疑 MediaProvider 不索引点目录
+  与 SAF 树查询口径问题，待查）；列表 UI 对隐藏/普通目录走同一 MediaListRow
+  代码路径，口径一致的结论以代码路径为准，隐藏目录实机截图待补。
+
+== V4 播放手势三项（第二批需求，本批构建真机） ==
+- 双击=暂停/恢复（三区一律）：
+  竖屏内嵌舞台 (900,700) 双击（motionevent 对，间隔 100ms——<40ms 会被
+  doubleTapMinTime 下限拒掉，注入时必须留间隔）→ media_session
+  PAUSED(2)；再双击 → PLAYING(3)。左/中/右分区不再快进快退。
+- 拖进度条不暂停：
+  横屏右栏播放器进度条（y≈1624）后台 swipe 拖动，中途采样 media_session =
+  PLAYING(3)（修复前为 PAUSED(2)），松手 position 跳至拖点、播放继续。
+  修复点两处：PlayerScreen.onScrubStart 去 pause；InlinePlayerSurface 内嵌
+  控制层 onScrubStart 去 pause（右栏/内嵌是独立实现，首轮只修了前者被真机抓包）。
+- 横滑 seek 幅度加倍：
+  STAGE_SEEK_FULL_SPAN_MS 90s→180s、上限 180s→360s（StageGesturePolicy）。
+  StageGesturePolicyTest 20/20 钉住（时长未知 180s、>6 分钟封顶 360s）。
+  真机读数边界：全屏舞台横滑可大幅扫动（左拖一次把 2:21:36 的播放位置拉回
+  片头 23ms），但绝对倍率读数受控制层浮层（onSeekGestureStart 先亮控制层）
+  与时长回填时点干扰，未取得干净的单次拖动秒数；倍率正确性以单测为准。
+
+== 稳定性 ==
+- 全程无 FATAL（logcat 无 crash 记录）。
+
+== 没验证什么 / 为什么 ==
+- 隐藏目录列表实机截图：扫描器本轮 hidden walk 0 条，先按代码路径同口径收口，
+  扫描侧问题另开观察项。
+- 横滑倍率的精确秒数：见 V4 边界。
+- 手机形态（Compact）实机：以密度 640 在平板上等效复现 V2；真手机未接。
