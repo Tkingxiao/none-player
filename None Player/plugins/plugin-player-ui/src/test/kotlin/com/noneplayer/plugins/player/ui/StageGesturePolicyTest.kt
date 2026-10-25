@@ -204,27 +204,27 @@ class StageGesturePolicyTest {
 
     @Test
     fun `seek full span follows duration`() {
-        // 时长未知：退回 90s 默认值。
-        assertEquals(90_000f, seekSpanForDurationMs(0L), 0f)
-        assertEquals(90_000f, seekSpanForDurationMs(-1L), 0f)
+        // 时长未知：退回 180s 默认值（E231 加倍）。
+        assertEquals(180_000f, seekSpanForDurationMs(0L), 0f)
+        assertEquals(180_000f, seekSpanForDurationMs(-1L), 0f)
         // ≤30s：满幅就是整片，一滑到底。
         assertEquals(20_000f, seekSpanForDurationMs(20_000L), 0f)
         assertEquals(30_000f, seekSpanForDurationMs(30_000L), 0f)
-        // >30s 且 <180s：按片长 1:1。
+        // >30s 且 <360s：按片长 1:1。
         assertEquals(31_000f, seekSpanForDurationMs(31_000L), 0f)
         assertEquals(90_000f, seekSpanForDurationMs(90_000L), 0f)
         assertEquals(180_000f, seekSpanForDurationMs(180_000L), 0f)
-        // 超过 3 分钟：封顶 180s。
-        assertEquals(180_000f, seekSpanForDurationMs(600_000L), 0f)
-        assertEquals(180_000f, seekSpanForDurationMs(7_200_000L), 0f)
+        // 超过 6 分钟：封顶 360s（E231 上限 180→360s）。
+        assertEquals(360_000f, seekSpanForDurationMs(600_000L), 0f)
+        assertEquals(360_000f, seekSpanForDurationMs(7_200_000L), 0f)
     }
 
     @Test
     fun `seek delta uses duration derived span`() {
         assertEquals(20_000f, seekDeltaMs(1000f, 1000f, seekSpanForDurationMs(20_000L)), 0f)
         assertEquals(90_000f, seekDeltaMs(1000f, 1000f, seekSpanForDurationMs(90_000L)), 0f)
-        assertEquals(180_000f, seekDeltaMs(1000f, 1000f, seekSpanForDurationMs(7_200_000L)), 0f)
-        assertEquals(-90_000f, seekDeltaMs(-500f, 1000f, seekSpanForDurationMs(7_200_000L)), 0f)
+        assertEquals(360_000f, seekDeltaMs(1000f, 1000f, seekSpanForDurationMs(7_200_000L)), 0f)
+        assertEquals(-180_000f, seekDeltaMs(-500f, 1000f, seekSpanForDurationMs(7_200_000L)), 0f)
     }
 
     @Test

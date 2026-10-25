@@ -1,10 +1,6 @@
 package com.noneplayer.kernel
 
 import android.media.MediaCodecList
-import com.noneplayer.core.data.DEFAULT_DOUBLE_TAP_STEP_MS
-import com.noneplayer.core.data.DOUBLE_TAP_STEP_OPTIONS_MS
-import com.noneplayer.core.ui.NpSpace
-import com.noneplayer.core.ui.NpChip
 import android.widget.Toast
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -476,13 +472,14 @@ private fun GestureSettingsGroup(gutter: Dp) {
         NpSettingRow(
             // 审查批次 D3：文案与实际行为对齐。
             // 这个开关在播放页接的是 `gesturesEnabled`，它门控的是**整个舞台手势组**
-            // （横滑 seek、竖滑亮度/音量、双击快退快进、长按 3x），不只是音量亮度。
+            // （横滑 seek、竖滑亮度/音量、双击播放/暂停、长按 3x），不只是音量亮度。
             // 旧标题写"启用音量/亮度手势"、副标题写"左右滑动调节音量与亮度"，
             // 两处都不对：轴方向反了（音量/亮度是**竖**滑），范围也小了
             // ——用户以为只关掉音量亮度，结果双击快进也一起没了。
             // 语义未改（仍是同一个开关），只把话说准。
+            // E231：双击由"快退快进"改为"播放/暂停"，原「双击步长」条目随之退役。
             title = "启用播放手势",
-            subtitle = "横滑快进 · 竖滑亮度/音量 · 双击快退快进 · 长按 3x",
+            subtitle = "横滑快进 · 竖滑亮度/音量 · 双击播放/暂停 · 长按 3x",
             icon = NpIcon.Sound,
             // A27：开关行整行可点。
             onClick = { scope.launch { settings.setGesturesEnabled(!gestures) } },
@@ -493,35 +490,6 @@ private fun GestureSettingsGroup(gutter: Dp) {
                 )
             },
         )
-        // L14 自定义双击步长：改的是**双击**，横滑 seek 与键盘 `←/→` 不受影响
-        val doubleTapStepMs by settings.doubleTapStepMs.collectAsStateWithLifecycle(
-            initialValue = DEFAULT_DOUBLE_TAP_STEP_MS,
-        )
-        NpSettingRow(
-            title = "双击动作",
-            subtitle = if (gestures) {
-                "播放页双击左右两侧：快退 / 快进"
-            } else {
-                "双击左右两侧：快退 / 快进（需先开启上方播放手势）"
-            },
-            icon = NpIcon.Gear,
-            showDivider = false,
-            trailing = {
-                ValueReadonly(text = "${(doubleTapStepMs / 1000L).toInt()} 秒")
-            },
-        )
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(top = NpSpace.xs),
-            horizontalArrangement = Arrangement.spacedBy(NpSpace.sm),
-        ) {
-            DOUBLE_TAP_STEP_OPTIONS_MS.forEach { step ->
-                NpChip(
-                    text = "${step / 1000L}s",
-                    selected = step == doubleTapStepMs,
-                    onClick = { scope.launch { settings.setDoubleTapStepMs(step) } },
-                )
-            }
-        }
     }
 }
 

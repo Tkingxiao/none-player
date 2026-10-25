@@ -44,12 +44,12 @@ internal const val STAGE_BOTTOM_DEAD_ZONE_DP = 48f
 /** 起手判定阈值：位移超过它才分派轴。 */
 internal const val STAGE_SLOP_DP = 10f
 
-/** 横滑 seek 的满幅默认值：时长未知（或暂未回填）时，整屏宽 = ±90s。 */
-internal const val STAGE_SEEK_FULL_SPAN_MS = 90_000f
+/** 横滑 seek 的满幅默认值：时长未知（或暂未回填）时，整屏宽 = ±180s（E231 加倍，原 90s）。 */
+internal const val STAGE_SEEK_FULL_SPAN_MS = 180_000f
 
-/** 横滑满幅的下限/上限（片长超过 30s 后按片长，但夹在这个区间）。 */
+/** 横滑满幅的下限/上限（片长超过 30s 后按片长，但夹在这个区间；E231 上限 180→360s）。 */
 internal const val STAGE_SEEK_MIN_SPAN_MS = 30_000f
-internal const val STAGE_SEEK_MAX_SPAN_MS = 180_000f
+internal const val STAGE_SEEK_MAX_SPAN_MS = 360_000f
 
 /** 拖动族实际执行的轴。 */
 internal enum class StageDragKind { Seek, Brightness, Volume }
@@ -145,7 +145,8 @@ internal fun movementCancelsLongPress(distancePx: Float, slopPx: Float): Boolean
 
 /**
  * 横滑满幅随片长：≤30s 的片子整屏宽就是整片（一滑到底），
- * 更长的片子按片长 1:1 映射但夹在 30–180s；时长未知时退回 90s 默认值。
+ * 更长的片子按片长 1:1 映射但夹在 30–360s（E231 上限 180→360s，用户实报"快进有点慢"）；
+ * 时长未知时退回 180s 默认值。
  */
 internal fun seekSpanForDurationMs(durationMs: Long): Float = when {
     durationMs <= 0L -> STAGE_SEEK_FULL_SPAN_MS

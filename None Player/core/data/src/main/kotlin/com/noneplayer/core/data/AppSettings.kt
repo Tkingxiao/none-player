@@ -45,6 +45,10 @@ const val LOCAL_MEDIA_SOURCE_ID = "local"
  *
  * 文件级公开：`AppSettings` 的 companion 是 private（键不外泄），
  * 而这两样是**跨模块契约**（设置页要列档位、播放页要取默认值）。
+ *
+ * **E231 已退役**：双击改为"播放/暂停"（三区一律），不再 seek——
+ * 步长失去消费方，设置页条目已删。流程与键保留（老用户 DataStore 里的
+ * 存值无副作用），新代码不要再引用。
  */
 const val DEFAULT_DOUBLE_TAP_STEP_MS = 10_000L
 val DOUBLE_TAP_STEP_OPTIONS_MS = listOf(5_000L, 10_000L, 15_000L, 30_000L)

@@ -514,11 +514,13 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                         userDragging = userDragging,
                         displayPosition = displayState,
                         maxPosition = durationMs.coerceAtLeast(1L).toFloat(),
+                        // E231（用户裁定）：拖动进度条**不暂停、边拖边播**——与 PlayerScreen
+                        // 同口径。scrubWasPlaying 仍记录起手播放态：结束/取消路径用它决定
+                        // 是否 play()（起手在播 = 原样继续；起手暂停 = 不误起播）。
                         onScrubStart = {
                             if (!userDragging) {
                                 userDragging = true
                                 scrubWasPlaying = playing
-                                if (scrubWasPlaying) player.pause()
                             }
                         },
                         onScrubChange = { dragPositionMs = it },

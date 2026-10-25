@@ -121,7 +121,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.data.AppSettings
-import com.noneplayer.core.data.DEFAULT_DOUBLE_TAP_STEP_MS
 import com.noneplayer.core.data.DEFAULT_SUBTITLE_COLOR_ARGB
 import com.noneplayer.core.data.DEFAULT_SUBTITLE_MAX_LINES
 import com.noneplayer.core.data.SUBTITLE_VERTICAL_MAX
@@ -154,7 +153,6 @@ import com.noneplayer.core.ui.formatFileSize
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.media.AviDuration
 import com.noneplayer.core.ui.npDuration
-import com.noneplayer.core.ui.npQuality
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.rememberNpHaptics
 import com.noneplayer.core.ui.npPressScale
@@ -1101,15 +1099,16 @@ fun PlayerScreen(
         onDispose { player.setScrubbing(false) }
     }
 
-    // 拖动进度条：暂停 + 关键帧预览（限流），松手精确 seek 后恢复播放。
+    // 拖动进度条：**不暂停、边拖边播**（E231 用户裁定）——限流的预览 seek 继续，
+    // 播放中拖到哪画面跟到哪；松手 finishScrub 精确落点（resume=起手是否在播：
+    // 在播的原样继续，暂停的仍暂停）。
     // 拖动中自动隐藏守护（见下）保证进度条不会在拖动中途被收起。
     fun onScrubStart() {
         if (userDragging) return
         userDragging = true
         scrubWasPlaying = state == PlaybackState.Playing
-        // 记下起手位置：拖动期间的预览 seek 会真的把引擎挪走，取消时要能放回这里
+        // 记下起手位置：取消路径要能放回这里
         scrubStartMs = player.positionMs.value
-        if (scrubWasPlaying) player.pause()
         player.setScrubbing(true)
         // 首次预览 seek 延迟到拖动开始 200ms 后：点击式 seek 不会白做一次预览
         lastPreviewSeekAtMs = SystemClock.uptimeMillis()
@@ -1248,9 +1247,6 @@ fun PlayerScreen(
     BackHandler(enabled = audioOnly && !stageLocked) { navigator.popBackStack() }
     val loopMode by session.loopMode.collectAsStateWithLifecycle()
     var speedPickerVisible by remember { mutableStateOf(false) }
-    // 双击步长（L14）：设置页可改，默认 10s（批次 2 的既有手感）
-    val doubleTapStepMs by settings.doubleTapStepMs
-        .collectAsStateWithLifecycle(initialValue = DEFAULT_DOUBLE_TAP_STEP_MS)
     var subtitleSheetVisible by remember { mutableStateOf(false) }
     var moreSheetVisible by remember { mutableStateOf(false) }
     // 审查批次 B1：这三个原本声明在"锁定"清理块之后，而统一收口函数必须能引用
@@ -1415,36 +1411,18 @@ fun PlayerScreen(
     // M8 半屏水波（§6/§9.6）：双击快进/快退时从**点的那一侧**扩散到半屏。
     // 与 M6 的中央水波共用 `centerBubble` 门控（High 档；§9.4 播放中自动降档会关掉
     // 装饰类，所以真正会看到的是"暂停时双击预览落点"这一路）。时长读在组合期。
-    val seekWaveOn = npQuality().centerBubble
-    val seekWaveMs = npDuration(Motion.Bubble)
-    val seekWave = remember { Animatable(0f) }
-    var seekWaveFromRight by remember { mutableStateOf(false) }
-    // 水波**是否正在播放**：只由动画期间为 true。
-    // 此前绘制只看 `centerBubble` 档位不看状态，而静息帧里 `seekWave` 停在 0f——
-    // alpha=0.34、scale=0.35 的**空环常驻在左半屏**；播放中自动降档掩盖了它，
-    // 一暂停升回 High 档，左侧就浮出一个小圆圈（用户实报）。
-    var seekWaveActive by remember { mutableStateOf(false) }
+    // E231：M8 双击水波已随"双击改暂停"裁定整体下线——双击不再 seek，水波没有触发者。
 
     /**
-     * 双击分区（§4.3）：左右 1/3 = 快退/快进、**中心 = 播放/暂停**。
-     * 步长可配（L14，设置页「手势 → 双击动作」，默认 10s）；横滑 seek 与键盘
-     * `←/→` 不受它影响——那是 §8.4 钉死的 ±5s / ±30s 语义。
+     * 双击分区（E231 用户裁定）：**三区一律 = 播放/暂停**——双击不再快进/快退
+     * （键盘 `←/→` 的 ±5s/±30s 与横滑 seek 不受影响）。原「双击步长」设置只服务
+     * 双击 seek，随本裁定退役（设置页条目同批移除）；M8 双击水波的触发点随之消失，
+     * 水波机制一并下线。
      */
     fun onStageDoubleTap(zone: StageTapZone) {
-        when (zone) {
-            StageTapZone.Back -> seekByGesture(false, doubleTapStepMs)
-            StageTapZone.Forward -> seekByGesture(true, doubleTapStepMs)
-            StageTapZone.Center -> togglePlay()
-        }
-        if (zone != StageTapZone.Center && seekWaveOn) {
-            seekWaveFromRight = zone == StageTapZone.Forward
-            scope.launch {
-                seekWaveActive = true
-                seekWave.snapTo(0f)
-                seekWave.animateTo(1f, tween(seekWaveMs, easing = NpEasing.Emphasized))
-                seekWaveActive = false
-            }
-        }
+        // 分区参数保留在回调签名里（手势层契约不变），语义上已不再分区
+        @Suppress("UNUSED_PARAMETER") zone
+        togglePlay()
     }
 
     // 横滑 seek（§4.3）：拖动中视频照常播放，中央气泡只呈现"松手会去哪"；
@@ -2303,28 +2281,7 @@ fun PlayerScreen(
                         speed = speed,
                         modifier = Modifier.align(Alignment.TopStart),
                     )
-                    // M8 半屏水波：从双击那一侧扩散、500ms 淡出（放在胶囊之前 = 压在胶囊下面）。
-                    // 只在**动画进行中**挂载：档位开着但没在播水波时，0f 静息帧会画出一个
-                    // alpha 0.34/scale 0.35 的空环（暂停升回 High 档即浮现在左侧，用户实报）。
-                    if (seekWaveOn && seekWaveActive) {
-                        Box(
-                            modifier = Modifier
-                                .align(
-                                    if (seekWaveFromRight) Alignment.CenterEnd
-                                    else Alignment.CenterStart,
-                                )
-                                .fillMaxHeight(0.5f)
-                                .aspectRatio(1f)
-                                .graphicsLayer {
-                                    val p = seekWave.value
-                                    val scale = 0.35f + 0.65f * p
-                                    scaleX = scale
-                                    scaleY = scale
-                                    alpha = (0.34f * (1f - p)).coerceAtLeast(0f)
-                                }
-                                .border(2.dp, Color.White, CircleShape),
-                        )
-                    }
+                    // E231：M8 半屏水波已随"双击改暂停"下线（触发者不存在）。
                     GestureHintPill(
                         text = gestureHint?.text,
                         modifier = Modifier.align(Alignment.Center),
