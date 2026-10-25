@@ -51,6 +51,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.ProvidableCompositionLocal
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.movableContentOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -360,6 +361,17 @@ fun KernelTabScaffold(
         }
     }
 
+    // E231（转屏状态丢失）：紧凑/中扩两分支（底栏 Scaffold ↔ Rail Row）互换会整棵丢弃
+    // 内层 NavHost 的组合子树——`rememberSaveable` 只在导航栈 saveState 时被存档，
+    // 普通组合销毁无人收，Tab 页内状态（文件夹层级/筛选/滚动位置）随转屏清零。
+    // 真机复现：Compact 竖屏进文件夹 → 转横屏（Medium+）直接回到总文件夹根层。
+    // movableContent 让这棵子树在两个分支间**带着状态搬**（rememberSaveable 一并保留）。
+    // 落点经参数束传入而不是闭包直捕：上面的 navHost lambda 与转场参数每次重组换新
+    // 实例（动画档位可能变），闭包会钉死首帧那份。
+    val movableNavHost = remember {
+        movableContentOf { slot: NavHostSlot -> slot.render(slot.modifier) }
+    }
+
     // 底部条实测高度：内容层延伸到条之下后，各页靠它做最后一屏的 contentPadding
     var bottomBarPx by remember { mutableIntStateOf(0) }
     val bottomInset = with(LocalDensity.current) { bottomBarPx.toDp() }
@@ -419,7 +431,7 @@ fun KernelTabScaffold(
             },
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
         ) { _ ->
-            navHost(Modifier.fillMaxSize())
+            movableNavHost(NavHostSlot(navHost, Modifier.fillMaxSize()))
         }
     } else {
         // 中/扩展：左侧 Rail。内容列占满、Chrome **悬浮在内容列底部**
@@ -498,10 +510,13 @@ fun KernelTabScaffold(
                                 .coerceAtMost((maxWidth - 480.dp).coerceAtLeast(280.dp))
                         val listWidth = maxWidth + (targetListWidth - maxWidth) * paneShown
                         Row(modifier = Modifier.fillMaxSize().clipToBounds()) {
-                            navHost(
-                                Modifier
-                                    .fillMaxHeight()
-                                    .width(listWidth),
+                            movableNavHost(
+                                NavHostSlot(
+                                    navHost,
+                                    Modifier
+                                        .fillMaxHeight()
+                                        .width(listWidth),
+                                ),
                             )
                             if (pane != null && paneShown > 0.001f) {
                                 // 硬分割（2026-10-07 用户口径）：内容与右栏之间不做任何
@@ -581,6 +596,12 @@ private const val TAB_CONTENT_SCALE = 0.98f
  */
 private const val TAB_SHIFT_BAR_DP = 20
 private const val TAB_SHIFT_RAIL_DP = 14
+
+/** [movableNavHost] 的参数束：渲染体 + 落点 modifier（E231 转屏状态保留） */
+private class NavHostSlot(
+    val render: @Composable (Modifier) -> Unit,
+    val modifier: Modifier,
+)
 
 /**
  * 选中胶囊的落点账本（M4「选中胶囊 morph」）。
