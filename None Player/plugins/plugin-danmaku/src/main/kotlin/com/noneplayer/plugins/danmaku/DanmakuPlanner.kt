@@ -51,6 +51,13 @@ object DanmakuPlanner {
      *
      * [measure] 由调用方提供文字宽度测量（滚动模式用于出生点右移与越界判定）；
      * [laneHeightPx] = 单条弹幕占用的行高（字号 × 1.4）。
+     *
+     * [laneOrdinals]（E225）：与 [danmaku] 平行的**文件内稳定轨道序号**
+     * （按模式分别计数，见 [stableLaneOrdinals]）——车道号从它取模，弹幕
+     * 在整个存活期车道不变。缺省 null 时回退到窗口内到达序号取模：窗口
+     * 每滑一帧、前面任何一条出窗，后面所有弹幕的序号整体前移，**弹幕会
+     * 在飞行途中集体换道**（y 瞬移）；有文件序号的文件源恒传，内嵌
+     * spawned（无稳定文件序）回退。
      */
     fun plan(
         danmaku: List<Danmaku>,
@@ -60,6 +67,7 @@ object DanmakuPlanner {
         config: Config,
         laneHeightPx: Float,
         measure: (Danmaku, Float) -> Float,
+        laneOrdinals: List<Int>? = null,
     ): List<Placed> {
         if (danmaku.isEmpty() || canvasWidth <= 0f || canvasHeight <= 0f) return emptyList()
         val layerHeight = canvasHeight * config.areaFraction
@@ -78,7 +86,8 @@ object DanmakuPlanner {
                     DanmakuMode.Scroll -> scrollSpan
                     DanmakuMode.Top, DanmakuMode.Bottom -> HOLD_SPAN_MS
                 }
-                if (displayPosMs < d.timeMs + span) add(d)
+                // E225：窗口元素携带**全表下标**——车道号要从文件内稳定序号取
+                if (displayPosMs < d.timeMs + span) add(i to d)
             }
         }.let { if (config.maxOnScreen > 0) it.takeLast(config.maxOnScreen) else it }
         if (window.isEmpty()) return emptyList()
@@ -94,12 +103,15 @@ object DanmakuPlanner {
         var bottomNo = 0
 
         return buildList {
-            window.forEach { d ->
-                val i = when (d.mode) {
-                    DanmakuMode.Scroll -> scrollNo++
-                    DanmakuMode.Top -> topNo++
-                    DanmakuMode.Bottom -> bottomNo++
-                }
+            window.forEach { (globalIndex, d) ->
+                // E225：车道号优先取文件内稳定序号（同模式计数）；缺省回退窗口内
+                // 到达序号（内嵌 spawned 无稳定文件序，行为与旧版一致）
+                val i = laneOrdinals?.getOrNull(globalIndex)
+                    ?: when (d.mode) {
+                        DanmakuMode.Scroll -> scrollNo++
+                        DanmakuMode.Top -> topNo++
+                        DanmakuMode.Bottom -> bottomNo++
+                    }
                 val lane = i % lanes
                 val textPx = baseTextPx * d.fontScale
                 val y = when (d.mode) {

@@ -119,6 +119,29 @@ fun nextSpawnedOnCue(
 fun isBackwardSeek(newPositionMs: Long, lastPositionMs: Long, thresholdMs: Long = 1_500L): Boolean =
     newPositionMs < lastPositionMs - thresholdMs
 
+/**
+ * E225：文件内**稳定车道序号**（与 [danmaku] 平行，按模式分别计数）。
+ *
+ * 车道号 = 稳定序号 mod 轨道数：序号来自文件内位置（时间升序的表下标、
+ * 按模式独立计数），与播放窗口无关——弹幕从出生到出屏**车道不变**。
+ * 旧行为用车窗内到达序号取模：窗口每滑一帧、前面任何一条出窗，后面所有
+ * 弹幕的序号整体前移 → 飞行途中集体换道（y 瞬移）。
+ * 「占用时长」语义由此成立：同车道相邻两条的序号差 ≥ 轨道数时才可能
+ * 同屏相接，单条对车道的占用横跨其整个存活期。
+ */
+fun stableLaneOrdinals(danmaku: List<Danmaku>): List<Int> {
+    var scroll = 0
+    var top = 0
+    var bottom = 0
+    return danmaku.map { d ->
+        when (d.mode) {
+            DanmakuMode.Scroll -> scroll++
+            DanmakuMode.Top -> top++
+            DanmakuMode.Bottom -> bottom++
+        }
+    }
+}
+
 /** E224：内嵌 cue 的 spawn 决策（屏蔽词与文件通路同口径） */
 sealed interface EmbeddedCueDecision {
     /** 生成弹幕 */

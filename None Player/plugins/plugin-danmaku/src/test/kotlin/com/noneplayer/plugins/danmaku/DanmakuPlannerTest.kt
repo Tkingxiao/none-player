@@ -168,6 +168,63 @@ class DanmakuPlannerTest {
         // 窗口内无内容：显示位置远早于第一条
         assertTrue(DanmakuPlanner.plan(listOf(danmaku(50_000L)), 0L, 1000f, 1000f, config, 70f, measureStub()).isEmpty())
     }
+
+    // ---- E225：文件内稳定车道序号 ----
+
+    /** 两条滚动弹幕：A(t=0) 与 B(t=1000)；A 先出窗后 B 的窗口内序号会前移 */
+    private val two = listOf(danmaku(0L, text = "aaaa"), danmaku(1_000L, text = "bbbb"))
+
+    @Test
+    fun `stable ordinals count per mode`() {
+        val ordinals = stableLaneOrdinals(
+            listOf(
+                danmaku(0L, DanmakuMode.Scroll),
+                danmaku(1L, DanmakuMode.Top),
+                danmaku(2L, DanmakuMode.Scroll),
+                danmaku(3L, DanmakuMode.Bottom),
+                danmaku(4L, DanmakuMode.Scroll),
+            ),
+        )
+        // 各模式独立计数：滚动 0,1,2 / 顶 0 / 底 0
+        assertEquals(listOf(0, 0, 1, 0, 2), ordinals)
+    }
+
+    @Test
+    fun `lane stays stable as the window slides`() {
+        // 车道数 = 1000×0.5 / 70 = 7。窗口滑动使 A（t=0）出窗后，旧实现里 B 的
+        // 窗口内序号 1→0，车道 1→0 瞬移；稳定序号下车道不变。
+        val ordinals = stableLaneOrdinals(two)
+        val before = DanmakuPlanner.plan(
+            two, displayPosMs = 6_000L, canvasWidth = 1000f, canvasHeight = 1000f,
+            config = config, laneHeightPx = 70f, measure = measureStub(),
+            laneOrdinals = ordinals,
+        )
+        val after = DanmakuPlanner.plan(
+            two, displayPosMs = 8_500L, canvasWidth = 1000f, canvasHeight = 1000f,
+            config = config, laneHeightPx = 70f, measure = measureStub(),
+            laneOrdinals = ordinals,
+        )
+        // 6s 时两条都在窗内；8.5s 时 A（存活 8s）已出窗、只剩 B
+        assertEquals(2, before.size)
+        assertEquals(1, after.size)
+        val bBefore = before.single { it.danmaku.timeMs == 1_000L }
+        val bAfter = after.single()
+        assertEquals("B 的车道在窗口滑动前后必须一致", bBefore.lane, bAfter.lane)
+        assertEquals("稳定序号下车道 = 序号 mod 轨道数", 1 % 7, bAfter.lane)
+    }
+
+    @Test
+    fun `fallback without ordinals keeps window-counter behavior`() {
+        // 内嵌 spawned（无稳定文件序）走旧路径：行为与 E225 前一致
+        val placed = DanmakuPlanner.plan(
+            two, displayPosMs = 6_000L, canvasWidth = 1000f, canvasHeight = 1000f,
+            config = config, laneHeightPx = 70f, measure = measureStub(),
+        )
+        assertEquals(2, placed.size)
+        assertEquals(0, placed[0].lane)
+        assertEquals(1, placed[1].lane)
+    }
+
 }
 
 class DanmakuBlocklistTest {
@@ -185,3 +242,4 @@ class DanmakuBlocklistTest {
         assertTrue(!DanmakuBlocklist.isBlocked("anything", emptyList()))
     }
 }
+

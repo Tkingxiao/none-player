@@ -267,6 +267,11 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
             val measureText: (Danmaku, Float) -> Float = remember(textWidth) {
                 { d, px -> textWidth.width(d.text, px) }
             }
+            // E225：文件源的**文件内稳定车道序号**（按模式计数，与文件同寿只算一次）——
+            // 车道号从它取模，弹幕存活期不换道；内嵌 spawned 无稳定文件序，回退窗口计数
+            val laneOrdinals = remember(source) {
+                (source as? DanmakuSource.File)?.let { stableLaneOrdinals(it.items) }
+            }
             Canvas(modifier = Modifier.fillMaxSize()) {
                 frame.longValue // 读帧号：订阅 draw 阶段逐帧失效
                 val danmaku = when (val s = source) {
@@ -287,6 +292,7 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
                     config = planConfig,
                     laneHeightPx = laneHeight,
                     measure = measureText,
+                    laneOrdinals = laneOrdinals,
                 )
                 drawIntoCanvas { canvas ->
                     val nc = canvas.nativeCanvas
