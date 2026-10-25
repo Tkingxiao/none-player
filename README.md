@@ -136,4 +136,4 @@ docs/                     设计规格、审计档案、回归脚本
 - PGS 字幕按引擎边界判定为不支持。
 - 个人页的「播放列表」与「音频收藏」目前是占位入口，点击提示尚未接入。
 - 性能与设备矩阵证据基于有限机型与模拟器批次，未覆盖全部尺寸临界值、真实旋转与铰链场景。
-- NextLib / FFmpeg 与 Media3Avi 的**许可证合规尚未核实**（FFmpeg 相关组件通常为 LGPL/GPL 系），再分发或商用前请自行核对依赖条款。本项目当前未附带 LICENSE 文件。
+- **许可证**：第三方合规已核实并落档 `None Player/NOTICE.md`（NextLib=GPL-3.0、自有 FFmpeg=LGPL-3.0 静态链、Media3Avi=MIT；许可原文在 `None Player/LICENSES/`）。应用自身 LICENSE 待拍板（保留 NextLib ⇒ 整体 GPL-3.0，或移除该依赖），分发前请先读 NOTICE.md §3。
