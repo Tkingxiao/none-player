@@ -84,7 +84,9 @@ class DanmakuPlannerTest {
     }
 
     @Test
-    fun `density cap keeps the latest entries`() {
+    fun `density cap keeps the earliest entries`() {
+        // E229 语义翻转：超限保留**先到**（已上屏的按时间自然飞完），
+        // 后到的新弹幕出生即不显示——旧 takeLast 会把飞行中的最早一条整条抹掉
         val many = (0 until 10).map { danmaku(it * 100L) }
         val capped = DanmakuPlanner.plan(
             many,
@@ -96,8 +98,51 @@ class DanmakuPlannerTest {
             measure = measureStub(),
         )
         assertEquals(3, capped.size)
-        // 保留的是时间最近的（窗口尾）
-        assertEquals(700L, capped[0].danmaku.timeMs)
+        // 保留的是窗口头部（t=0/100/200），而不是窗口尾部
+        assertEquals(listOf(0L, 100L, 200L), capped.map { it.danmaku.timeMs })
+    }
+
+    @Test
+    fun `density cap budgets per mode`() {
+        // E229：三种模式三套预算——滚动/顶/底各自享有整个上限，互不挤占。
+        // 旧实现全窗口一个预算：cap=2 时顶/底会被滚动洪水顶得只剩最晚的 1-2 条
+        val mix = listOf(
+            danmaku(0L, DanmakuMode.Scroll, "s1"),
+            danmaku(50L, DanmakuMode.Top, "t1"),
+            danmaku(100L, DanmakuMode.Scroll, "s2"),
+            danmaku(150L, DanmakuMode.Top, "t2"),
+            danmaku(200L, DanmakuMode.Scroll, "s3"),
+            danmaku(250L, DanmakuMode.Bottom, "b1"),
+        )
+        val placed = DanmakuPlanner.plan(
+            mix,
+            displayPosMs = 1_000L,
+            canvasWidth = 1000f,
+            canvasHeight = 1000f,
+            config = config.copy(maxOnScreen = 2),
+            laneHeightPx = 70f,
+            measure = measureStub(),
+        )
+        // 滚动保先到 2 条（s3 被压）；顶 2 条全保；底 1 条保——合计 5，
+        // 而不是旧语义的「全窗口最后 2 条」
+        assertEquals(listOf("s1", "t1", "s2", "t2", "b1"), placed.map { it.danmaku.text })
+    }
+
+    @Test
+    fun `on-screen entry is not evicted by newcomers`() {
+        // E229 稳定性：先到已上屏的条目在其存活期内不会被后到者挤出
+        // （旧 takeLast 每来一条新弹幕就挤掉最早一条——密集段整屏闪没）
+        val entries = listOf(danmaku(0L), danmaku(1_000L), danmaku(2_000L))
+        val capped = config.copy(maxOnScreen = 1)
+        // 2.5s：窗口 {0,1000,2000}，cap=1 只保 t=0
+        val at25 = DanmakuPlanner.plan(entries, 2_500L, 1000f, 1000f, capped, 70f, measureStub())
+        assertEquals(listOf(0L), at25.map { it.danmaku.timeMs })
+        // 6s：新弹幕早已进入窗口，t=0（存活 8s）仍被保留，不被中途抹掉
+        val at60 = DanmakuPlanner.plan(entries, 6_000L, 1000f, 1000f, capped, 70f, measureStub())
+        assertEquals(listOf(0L), at60.map { it.danmaku.timeMs })
+        // 8.1s：t=0 按时间自然出窗，预算让位给下一条
+        val at81 = DanmakuPlanner.plan(entries, 8_100L, 1000f, 1000f, capped, 70f, measureStub())
+        assertEquals(listOf(1_000L), at81.map { it.danmaku.timeMs })
     }
 
     @Test

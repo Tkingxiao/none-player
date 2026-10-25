@@ -89,7 +89,29 @@ object DanmakuPlanner {
                 // E225：窗口元素携带**全表下标**——车道号要从文件内稳定序号取
                 if (displayPosMs < d.timeMs + span) add(i to d)
             }
-        }.let { if (config.maxOnScreen > 0) it.takeLast(config.maxOnScreen) else it }
+        }.let { raw ->
+            // 密度上限（E229）：三种模式三套预算——滚动/顶/底各自享有整个
+            // maxOnScreen，互不挤占（滚动洪水不再把驻留中的顶/底弹幕顶出屏；
+            // 轨道本就按模式独立编号，上限同口径）。
+            // 超限**保留先到**：已上屏的按时间自然飞完/驻留到期满，后到的新
+            // 弹幕出生即不显示（B 站同款口径）。旧实现 takeLast 丢最早到的——
+            // 正在飞行/驻留中的弹幕被整条中途抹掉（肉眼是闪没），且密集段窗口
+            // 每滑一帧都有新弹幕把更早的一条再挤掉，整屏连续闪烁。
+            if (config.maxOnScreen <= 0) {
+                raw
+            } else {
+                var scrollLeft = config.maxOnScreen
+                var topLeft = config.maxOnScreen
+                var bottomLeft = config.maxOnScreen
+                raw.filter { (_, d) ->
+                    when (d.mode) {
+                        DanmakuMode.Scroll -> scrollLeft-- > 0
+                        DanmakuMode.Top -> topLeft-- > 0
+                        DanmakuMode.Bottom -> bottomLeft-- > 0
+                    }
+                }
+            }
+        }
         if (window.isEmpty()) return emptyList()
 
         // 基准字号从行高反推：行高由 Overlay 按 `画面高 × 0.04 × 倍率 × 1.4` 给出，
