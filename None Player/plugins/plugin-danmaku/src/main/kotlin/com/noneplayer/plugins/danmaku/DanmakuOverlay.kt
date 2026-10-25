@@ -192,12 +192,24 @@ private fun DanmakuOverlayContent(context: PlaybackContext) {
     LaunchedEffect(source is DanmakuSource.Embedded) {
         if (source !is DanmakuSource.Embedded) return@LaunchedEffect
         var lastText: String? = null
+        var lastPositionMs = -1L
         context.player.cues.collect { cues ->
             val text = cues.firstNotNullOfOrNull { it.text }?.trim()?.replace('\n', ' ').orEmpty()
+            val positionMs = anchor.displayMs(playbackState)
+            // E223：倒退 seek 检测——旧 spawned 的显示位置全部失效且 cue 会重复
+            // spawn，整表清空等当前 cue 重新出（重建走 nextSpawnedOnCue 的
+            // 时间升序不变量）
+            val backwardSeek = lastPositionMs >= 0 && isBackwardSeek(positionMs, lastPositionMs)
+            lastPositionMs = positionMs
             if (text.isNotEmpty() && text != lastText) {
                 lastText = text
-                spawned = (spawned + Danmaku(anchor.displayMs(playbackState), DanmakuMode.Scroll, 1f, 0xFFFFFF, text))
-                    .takeLast(500)
+                spawned = nextSpawnedOnCue(
+                    current = spawned,
+                    spawned = Danmaku(positionMs, DanmakuMode.Scroll, 1f, 0xFFFFFF, text),
+                    backwardSeek = backwardSeek,
+                )
+            } else if (backwardSeek) {
+                spawned = emptyList()
             }
         }
     }
@@ -333,9 +345,17 @@ private fun loadFileSource(
         }
     }
     for ((uri, format) in candidates) {
+        // E223：有界读取——超限（误标成弹幕扩展名的大文件）不整段进内存，
+        // 跳过该候选并留一条提示
         val text = runCatching {
             appContext.contentResolver.openInputStream(uri.toUri())?.use { stream ->
-                stream.readBytes().decodeText()
+                when (val read = readBoundedBytes(stream)) {
+                    is BoundedRead.Content -> read.bytes.decodeText()
+                    BoundedRead.Oversize -> {
+                        Log.i("DanmakuSource", "弹幕文件超过 ${MAX_DANMAKU_BYTES / (1024 * 1024)}MB 上限，跳过：file=$uri")
+                        null
+                    }
+                }
             }
         }.getOrNull() ?: continue
         // E98：解析失败（畸形文件、平台正则差异）只丢这一个来源——弹幕是增益功能，

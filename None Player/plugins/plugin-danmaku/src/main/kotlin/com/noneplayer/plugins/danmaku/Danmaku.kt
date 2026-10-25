@@ -56,3 +56,65 @@ object DanmakuBlocklist {
 fun parseDanmakuFile(content: String, format: DanmakuFormat, blocklist: List<String>): List<Danmaku> =
     DanmakuParsers.parse(content, format)
         .filter { !DanmakuBlocklist.isBlocked(it.text, blocklist) }
+
+/**
+ * E223：弹幕文件的读取上限（16MB）。弹幕文本文件正常在 KB–MB 量级；被误标成
+ * 弹幕扩展名的大文件（视频/整季合集）按旧的全量 `readBytes()` 会把整个文件
+ * 读进内存再解析——OOM 面。超限不解析（返回 [Oversize] 哨兵），调用方跳过
+ * 该候选并给出提示。
+ */
+const val MAX_DANMAKU_BYTES = 16L * 1024 * 1024
+
+/** 读取结局：[Content] = 字节（≤上限，编码由调用方 decodeText 判定），[Oversize] = 超限 */
+sealed interface BoundedRead {
+    data class Content(val bytes: ByteArray) : BoundedRead
+    object Oversize : BoundedRead
+}
+
+/**
+ * 有界读取：最多读 [MAX_DANMAKU_BYTES] 字节——多读 1 字节用于区分
+ * 「恰好等于上限」与「超限」，不整段 buffer 进内存。编码判定（UTF-8/GBK）
+ * 留给调用方的 decodeText，这里只管字节数。
+ */
+fun readBoundedBytes(stream: java.io.InputStream, cap: Long = MAX_DANMAKU_BYTES): BoundedRead {
+    val out = java.io.ByteArrayOutputStream()
+    val buf = ByteArray(64 * 1024)
+    var total = 0L
+    while (true) {
+        val n = stream.read(buf)
+        if (n < 0) break
+        total += n
+        if (total > cap) return BoundedRead.Oversize
+        out.write(buf, 0, n)
+    }
+    return BoundedRead.Content(out.toByteArray())
+}
+
+/**
+ * E223：内嵌弹幕 spawned 列表的重建规则（倒退 seek 重建 + 时间升序不变量）。
+ *
+ * 内嵌通路「新 cue → 立即 spawn 一条滚动弹幕」：**倒退 seek** 后旧 spawned
+ * 的显示位置全部失效（它们的 timeMs 在未来），且 cue 会重新出现造成重复
+ * spawn——检测到显著倒退就整表清空，等当前 cue 重新 spawn。
+ *
+ * @param backwardSeek 检测器判定本次 position 变化是倒退（新 position 比
+ *   上次小超过阈值——抖动/同位置刷新不算）
+ */
+fun nextSpawnedOnCue(
+    current: List<Danmaku>,
+    spawned: Danmaku?,
+    backwardSeek: Boolean,
+): List<Danmaku> {
+    val base = if (backwardSeek) emptyList() else current
+    if (spawned == null) return base
+    // 时间升序不变量：新 spawn 的 timeMs（= 显示位置）不早于列表尾
+    return if (base.isEmpty() || (base.last().timeMs <= spawned.timeMs)) {
+        (base + spawned).takeLast(500)
+    } else {
+        (base + spawned).sortedBy { it.timeMs }.takeLast(500)
+    }
+}
+
+/** E223：倒退 seek 判定——比上次 position 小超过阈值（毫秒）才算（普通抖动/同位刷新不算） */
+fun isBackwardSeek(newPositionMs: Long, lastPositionMs: Long, thresholdMs: Long = 1_500L): Boolean =
+    newPositionMs < lastPositionMs - thresholdMs
