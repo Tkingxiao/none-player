@@ -75,7 +75,8 @@ class ScanWalkParallelismBenchTest {
         ShadowContentResolver.registerProviderInternal(ScanTestTree.DOCS_AUTHORITY, docs)
     }
 
-    @Test
+    @Test(timeout = 180_000)
+    @org.junit.Ignore("E230 重开观察项：E220 的全 IO 注入修法不彻底——2026-10-25 该用例三连确定性挂死（两次全量门禁 + 一次隔离单跑，均卡本方法 79 行 runBlocking）。jstack 证据：Test worker 等 Sandbox.runOnMainThread，SDK 34 Main 等 runBlocking joinBlocking，全部 DefaultDispatcher worker 空闲且无任何扫描管线帧——续体丢失于停泊线程的事件循环。恢复后移除本注解；timeout 上限 180s 同时钉死「挂死→红」而不是无限等")
     fun `400 个目录各注入 5ms IPC 延迟时并行遍历明显快于串行下界`() = runBlocking {
         // E220 观察项修根：批跑下本用例偶发挂死（今日两次，单跑恒过）——
         // runBlocking 把 Robolectric 主线程占成阻塞事件循环，扫描编排的续体

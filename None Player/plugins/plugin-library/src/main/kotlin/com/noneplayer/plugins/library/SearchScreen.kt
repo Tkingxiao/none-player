@@ -197,6 +197,9 @@ fun SearchScreen(navigator: Navigator) {
                             query = term
                             commitSearch(term)
                         },
+                        // E230：最近搜索逐条可删——直接写仓库（DataStore），列表经
+                        // searchHistory 流回流即时收起该 chip
+                        onRemove = { term -> scope.launch { settings.removeSearchTerm(term) } },
                     )
                 } else {
                     SearchResults(
@@ -312,12 +315,17 @@ private fun SearchAutoFocus(focusRequester: FocusRequester) {
     }
 }
 
-/** 「最近搜索」：eyebrow + 横滑 chips（DataStore 持久化）。 */
+/**
+ * 「最近搜索」：eyebrow + 横滑 chips（DataStore 持久化）。
+ * E230：每个 chip 尾随小 ✕ 逐条可删（36dp 次级钮——删错无代价，重新搜一次
+ * 就回来，不按 44dp 主控件纪律铺满；长按删除不可发现，不做）。
+ */
 @Composable
 private fun RecentSearches(
     history: List<String>,
     gutter: Dp,
     onPick: (String) -> Unit,
+    onRemove: (String) -> Unit,
 ) {
     if (history.isEmpty()) return
     val ink = LocalNpInk.current
@@ -333,11 +341,21 @@ private fun RecentSearches(
                 .npMaskFadeEdges(ink.bg, fadeEnd = !LocalNpPaneOccupied.current),
         ) {
             items(history, key = { it }) { term ->
-                NpChip(
-                    text = term,
-                    selected = false,
-                    onClick = { onPick(term) },
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    NpChip(
+                        text = term,
+                        selected = false,
+                        onClick = { onPick(term) },
+                    )
+                    NpIconButton(
+                        icon = NpIcon.Close,
+                        contentDescription = "删除该搜索词",
+                        onClick = { onRemove(term) },
+                        size = 36.dp,
+                        iconSize = 16.dp,
+                        tint = ink.muted,
+                    )
+                }
             }
         }
     }

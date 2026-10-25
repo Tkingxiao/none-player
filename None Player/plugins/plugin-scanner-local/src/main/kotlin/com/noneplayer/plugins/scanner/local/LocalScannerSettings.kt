@@ -1,24 +1,45 @@
 package com.noneplayer.plugins.scanner.local
 
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpIcon
 import com.noneplayer.core.ui.NpIconButton
+import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSettingRow
 import com.noneplayer.core.ui.NpTypography
+import com.noneplayer.core.ui.npClickable
 import com.noneplayer.kernel.ui.api.SettingsProvider
 import kotlinx.coroutines.launch
 
@@ -46,6 +67,10 @@ class LocalScannerSettings(private val source: LocalMediaSource) : SettingsProvi
             // 设置页重进时闪一帧"未选择（选择后才会扫描该目录下的媒体）"
             initialValue = source.settings.scanFolderUrisSnapshot ?: emptyList(),
         )
+        // E230：移除目录要二次确认（与库页 ScanFolderSheet 同口径）——误触立即
+        // 释放授权并重扫，最后一个目录被移除时媒体库清空。插件间禁止互相依赖，
+        // 确认卡在此自持（同 describeTree 与库侧 describeScanFolder 的分工）。
+        var pendingRemove by rememberSaveable { mutableStateOf<String?>(null) }
 
         val folderPicker = rememberLauncherForActivityResult(
             ActivityResultContracts.OpenDocumentTree(),
@@ -84,7 +109,7 @@ class LocalScannerSettings(private val source: LocalMediaSource) : SettingsProvi
                     NpIconButton(
                         icon = NpIcon.Trash,
                         contentDescription = "移除目录",
-                        onClick = { scope.launch { source.removeScanFolder(uriStr) } },
+                        onClick = { pendingRemove = uriStr },
                         size = NpDimens.touchTarget,
                         iconSize = 20.dp,
                         tint = ink.danger,
@@ -132,5 +157,97 @@ class LocalScannerSettings(private val source: LocalMediaSource) : SettingsProvi
                 }
             },
         )
+
+        pendingRemove?.let { uriStr ->
+            RemoveFolderConfirmDialog(
+                folderLabel = describeTree(uriStr) ?: uriStr,
+                isLastFolder = folderUris.size == 1,
+                onDismiss = { pendingRemove = null },
+                onConfirm = {
+                    pendingRemove = null
+                    scope.launch { source.removeScanFolder(uriStr) }
+                },
+            )
+        }
+    }
+}
+
+/**
+ * E230：移除扫描目录的确认卡（与库页 ScanFolderSheet 的确认同款窗口壳：
+ * 遮罩盖住底栏、返回只关确认框）。文案与最后一目录提示两处共用一套。
+ */
+@Composable
+private fun RemoveFolderConfirmDialog(
+    folderLabel: String,
+    isLastFolder: Boolean,
+    onDismiss: () -> Unit,
+    onConfirm: () -> Unit,
+) {
+    val ink = LocalNpInk.current
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        BackHandler { onDismiss() }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.45f))
+                .npClickable(onClick = onDismiss),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = 32.dp)
+                    .clip(RoundedCornerShape(NpRadius.sheet))
+                    .background(ink.surface)
+                    .border(1.dp, ink.border, RoundedCornerShape(NpRadius.sheet))
+                    .padding(20.dp),
+            ) {
+                Text(
+                    text = "移除扫描目录",
+                    style = NpTypography.titleMedium,
+                    color = ink.fg,
+                )
+                Text(
+                    text = if (isLastFolder) {
+                        "「$folderLabel」是最后一个扫描目录，移除后媒体库将清空（回到选择文件夹的引导页）。文件不受影响，重新添加即可恢复。"
+                    } else {
+                        "「$folderLabel」将移出扫描范围并立即重新扫描。文件不受影响，重新添加即可恢复。"
+                    },
+                    style = NpTypography.bodySmall,
+                    color = ink.muted,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 18.dp),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "取消",
+                        style = NpTypography.bodyMedium,
+                        color = ink.fg,
+                        modifier = Modifier
+                            .npClickable(onClick = onDismiss)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    )
+                    Text(
+                        text = "移除",
+                        style = NpTypography.bodyMedium,
+                        color = ink.danger,
+                        modifier = Modifier
+                            .npClickable(onClick = onConfirm)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                    )
+                }
+            }
+        }
     }
 }

@@ -118,6 +118,18 @@ internal fun scanFoldersFrom(
         ?.filter { it.isNotBlank() }
         .orEmpty()
 
+/**
+ * 单条删除后的最近搜索表（E230）。返回 null 表示**没有变化**（词条不存在或
+ * 目标为空）——调用方据此跳过写盘。精确匹配：addSearchTerm 的大小写去重
+ * 已保证变体至多一条，用户看到的词条就是被删的词条；其余条目与顺序原样保留。
+ */
+internal fun searchHistoryAfterRemove(current: List<String>, term: String): List<String>? {
+    val target = term.trim()
+    if (target.isEmpty()) return null
+    val next = current.filterNot { it == target }
+    return if (next == current) null else next
+}
+
 /** 媒体库排序方式 */
 enum class SortMode(val label: String, val usesPlaybackHistory: Boolean = false) {
     NAME("名称"),
@@ -423,6 +435,22 @@ class AppSettings(private val context: Context) {
 
     suspend fun clearSearchHistory() {
         context.dataStore.edit { it.remove(KEY_SEARCH_HISTORY) }
+    }
+
+    /**
+     * 删除单条最近搜索（E230：最近搜索逐条可删）。语义见 [searchHistoryAfterRemove]
+     * （JVM 钉住）；删空即整键移除（与 clearSearchHistory 落点一致，不留空串键）。
+     */
+    suspend fun removeSearchTerm(term: String) {
+        context.dataStore.edit { prefs ->
+            val current = prefs[KEY_SEARCH_HISTORY]?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+            when (val next = searchHistoryAfterRemove(current, term)) {
+                null -> Unit
+                else ->
+                    if (next.isEmpty()) prefs.remove(KEY_SEARCH_HISTORY)
+                    else prefs[KEY_SEARCH_HISTORY] = next.joinToString("\n")
+            }
+        }
     }
 
     // ---- 播放偏好（设置页「播放 / 后台与屏幕 / 手势」三组） ----
