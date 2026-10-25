@@ -128,3 +128,19 @@ dependencies {
     implementation(libs.coil)
     implementation(libs.coil.video)
 }
+
+// E231（用户口径）：release APK 统一落 `app/release/`——取证与装机不必再摸
+// build/outputs 的深层路径。assembleRelease 收尾原样拷贝 *.apk（覆盖写，目录里
+// 始终是最新一轮）；mapping 等其余产物不搬（门禁收数只记 APK 字节数）。
+// 该目录 .gitignore 已排除（E130 段），产物不入库。
+// AGP 的构建型任务是惰性注册的，`tasks.named` 在配置期会抛 not found——
+// 必须 matching + configureEach 挂到任务出现时。
+tasks.matching { it.name == "assembleRelease" }.configureEach {
+    doLast {
+        copy {
+            from(layout.buildDirectory.dir("outputs/apk/release"))
+            include("*.apk")
+            into(layout.projectDirectory.dir("release"))
+        }
+    }
+}
