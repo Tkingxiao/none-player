@@ -357,7 +357,8 @@ fun NpCoverBox(
     durationText: String? = null,
     /** `.thumb::after` 的色相内环（accent 30% inset 1px），null 时不画 */
     tintRing: Color? = null,
-    /** 列表行的小封面用图标角标（设计稿 `.lr-kind` 只有图标，放不下「视频」二字） */
+    /** 小尺寸封面（如长按菜单预览）用图标角标（设计稿 `.lr-kind` 只有图标，放不下「视频」二字）。
+     *  E231 起列表行不再传它——列表封面不叠任何角标，只剩本菜单这一个使用方。 */
     compactKindTag: Boolean = false,
     content: @Composable () -> Unit = {},
 ) {
@@ -589,10 +590,14 @@ fun NpMediaCard(
 }
 
 /**
- * `.listrow`：列表视图行 —— 112dp 缩略图 + 标题 + 元信息 + 箭头。
+ * `.listrow`：列表视图行 —— 160dp 缩略图 + 标题 + 元信息 + 箭头。
  *
- * 缩略图宽度在 400dp 以下收窄到 92dp（设计稿媒体查询），
+ * 缩略图宽度在 400dp 以下收窄到 124dp（设计稿媒体查询），
  * 靠 [compact] 显式传入而不是在这里读配置——组件不该自己感知屏幕。
+ *
+ * E231（用户实报"列表封面被角标挡住看不清"）：类型角标与时长**不再叠在封面上**
+ * ——角标缩成图标挪到标题前（[kindIsAudio]），时长由调用方并进 [meta]（大小之前）。
+ * 缩略图从 112/92dp 放大到 160/124dp（16:9 下高 90/70dp），整行随之加高。
  */
 @Composable
 fun NpListRow(
@@ -604,6 +609,8 @@ fun NpListRow(
     /** meta 行首的文件夹色相胶囊（设计稿 listCard 的 `.foldertag`） */
     folderTag: String? = null,
     folderTagIsAudio: Boolean = false,
+    /** 标题前的媒体类型小图标（E231 从封面角标挪来）：null=不画，true=音频，false=视频 */
+    kindIsAudio: Boolean? = null,
     /** 长按（上下文菜单入口，§3.6）；null = 不注册长按，点击行为不变 */
     onLongClick: (() -> Unit)? = null,
     cover: @Composable () -> Unit = {},
@@ -642,16 +649,32 @@ fun NpListRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Box(modifier = Modifier.width(if (compact) 92.dp else 112.dp)) { cover() }
+        Box(modifier = Modifier.width(if (compact) 124.dp else 160.dp)) { cover() }
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                // 设计稿 `.listrow .lr-title`：14px/600
-                style = NpTypography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                color = titleColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                // E231：类型角标从封面左上角挪到标题前——缩成 14dp 图标（音频用
+                // audioTint、视频用 accent），不再遮挡封面
+                if (kindIsAudio != null) {
+                    Icon(
+                        imageVector = if (kindIsAudio) NpIcon.Sound else NpIcon.Film,
+                        contentDescription = null,
+                        tint = if (kindIsAudio) NpMediaColor.audioTint else ink.accent,
+                        modifier = Modifier.size(14.dp),
+                    )
+                }
+                Text(
+                    text = title,
+                    // 设计稿 `.listrow .lr-title`：14px/600
+                    style = NpTypography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                    color = titleColor,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
             if (meta.isNotEmpty() || folderTag != null) {
                 Row(
                     modifier = Modifier.padding(top = 5.dp),

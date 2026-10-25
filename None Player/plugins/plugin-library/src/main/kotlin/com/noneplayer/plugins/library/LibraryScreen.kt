@@ -1666,10 +1666,13 @@ internal fun MediaCardBody(
 }
 
 /**
- * 列表视图行（设计稿 `.listrow`）：112dp 缩略图 + 单行标题 + mono 元信息 + chevron。
+ * 列表视图行（设计稿 `.listrow`）：160dp 缩略图 + 单行标题（前置类型图标）+ mono 元信息 + chevron。
  *
  * 与网格卡共用同一份数据与封面组件，只是形态不同——
- * 设计稿四处（文件夹页 / 文件夹详情 / 聚合列表 / 搜索结果）都用这一个形状。
+ * 设计稿四处（文件夹页 / 文件夹详情 / 聚合列表 / 搜索结果）都用这一个形状，
+ * 扫描进来的普通目录与 `.` 开头的隐藏目录同样走这里（E231 同一口径）。
+ * E231：封面不再叠类型角标与时长（用户实报遮挡封面）——角标挪标题前（[NpListRow] 的
+ * kindIsAudio），时长并进元信息行放在文件大小之前。
  */
 @Composable
 internal fun MediaListRow(
@@ -1688,6 +1691,8 @@ internal fun MediaListRow(
     val meta = remember(item) {
         buildList {
             item.episodeLabel?.let { add(it) }
+            // E231：时长从封面右下角挪进元信息行，置于大小之前
+            if (item.durationMs > 0) add(formatTimestamp(item.durationMs))
             if (item.sizeBytes > 0) add(formatFileSize(item.sizeBytes))
             formatRelativeDate(item.addedAtMs).takeIf { it.isNotEmpty() }?.let { add(it) }
             item.videoCodec?.let { add(it) }
@@ -1702,17 +1707,16 @@ internal fun MediaListRow(
         compact = compact,
         folderTag = item.folder,
         folderTagIsAudio = isAudio,
+        kindIsAudio = isAudio,
         cover = {
             NpCoverBox(
                 placeholderHue = hue,
                 progress = progress.takeIf { it > 0.01f },
                 isAudio = isAudio,
-                // 设计稿 `.lr-kind`：列表行的小角标只有图标（放不下「视频」二字），
-                // 播放圆钮同理省略（整行本身就是点击目标）
-                compactKindTag = true,
+                // E231：类型角标挪到标题前、时长挪进元信息行——封面不再叠任何角标，
+                // 播放圆钮也照旧省略（整行本身就是点击目标）
+                showKindTag = false,
                 showPlayGlyph = false,
-                durationText = formatTimestamp(item.durationMs)
-                    .takeIf { item.durationMs > 0 },
                 tintRing = NpMediaColor.accent(hue).copy(alpha = 0.30f),
             ) {
                 MediaCover(item = item, hue = hue)
