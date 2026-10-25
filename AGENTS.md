@@ -1,7 +1,8 @@
 # AGENTS.md — None Player 工程代理操作手册
 
 > 面向在本仓库工作的 AI 代理（也适用于人类协作者）。所有条目来自真实踩坑记录
-> （案例编号 Exxx 对应 `docs/完成文档.md`；无编号的来自 2026-10-25 会话实录）。
+> （案例编号 Exxx 对应 `docs/完成文档.md`；无编号的来自 2026-10-25 会话实录；
+> 标注 E231 实录的来自 2026-10-26 会话）。
 > 表述为公式化模板：**症状 → 病因 → 排查 → 修复 → 预防**。
 
 ---
@@ -40,6 +41,10 @@
 ```
 
 收数公式：测试数（扫 `**/build/test-results/**/TEST-*.xml` 的 tests/failures/errors/skipped）+ lint issue 数（`**/build/reports/lint-results-*.xml` 的 `<issue ` 计数）+ APK 字节数。写进完成文档。
+
+**release 产物落点（E231 起）**：`assembleRelease` 收尾自动把 `*.apk` 原样拷到
+`None Player/app/release/`（覆盖写，始终最新一轮；.gitignore 已排除）——装机/
+取证/交付一律取这里，不再摸 `build/outputs/apk/release/` 深层路径。
 
 ---
 
@@ -132,6 +137,18 @@ scanner-local 源码才迫使真跑，暴露 bench 挂死。
 症状：统计出的套件/项数与本次运行对不上。
 病因：build/test-results 里混着历史运行的 XML（UP-TO-DATE 不刷新）。
 修复：统计前核 mtime，或 clean 后统计；引用读数时注明轮次。
+```
+
+### E-B6 APK 字节相同 ≠ 没编译（E231 实录）
+```
+症状：改了源码，两轮 assembleRelease 字节数一模一样（本会话两度出现），
+怀疑"改动没进包"。
+病因：R8 + 打包是确定性输出——同输入同字节，体积差不是"编没编"的判据。
+排查：不解包猜。python zipfile 读 dex 找本次新增字符串（新 UI 文案最可靠）：
+  import zipfile; any('新文案'.encode() in z.read(n) for n in z.namelist() if n.endswith('.dex'))
+配合 APK mtime + 门禁日志 executed 任务数判断新鲜度。
+预防：验证"装上的是新包"一律用内容判据；完成文档写体积读数时同字节
+不等于异常（与"同字节用哈希+mtime+全量 executed 三件套核对"口径互证）。
 ```
 
 ---
@@ -254,6 +271,46 @@ release 非 debuggable：应用 internal filesDir 无法 adb pull（E216 教训�
 推 /sdcard/Movies 后 MediaStore 常自动入库；查 id 用：
 adb shell "content query --uri content://media/external/video/media --where \"_display_name='x.mp4'\""
 （projection 参数在这台设备上报 Invalid column——不用 projection。）
+```
+
+### E-D12 adb 注入双击的 40ms 下限（E231 实录 ★）
+```
+症状：input tap ×2 / motionevent 连发后双击不触发；单击行为时灵时不灵。
+病因：两头都有窗——两次独立 `input` 进程间隔可能 >300ms（doubleTapTimeout，
+被判成两次单击）；而一条 shell 里连发（每段仅 ~20ms）又低于 doubleTapMinTime
+=40ms，识别器（isSecondTapValid）显式拒掉过快的第二次按下。
+修复：一条 shell 内注入、中间 sleep 0.1：
+  adb shell "input motionevent down X Y; input motionevent up X Y; sleep 0.1; \
+             input motionevent down X Y; input motionevent up X Y"
+预防：手势取证的注入间隔写 100ms；"注入了没反应"先查时间窗，再查落点（E-D13）。
+```
+
+### E-D13 取证点击的浮层/前台陷阱 ★（E231 实录）
+```
+症状：坐标正确、注入正常，但界面"没反应"；或状态读数自相矛盾。
+病因（四类，按出现频率）：
+  ① 屏上有浮层（信息卡/菜单/系统弹窗）把事件全吃掉——点全落在浮层上；
+  ② 播放器控制层可见时，单击被"收控制层"消费，双击/拖动到不了舞台层；
+  ③ 中途按了返回键，播放页早被退出，后续点击全打在库页/迷你条上
+     （迷你条的「暂停」desc 会混进 grep 计数，造成"控件在"的假象）；
+  ④ 坐标按旧 dump 的版式算——转屏/分栏/浮层开合后坐标漂移（同 E-D4/E-D7）。
+排查：每步先 screencap 肉眼确认前台与浮层，再操作；
+  播放状态判定用 dumpsys media_session 的 PlaybackState（PAUSED/PLAYING），
+  不用 UI 猜；区分播放形态用形态特有 desc（全屏有「停止播放」，内嵌没有；
+  迷你条与全屏都有「暂停」——计数前先确认在哪个形态）。
+预防：连续 UI 操作每步以最新 dump/截图为据；一次取证的点击序列写成
+  "dump → 算中心 → tap → dump 校验"的闭环，不凭记忆连点。
+```
+
+### E-D14 adb push 的设备路径同样被 MSYS 改写（E231 实录）
+```
+症状：adb push x.mp4 /sdcard/Movies/ 报
+  "failed to copy ... to 'C:/Program Files/Git/sdcard/...'"。
+病因：E-D1 同源——MSYS 路径改写不只作用于 shell 内参数，push/pull 的
+  设备侧路径照样中招。
+修复：MSYS_NO_PATHCONV=1 adb push x.mp4 /sdcard/Movies/
+预防：凡 adb 命令（shell/push/pull/install）带设备侧绝对路径，
+  一律 MSYS_NO_PATHCONV=1 或整段引号（E-D1），两招都行但要有一招。
 ```
 
 ---
@@ -381,4 +438,44 @@ adb -s <dev> shell "cat /data/local/tmp/ui.xml" | tr '<' '\n' | grep 'text="目�
 - 删除确认/清空确认已有 BackHandler（A27/E220），别重复加。
 - `READ_MEDIA_VISUAL_USER_SELECTED` 判据已全链实现（REV-13）。
 - 无 idx1 AVI `isSeekable=false` 是既定口径（超级索引路径已由 E227 接上）。
+- 双击 = 播放/暂停（E231 裁定，三区一律；键盘 ±5s/±30s 不变）；「双击步长」
+  设置条目已退役，AppSettings 里的流程与键只作历史兼容，勿再引用。
+- 拖进度条不暂停（E231 裁定，边拖边播）；`onScrubStart` 不得再 pause，
+  右栏/内嵌（InlinePlayerSurface）与全屏（PlayerScreen）两处实现同口径。
+- release APK 统一落 `None Player/app/release/`（E231 起，构建收尾自动拷贝）。
 - 附录 A（任务文档末节）列了全部"明确不做"，开任务前先查，防止重开已裁定项。
+
+---
+
+## 12. 错误目录 G：Compose / 外壳 / 播放链（E231 增补）
+
+### E-C1 分档分支互换丢 rememberSaveable（movableContentOf 收口）★
+```
+症状：竖屏进文件夹 N 层 → 转横屏，直接退回总文件夹根层（层级/筛选/滚动全丢）。
+病因：外壳按档位写的 if/else 两套版式（底部栏 Scaffold ↔ Rail Row）互换时，
+  公共子树（内层 NavHost）被整体销毁重建——rememberSaveable 只在导航栈
+  saveState/restoreState 时存档，普通组合销毁无人收。
+排查：① 复现前先查档位判定（NpWindowInfo）：Compact↔非Compact 才会翻分支，
+  平板两档都非 Compact 时复现失败——用 `wm density 640` 把竖屏压进 Compact
+  等效复现（真机 60dd2f94 实录）；② 状态归属谁——rememberSaveable 在
+  Tab 页组合里，外壳分支翻转对它就是"页面被拆了"。
+修复：movableContentOf 包住公共子树（内层 NavHost），两分支间携带状态搬移；
+  落点 modifier 经数据类参数传入，不闭包直捕（navHost lambda 每次重组换新
+  实例，闭包会钉死首帧的动画参数）。
+预防：外壳级"两套版式共享的内容"一律 movableContent；新增形态分支前先审
+  页内状态的归属与存档路径。
+```
+
+### E-C2 同一语义多处实现——修"行为"先 grep 全部实现点 ★
+```
+症状：修了 PlayerScreen.onScrubStart 的"拖动暂停"，真机横屏右栏拖动中途
+  仍是 PAUSED——首轮修复被真机抓包。
+病因：同一行为（拖进度条的生命周期）在右栏/内嵌播放面是独立实现
+  （InlinePlayerSurface 自带一份 scrub 状态机），只修全屏那份等于没修全。
+排查：改语义前先把关键回调的全部实现点找齐：
+  grep -rn "onScrubStart = \|if (scrubWasPlaying) player.pause()" plugins/*/src/main
+  （赋值点 + 同名局部函数 + 各自的 pause/play 配对都要过目。）
+修复：两处同口径改齐，注释互指（"与 PlayerScreen 同口径，E231"）。
+预防：行为级修改的验收必须覆盖各形态（全屏 / 右栏 / 内嵌 / 仅听）——
+  单形态通过不算过；真机取证时专门换形态复测一次。
+```
