@@ -219,6 +219,20 @@ internal val SPEED_PORTRAIT_PRESETS = listOf(0.25f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f
 internal const val SPEED_FINE_STEP = 0.05f
 internal val SPEED_FINE_RANGE = 0.25f..4.0f
 
+/**
+ * 括号键（`[` / `]`）在六档倍速表上步进（E228）：落在档上 → 移到相邻档；
+ * 档间值（0.05 微调的产物）→ 先就近归表再步进；到端返回端档（不出表、不越界）。
+ * 端外值（低于首档的微调值）按端档处理——「下调」不会跳出表外。
+ */
+internal fun stepSpeedPreset(current: Float, up: Boolean): Float {
+    val eps = 1e-4f
+    return if (up) {
+        SPEED_PRESETS.firstOrNull { it > current + eps } ?: SPEED_PRESETS.last()
+    } else {
+        SPEED_PRESETS.lastOrNull { it < current - eps } ?: SPEED_PRESETS.first()
+    }
+}
+
 /** 拖动预览 seek 的最小间隔：更密会在本地大文件上反复解码，更疏则画面不跟手 */
 private const val SCRUB_PREVIEW_INTERVAL_MS = 200L
 
@@ -2027,7 +2041,7 @@ fun PlayerScreen(
                 if (stageLockTier.fullLocked) return@onPreviewKeyEvent true
                 // A27：子节点（顶栏/底栏/面板里的可聚焦控件）持焦时，方向键交给焦点系统做
                 // 遍历，空格/回车交给控件做激活；根节点只在"焦点就在自己身上"时承担
-                // seek/音量/播放暂停。Esc/媒体键不受影响（仍然是页面级快捷键）。
+                // seek/音量/播放暂停。Esc/媒体键（E228 起进共用表）不受影响（仍然由根承担）。
                 if (childHasFocus) {
                     when (event.key) {
                         Key.DirectionUp, Key.DirectionDown,
@@ -2039,8 +2053,9 @@ fun PlayerScreen(
                 }
                 // §8.4（E50 P1）九件：空格、←/→ ±5s、Shift+←/→ ±30s、↑/↓ 音量 ±5、
                 // M 静音、F 全屏、L 锁定、Esc 退层、Ctrl+O 打开文件。
-                // `,`/`.` 逐帧与 D-pad 方向导航按 §12 归 P2（§11 第 6 条）。
-                // 会话级四件读 SessionKeys 的共用映射表（E99）：三栏浏览态那份实现
+                // E228 增补：媒体键（PLAY/PAUSE/PLAY_PAUSE/FF/RW/NEXT/PREVIOUS）与
+                // J(-10s)/K(播放暂停)；`,`/`.` 逐帧与 D-pad 方向导航按 §12 归 P2（§11 第 6 条）。
+                // 会话级按键读 SessionKeys 的共用映射表（E99）：三栏浏览态那份实现
                 // 用的是同一张表与同一份步进数字，两处不会再各写一份漂掉。
                 // `Key.keyCode` 是 Long（Compose 1.7 起），映射表按 KeyEvent 的 Int 键码写。
                 // E102 修正：**不能用 Compose 的 `Key.keyCode`**——它在 Android 上是`androidKeyCode shl 32`，`.toInt()` 截出来恒为 0，共享键在这里会全部静默失效
@@ -2055,6 +2070,14 @@ fun PlayerScreen(
                 ) {
                     SessionKeyCommand.PlayPause -> {
                         togglePlay()
+                        true
+                    }
+                    SessionKeyCommand.Play -> {
+                        session.play()
+                        true
+                    }
+                    SessionKeyCommand.Pause -> {
+                        session.pause()
                         true
                     }
                     is SessionKeyCommand.Seek -> {
@@ -2073,16 +2096,44 @@ fun PlayerScreen(
                         toggleMute()
                         true
                     }
+                    SessionKeyCommand.NextTrack -> {
+                        session.next()
+                        true
+                    }
+                    SessionKeyCommand.PreviousTrack -> {
+                        session.previous()
+                        true
+                    }
                     null -> false
                 }
                 if (sessionKeyHandled) {
                     controlsVisible = true
                     return@onPreviewKeyEvent true
                 }
+                // 数字 0-9（含小键盘）：跳到片长 × n/10（E228）。时长读回调执行时的值
+                // （A7#7：组合期快照在 AVI 时长回填/切集后会夹错目标）；时长未知不吞键。
+                digitForKeyCode(event.nativeKeyEvent.keyCode)?.let { digit ->
+                    val target = digitJumpTargetMs(durationState.value, digit)
+                    if (target != null) {
+                        player.seekTo(target)
+                        showGestureHint("跳到 ${digit * 10}%")
+                        controlsVisible = true
+                        return@onPreviewKeyEvent true
+                    }
+                }
                 // 页面级三件（浏览态没有对应能力，不进共用表）：F 全屏、Ctrl+O 打开文件、Esc 退层
+                // E228 增补页级两件：`[`/`]` 六档倍速步进（会话内生效，D4 不持久——与倍速面板同一条 pickSpeed）。
                 when (event.key) {
                     Key.F -> {
                         toggleFullscreen()
+                        true
+                    }
+                    Key.LeftBracket -> {
+                        pickSpeed(stepSpeedPreset(speed, up = false))
+                        true
+                    }
+                    Key.RightBracket -> {
+                        pickSpeed(stepSpeedPreset(speed, up = true))
                         true
                     }
                     Key.O -> {

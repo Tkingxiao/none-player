@@ -65,6 +65,34 @@ class SessionKeysTest {
     }
 
     @Test
+    fun `媒体键进共用表`() {
+        // E228：蓝牙键盘/遥控把媒体键当普通键事件投给焦点窗口，播放页与浏览态同口径认领
+        assertEquals(SessionKeyCommand.PlayPause, routeSessionKey(KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, shiftPressed = false))
+        assertEquals(SessionKeyCommand.Play, routeSessionKey(KeyEvent.KEYCODE_MEDIA_PLAY, shiftPressed = false))
+        assertEquals(SessionKeyCommand.Pause, routeSessionKey(KeyEvent.KEYCODE_MEDIA_PAUSE, shiftPressed = false))
+        assertEquals(SessionKeyCommand.Seek(10_000L), routeSessionKey(KeyEvent.KEYCODE_MEDIA_FAST_FORWARD, shiftPressed = false))
+        assertEquals(SessionKeyCommand.Seek(-10_000L), routeSessionKey(KeyEvent.KEYCODE_MEDIA_REWIND, shiftPressed = false))
+        assertEquals(SessionKeyCommand.NextTrack, routeSessionKey(KeyEvent.KEYCODE_MEDIA_NEXT, shiftPressed = false))
+        assertEquals(SessionKeyCommand.PreviousTrack, routeSessionKey(KeyEvent.KEYCODE_MEDIA_PREVIOUS, shiftPressed = false))
+    }
+
+    @Test
+    fun `J 是快退 10 秒，K 是播放暂停，L 让位锁定`() {
+        assertEquals(SessionKeyCommand.Seek(-10_000L), routeSessionKey(KeyEvent.KEYCODE_J, shiftPressed = false))
+        assertEquals(SessionKeyCommand.PlayPause, routeSessionKey(KeyEvent.KEYCODE_K, shiftPressed = false))
+        // §8.4 设计表 L=锁定（播放页排在锁定吞键之前处理），J/K/L 惯例的 +10s 不抢这颗键；
+        // 同一颗键两个消费面做两件事正是这张表要防的事
+        assertNull(routeSessionKey(KeyEvent.KEYCODE_L, shiftPressed = false))
+    }
+
+    @Test
+    fun `媒体 STOP 不进表`() {
+        // STOP 无中间语义可安放：映射 stop() 会把整个会话拆掉（迷你条/断点上下文消失），
+        // 映射 pause() 又与键面不符——宁可不认，让系统默认路径处理
+        assertNull(routeSessionKey(KeyEvent.KEYCODE_MEDIA_STOP, shiftPressed = false))
+    }
+
+    @Test
     fun `音量档位换算四舍五入而不是截断`() {
         // 15 档设备上一档 ≈6.7%：33%+5%=38% 必须落到 6 档（截断会停在 5 档，"按了没反应"）
         assertEquals(6, volumeIndexFor(15, 38))

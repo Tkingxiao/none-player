@@ -1,0 +1,82 @@
+E228 设备证据汇编（emulator-5554，2026-10-25）
+================================================================
+
+设备：Pixel_Tablet 模拟器（2560x1600/density420/Android 15/API 35）。
+安装：adb install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+（release 29,208,295 B，与 E227 同字节；含 E228 键盘增补全部改动）。
+夹具：np-e220.mp4（30.033s，H.264 1280x720，MediaStore _id=1000000373，
+推送 /sdcard/Movies 自动入库）。深链：
+  adb shell 'am start -a android.intent.action.VIEW -d
+  "noneplayer://player?uri=content%3A%2F%2Fmedia%2Fexternal%2Fvideo%2Fmedia%2F1000000373&fs=1"
+  com.noneplayer.app'
+读数：dumpsys media_session 的 state=PlaybackState 行（position/speed 直读）。
+键注入：adb shell input keyevent <keycode>（普通键码可注入，无 meta 需求——
+审查文档 §7 #1 封存的是 Shift/Ctrl 组合键，本批全部为单键）。
+
+键码：J=38 K=39 L=40 数字3=10 数字8=15 [ =71 ] =72
+媒体：PLAY_PAUSE=85 STOP=86 NEXT=87 PREVIOUS=88 RW=89 FF=90 PLAY=126 PAUSE=127
+
+----------------------------------------------------------------
+1. 视图通路（本批新增：J/K/数字跳转/括号倍速/L 锁定仲裁）
+----------------------------------------------------------------
+  操作                 读数（state/position/speed）
+  t0 播放中            PLAYING  position=22824  speed=1.0
+  K(39) 播放暂停       PAUSED   position=26233  speed=0.0
+  数字8(15) 跳 80%     PAUSED   position=24000  ← 30000×8/10 精确
+  J(38) 快退 10s       PAUSED   position=14000  ← -10000 精确
+  J(38) 再按           PAUSED   position=4000   ← -10000 精确
+  ](72) x1             （暂停态 speed 恒 0，见下条恢复后复验）
+  ](72) x2 → [(71)
+  K(39) 恢复播放       PLAYING  position=4000   speed=1.5
+                       ↑ ]] [ 净效果 1.0→1.5→2.0→1.5，恢复后读数 1.5 = 精确
+  ](72) 上调           PLAYING  position=8924   speed=2.0
+  [(71) 回落           PLAYING  position=14197  speed=1.5
+  [(71) 回落           PLAYING  position=15382  speed=1.0
+  数字3(10) 跳 30%     PLAYING  position=9017   ← 9000 + 墙钟漂移（播放态正常）
+  L(40) 锁定           L 是锁定不是 +10s（§8.4 仲裁，E228 维持）
+  锁定态 数字8(15)     PLAYING  position=12026  ← 未跳 24000：锁定吞键，
+                       位置自然推进（9017+约3s 墙钟），数字键被整页锁吞掉
+  L(40) 解锁
+  解锁后 数字8(15)     BUFFERING position=24000 ← 同一颗键立即精确落 80%
+
+结论：J/K/数字 0-9/括号倍速全部经根节点 onPreviewKeyEvent 命中本批映射；
+stepSpeedPreset 六档步进（1.0→1.5→2.0→1.5→1.0）与 SPEED_PRESETS 逐档吻合；
+锁定态吞键对新增键同样生效（整页锁语义自洽）。
+
+----------------------------------------------------------------
+2. 媒体键（系统→MediaSession 通路，media3 默认档）
+----------------------------------------------------------------
+应用无自定义 MediaSession Callback（onPlay 等走 media3 默认），媒体键被系统
+在输入管线层截走发给活动会话，不经过视图层——本批视图通路的新增映射（同键
+码）与其并存不冲突（会话活动时系统先截；无活动会话/桌面形态时键落到窗口由
+本批映射接住）。
+
+  操作                 读数
+  （片尾）             STOPPED  position=30006
+  媒体PLAY(126)        PLAYING  position=1     ← 片尾态按播放从片头重播
+  媒体PAUSE(127) 交验  （上一行之前 PAUSED position=1530，127/126 单向语义正确）
+  媒体PLAY_PAUSE(85)   PAUSED   position=1530
+  媒体PLAY_PAUSE(85)   PLAYING  position=1543
+  媒体FF(90)           PLAYING  position=13215 ← +15s：media3 会话默认
+                       （forward 15s / rewind 10s；视图通路 J 是 ±10s，
+                        两通路不同时生效，档位差异记录在案）
+  媒体RW(89)           PLAYING  position=3667  ← -10s+墙钟
+  媒体NEXT(87)         PLAYING  position=3667  ← 单条队列空操作、不崩
+
+----------------------------------------------------------------
+3. 稳定性
+----------------------------------------------------------------
+logcat 全程 0 条 FATAL EXCEPTION（AndroidRuntime 命中均为 input 命令的 shell
+进程启动日志）；无 Playback error；session 状态机（PLAYING/PAUSED/BUFFERING/
+STOPPED）随键序正确迁移。
+
+----------------------------------------------------------------
+边界
+----------------------------------------------------------------
+- 媒体键在「会话不活动」场景（无会话冷窗）由视图通路接住的行为未实测——
+  模拟器上媒体键恒被系统截走（85/126/127/90/89 全部体现为会话通路读数），
+  视图通路对该键码的兜底由 JVM 映射表单测钉住（SessionKeysTest）。
+- 媒体 FF/RW 会话通路 +15s/-10s（media3 默认）与视图通路 J ±10s 档位不一致，
+  属两套来源（系统会话默认 vs 键盘惯例），未强行统一（改 media3 默认需另立
+  任务并在无会话态复验）。
+- 实体键鼠/TalkBack 走查仍缺（任务文档条目保留，审查文档 §7 #1/#8 同源封存）。

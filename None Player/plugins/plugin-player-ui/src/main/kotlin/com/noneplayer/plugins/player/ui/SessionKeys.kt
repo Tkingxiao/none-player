@@ -24,6 +24,12 @@ internal object SessionKeySteps {
     /** `Shift+←/→` 大步跳转 */
     const val SEEK_LARGE_MS = 30_000L
 
+    /**
+     * 媒体快进/快退键与 `J` 的步进（E228）。键盘惯例取 10 秒：方向键 5 秒 / Shift 30 秒
+     * 之间，单键直达又不至于一按飞过四分之一短片。
+     */
+    const val SEEK_SKIP_MS = 10_000L
+
     /** `↑/↓` 音量步进（百分点） */
     const val VOLUME_STEP = 5
 
@@ -57,23 +63,53 @@ internal object PlayerPagePresence {
 /** 与界面无关的会话指令——映射与执行分离，映射才能被单测覆盖。 */
 internal sealed interface SessionKeyCommand {
     data object PlayPause : SessionKeyCommand
+
+    /** 媒体 PLAY 键：只播不切（停在末尾时先归零，见 [PlaybackSession.play]）。 */
+    data object Play : SessionKeyCommand
+
+    /** 媒体 PAUSE 键：只停不放。 */
+    data object Pause : SessionKeyCommand
+
     data class Seek(val deltaMs: Long) : SessionKeyCommand
     data class Volume(val deltaPercent: Int) : SessionKeyCommand
     data object Mute : SessionKeyCommand
+
+    /** 媒体 NEXT 键：下一集（无下一集时空操作）。 */
+    data object NextTrack : SessionKeyCommand
+
+    /** 媒体 PREVIOUS 键：上一集（无上一集时空操作）。 */
+    data object PreviousTrack : SessionKeyCommand
 }
 
 /**
  * 键码 → 会话指令。不认识的键返回 null（**绝不吞键**：未消费的键还要继续
  * 走系统的默认路径，比如音量键该由系统出条）。
  *
- * `Shift` 只改步进、不改语义。表里**没有** `Esc` / `F` / `Ctrl+O`：
+ * `Shift` 只改步进、不改语义。媒体键（E228）：蓝牙键盘/遥控的媒体键不会都进
+ * MediaSession——不少外设把 PLAY/FF/NEXT 当普通键事件投给焦点窗口，这里认领后
+ * 两个消费面（播放页 / 三栏浏览态兜底）同口径。表里**没有** `Esc` / `F` / `Ctrl+O`：
  *  - `Esc` 在窗口层就被系统当成"返回"投递掉了（`super.dispatchKeyEvent` 吃掉，
  *    兜底派发根本收不到），而浏览态的退出点本来就是返回键与右栏顶栏那颗返回钮；
  *    播放页要的又是"逐层关弹层"，属页面级，留在 `PlayerScreen` 里。
  *  - `F`（全屏）与 `Ctrl+O`（打开文件）需要导航与文件选择器，只有播放页做得到。
+ *
+ * `L` 也不进表（E228 裁定）：J/K/L 惯例里的 `+10s` 与 §8.4 设计表的 `L=锁定`
+ * 撞键——锁定是设计规格且"排在锁定吞键之前"的生命线（锁死后的唯一键盘出口），
+ * `+10s` 由 `→`/媒体 FF 承担，不抢。
  */
 internal fun routeSessionKey(keyCode: Int, shiftPressed: Boolean): SessionKeyCommand? = when (keyCode) {
     KeyEvent.KEYCODE_SPACE -> SessionKeyCommand.PlayPause
+    KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> SessionKeyCommand.PlayPause
+    KeyEvent.KEYCODE_MEDIA_PLAY -> SessionKeyCommand.Play
+    KeyEvent.KEYCODE_MEDIA_PAUSE -> SessionKeyCommand.Pause
+    KeyEvent.KEYCODE_MEDIA_FAST_FORWARD ->
+        SessionKeyCommand.Seek(SessionKeySteps.SEEK_SKIP_MS)
+    KeyEvent.KEYCODE_MEDIA_REWIND ->
+        SessionKeyCommand.Seek(-SessionKeySteps.SEEK_SKIP_MS)
+    KeyEvent.KEYCODE_MEDIA_NEXT -> SessionKeyCommand.NextTrack
+    KeyEvent.KEYCODE_MEDIA_PREVIOUS -> SessionKeyCommand.PreviousTrack
+    KeyEvent.KEYCODE_J -> SessionKeyCommand.Seek(-SessionKeySteps.SEEK_SKIP_MS)
+    KeyEvent.KEYCODE_K -> SessionKeyCommand.PlayPause
     KeyEvent.KEYCODE_DPAD_LEFT ->
         SessionKeyCommand.Seek(-(if (shiftPressed) SessionKeySteps.SEEK_LARGE_MS else SessionKeySteps.SEEK_MS))
     KeyEvent.KEYCODE_DPAD_RIGHT ->
@@ -83,6 +119,32 @@ internal fun routeSessionKey(keyCode: Int, shiftPressed: Boolean): SessionKeyCom
     KeyEvent.KEYCODE_M -> SessionKeyCommand.Mute
     else -> null
 }
+
+/**
+ * 数字键 0-9（主键盘 + 小键盘）→ 数字，其它键码返回 null（E228 数字跳转）。
+ * 跳转语义（片长 × n/10）是页面级的（要时长与 seek），但键位识别放这里，
+ * 与共用表同址维护，避免播放页再开一份自己的键码表。
+ */
+internal fun digitForKeyCode(keyCode: Int): Int? = when (keyCode) {
+    KeyEvent.KEYCODE_0, KeyEvent.KEYCODE_NUMPAD_0 -> 0
+    KeyEvent.KEYCODE_1, KeyEvent.KEYCODE_NUMPAD_1 -> 1
+    KeyEvent.KEYCODE_2, KeyEvent.KEYCODE_NUMPAD_2 -> 2
+    KeyEvent.KEYCODE_3, KeyEvent.KEYCODE_NUMPAD_3 -> 3
+    KeyEvent.KEYCODE_4, KeyEvent.KEYCODE_NUMPAD_4 -> 4
+    KeyEvent.KEYCODE_5, KeyEvent.KEYCODE_NUMPAD_5 -> 5
+    KeyEvent.KEYCODE_6, KeyEvent.KEYCODE_NUMPAD_6 -> 6
+    KeyEvent.KEYCODE_7, KeyEvent.KEYCODE_NUMPAD_7 -> 7
+    KeyEvent.KEYCODE_8, KeyEvent.KEYCODE_NUMPAD_8 -> 8
+    KeyEvent.KEYCODE_9, KeyEvent.KEYCODE_NUMPAD_9 -> 9
+    else -> null
+}
+
+/**
+ * 数字跳转目标位置：片长 × n/10。时长未知（≤0，装载中/直播型）返回 null——
+ * 没有目标可去就不吞键，与「未知时长双击拒绝」同口径。
+ */
+internal fun digitJumpTargetMs(durationMs: Long, digit: Int): Long? =
+    if (durationMs <= 0L) null else durationMs * digit / 10L
 
 /**
  * 非播放页时的会话快捷键载体（E99）。
@@ -114,6 +176,8 @@ internal class BrowseSessionKeys(
         if (session.nowPlaying.value == null) return false
         when (command) {
             SessionKeyCommand.PlayPause -> session.toggle()
+            SessionKeyCommand.Play -> session.play()
+            SessionKeyCommand.Pause -> session.pause()
             is SessionKeyCommand.Seek -> {
                 val duration = player.durationMs.value.coerceAtLeast(0L)
                 player.seekTo((player.positionMs.value + command.deltaMs).coerceIn(0L, duration))
@@ -128,6 +192,9 @@ internal class BrowseSessionKeys(
                     setVolumePercent(if (lastAudiblePercent > 0) lastAudiblePercent else SessionKeySteps.VOLUME_RESTORE_PERCENT)
                 }
             }
+            // 媒体 NEXT/PREVIOUS：切集带断点落史，与会话两侧（选集面板/迷你条）同一条路
+            SessionKeyCommand.NextTrack -> session.next()
+            SessionKeyCommand.PreviousTrack -> session.previous()
         }
         return true
     }
