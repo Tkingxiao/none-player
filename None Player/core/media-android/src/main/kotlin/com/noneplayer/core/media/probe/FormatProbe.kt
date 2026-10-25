@@ -389,7 +389,12 @@ object FormatProbe {
             }
             if (result == Extractor.RESULT_SEEK) {
                 val position = holder.position
-                if (position < 0 || (totalLength > 0 && position >= totalLength)) break
+                // E227：`== totalLength` 不能截断——无 idx1 的 OpenDML AVI 的 movi 就是
+                // 最后一个 chunk，提取器要去 movi 尾**读一次 EOF** 才能确定「没有 idx1」
+                // 并回落超索引/扫描（真机实锤：守卫截断后 0 格式 → 每次打开都弹
+                // 「没有解析到受支持的视频编码」失败面板，画面却在面板后面正常播）。
+                // 只拦 `> totalLength` 的越界寻位；恰在文件尾时读一步立刻 EOF，无成本。
+                if (position < 0 || (totalLength > 0 && position > totalLength)) break
                 // A1 收口后 SEEK 只是 channel.position()，不再 close+open
                 runCatching { channel.position(position) }
                 input = DefaultExtractorInput(
@@ -514,7 +519,9 @@ object FormatProbe {
                 }
                 if (result == Extractor.RESULT_SEEK) {
                     val position = holder.position
-                    if (position < 0 || (totalLength != null && position >= totalLength)) break
+                    // 与 probeOnChannel 同口径：恰在文件尾的 SEEK 放行（E227，ODML 无
+                    // idx1 的 EOF 探测需要它），只拦越界。
+                    if (position < 0 || (totalLength != null && position > totalLength)) break
                     // 重开取随机访问，避免 skip 扫全文件（moov 在尾部的 MP4）。
                     // A1 记一笔做不到的事：`DataSource` 接口面上**没有** `seek`/`canSeekAt`
                     // （那两个只在 `BaseDataSource` 上，而 `DefaultDataSource.Factory()

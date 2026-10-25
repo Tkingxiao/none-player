@@ -26,12 +26,52 @@ import kotlin.math.abs
  * [wmvVideoMimeForFourcc]）。
  *
  * 白名单外 fourcc 的 AVI 在 [sniff] 返回 false，仍由 [com.homesoft.exo.extractor.AviExtractorsFactory] 解。
- * 时间戳用 strh 的 dwScale/dwRate；有 idx1 时按关键帧做 SeekMap。
+ * 时间戳用 strh 的 dwScale/dwRate。索引优先级：idx1 → **OpenDML 超级索引**（strl 里的
+ * `indx` 指到 movi 内/外的 `ix##` 块，条目 DELTAFRAME 位给真关键帧——E204 的「可拖待超级
+ * 索引」）→ 全量扫描（关键帧是猜的，不可拖）。
  */
 @OptIn(UnstableApi::class)
 class Wmv2AviExtractor : Extractor {
 
-    private enum class Phase { HEADER, INDEX, VERIFY, BUILD, EMIT, SAMPLE }
+    private enum class Phase { HEADER, INDEX, VERIFY, SUPER, BUILD, EMIT, SAMPLE }
+
+    /** 超级索引路径的子步：读一个 ix## 块 → 验基址（读首条目标 chunk 的 fourcc 对账） */
+    private enum class SuperStep { READ_IX, VERIFY }
+
+    /**
+     * strl 里的 `indx`（AVI_INDEX_OF_INDEXES）：每条 entry 16 字节里的前 8 字节是一个
+     * `ix##` 块的**绝对文件偏移**。[chunkId] 是本流的媒体 chunk id（如 `'00dc'`），
+     * 读 ix## 块时用来对账。
+     */
+    private class SuperIndexRef(val chunkId: Int, val offsets: LongArray)
+
+    /**
+     * 超级索引路径上单条流的条目收集器：`ix##` 块逐块读入、按块落进这里，最后按绝对
+     * 偏移归并进样本表。[delta] 是 OpenDML 的 AVISTDINDEX_DELTAFRAME 位（置位 = 差分帧，
+     * 清零 = 关键帧——与 idx1 的 0x10「置位才是关键帧」方向相反）。
+     */
+    private class SuperCollector {
+        var offset = LongArray(1024)
+            private set
+        var size = IntArray(1024)
+            private set
+        var delta = BooleanArray(1024)
+            private set
+        var count = 0
+            private set
+
+        fun add(off: Long, sz: Int, d: Boolean) {
+            if (count == offset.size) {
+                offset = offset.copyOf(count * 2)
+                size = size.copyOf(count * 2)
+                delta = delta.copyOf(count * 2)
+            }
+            offset[count] = off
+            size[count] = sz
+            delta[count] = d
+            count++
+        }
+    }
 
     private class StreamInfo(
         val index: Int,
@@ -52,6 +92,8 @@ class Wmv2AviExtractor : Extractor {
         /** E204：非视频流的整段 WAVEFORMATEX——WMA 族解码器 open 必需的 extradata */
         val audioExtra: ByteArray?,
         val bitsPerSample: Int,
+        /** OpenDML 超级索引（strl 的 indx）；null = 该流没有或不可用 */
+        val superIndex: SuperIndexRef? = null,
     )
 
     /**
@@ -162,6 +204,31 @@ class Wmv2AviExtractor : Extractor {
     /** idx1 的 16 字节记录位（流式解析复用，不整段分配 payload） */
     private val idxRecord = ByteArray(16)
 
+    // ---- OpenDML 超级索引路径（indx → ix##）----
+    /** 带可用超级索引的流（streams 下标），恒按流序推进 */
+    private val superOrder = mutableListOf<Int>()
+    /** 每流一个收集器，key = streams 下标 */
+    private val superData = mutableMapOf<Int, SuperCollector>()
+    private var superStreamPos = 0
+    private var superIxPos = 0
+    private var superStep = SuperStep.READ_IX
+    /** 基址是否已对过账（首个 ix 块的候选基址命中 dwChunkId 之后恒用「写值+增量」） */
+    private var superVerified = false
+    /** 工作基址 - ix 头写的 qwBaseOffset（对账时定下，后续 ix 块沿用） */
+    private var superBaseDelta = 0L
+    private var superTry = 0
+    private var ixReadAt = -1L
+    private var superWrittenBase = 0L
+    private var superChunkId = 0
+    private var superEntryCount = 0
+    /** 当前 ix 块的条目临时区（验证通过才落进 SuperCollector，复用不逐块分配） */
+    private var superTempOff = LongArray(0)
+    private var superTempSize = IntArray(0)
+    /** ix 头读取位与单条 entry 位（每块复用） */
+    private val ixHeader20 = ByteArray(20)
+    private val ixEntry8 = ByteArray(8)
+    private val four4 = ByteArray(4)
+
     /** chunk 头读取位（SAMPLE 阶段每帧复用） */
     private val header8 = ByteArray(8)
 
@@ -193,6 +260,7 @@ class Wmv2AviExtractor : Extractor {
             Phase.HEADER -> readHeader(input, seekPosition)
             Phase.INDEX -> readIndex(input, seekPosition)
             Phase.VERIFY -> verifyBase(input, seekPosition)
+            Phase.SUPER -> superIndexStep(input, seekPosition)
             Phase.BUILD -> buildByScan(input, seekPosition)
             Phase.EMIT -> emit(seekPosition)
             Phase.SAMPLE -> readSample(input, seekPosition)
@@ -242,6 +310,15 @@ class Wmv2AviExtractor : Extractor {
         keyframesReliable = false
         hasKeyframes = false
         samplesOffsetSorted = true
+        superOrder.clear()
+        superData.clear()
+        superStreamPos = 0
+        superIxPos = 0
+        superStep = SuperStep.READ_IX
+        superVerified = false
+        superBaseDelta = 0L
+        superTry = 0
+        ixReadAt = -1L
         tracks.clear()
         sampleCursor = 0
         emitted = false
@@ -283,8 +360,16 @@ class Wmv2AviExtractor : Extractor {
                 "movi" -> {
                     moviFccPos = input.position - 4
                     moviDataStart = input.position
-                    moviEnd = AviChunk.listEnd(chunkStart, size, inputLength(input))
+                    val length = inputLength(input)
+                    moviEnd = AviChunk.listEnd(chunkStart, size, length)
                     if (streams.none { it.videoMime != null }) return Extractor.RESULT_END_OF_INPUT
+                    if (length != AviChunk.UNKNOWN_LENGTH && length > 0L && moviEnd >= length) {
+                        // movi 已经是文件尾：idx1（在 movi 之后）不可能存在，不再 seek 到
+                        // moviEnd 白读一次 EOF——E227 真机实锤探测驱动的 SEEK 守卫把「恰好
+                        // 到文件尾」当终点，0 格式 → 每次打开都误弹「编码不支持」面板。
+                        // 已知长度时直接进超索引/扫描；长度未知才保留 EOF 探测。
+                        return startSuperIndexOrScan(holder)
+                    }
                     phase = Phase.INDEX
                     holder.position = moviEnd
                     return Extractor.RESULT_SEEK
@@ -330,7 +415,7 @@ class Wmv2AviExtractor : Extractor {
             readFully(input, bytes)
             bytes
         } catch (_: EOFException) {
-            return startScan(holder)
+            return startSuperIndexOrScan(holder)
         }
         val id = fcc(hdr, 0)
         val size = u32(hdr, 4)
@@ -349,12 +434,37 @@ class Wmv2AviExtractor : Extractor {
                 )
                 remaining -= 16
             }
-            if (rawIndex.count == 0) return startScan(holder)
+            if (rawIndex.count == 0) return startSuperIndexOrScan(holder)
             baseTry = 0
             phase = Phase.VERIFY
             return Extractor.RESULT_CONTINUE
         }
-        return startScan(holder)
+        return startSuperIndexOrScan(holder)
+    }
+
+    /**
+     * 无 idx1（或 idx1 对不上账）时的第二级索引：hdrl 各流 strl 里的 `indx` 超级索引
+     * 指向 `ix##` 块，条目带真关键帧位。任一流带可用 indx 就走这条路；一个都没有才
+     * 回全量扫描。走法：逐流逐块 seek 到 indx 记的绝对偏移读 ix##，基址对账后条目落
+     * 进每流收集器，全部读完按偏移归并（materializeSuper）。
+     */
+    private fun startSuperIndexOrScan(holder: PositionHolder): Int {
+        superOrder.clear()
+        superData.clear()
+        streams.forEachIndexed { i, s ->
+            if (s.superIndex != null && s.superIndex.offsets.isNotEmpty()) superOrder.add(i)
+        }
+        if (superOrder.isEmpty()) return startScan(holder)
+        superStreamPos = 0
+        superIxPos = 0
+        superStep = SuperStep.READ_IX
+        superVerified = false
+        superBaseDelta = 0L
+        superTry = 0
+        ixReadAt = streams[superOrder[0]].superIndex!!.offsets[0]
+        phase = Phase.SUPER
+        holder.position = ixReadAt
+        return Extractor.RESULT_SEEK
     }
 
     private fun startScan(holder: PositionHolder): Int {
@@ -368,7 +478,7 @@ class Wmv2AviExtractor : Extractor {
 
     private fun verifyBase(input: ExtractorInput, holder: PositionHolder): Int {
         val bases = longArrayOf(moviFccPos, moviDataStart, 0L)
-        if (baseTry >= bases.size) return startScan(holder)
+        if (baseTry >= bases.size) return startSuperIndexOrScan(holder)
         val at = bases[baseTry] + rawIndex.offset[0]
         if (at < 0) {
             baseTry++
@@ -388,6 +498,206 @@ class Wmv2AviExtractor : Extractor {
         }
         baseTry++
         return Extractor.RESULT_CONTINUE
+    }
+
+    // ---- OpenDML 超级索引（Phase.SUPER）----
+
+    private fun superIndexStep(input: ExtractorInput, holder: PositionHolder): Int = when (superStep) {
+        SuperStep.READ_IX -> readSuperIxChunk(input, holder)
+        SuperStep.VERIFY -> verifySuperBase(input, holder)
+    }
+
+    /**
+     * 读一个 `ix##` 块：8 字节块头 + 20 字节 ix 头（wLongsPerEntry=2、
+     * bIndexType=AVI_INDEX_OF_CHUNKS、nEntriesInUse、dwChunkId、qwBaseOffset、保留位）
+     * + n 条 8 字节 entry（相对偏移 + 大小|DELTAFRAME 位）进临时区。任何不合规或读半截
+     * 都放弃整条超索引路径回扫描——超索引只是「省一次全扫」的加速器，不值得为它猜。
+     */
+    private fun readSuperIxChunk(input: ExtractorInput, holder: PositionHolder): Int {
+        if (input.position != ixReadAt) {
+            holder.position = ixReadAt
+            return Extractor.RESULT_SEEK
+        }
+        val streamIx = superOrder[superStreamPos]
+        try {
+            readFully(input, header8)
+            readFully(input, ixHeader20)
+        } catch (_: EOFException) {
+            return superAbandon(holder, "ix header eof")
+        }
+        val longsPer = u16(ixHeader20, 0)
+        val indexType = ixHeader20[3].toInt() and 0xFF
+        val inUse = u32(ixHeader20, 4).toInt()
+        val chunkId = u32(ixHeader20, 8)
+        superWrittenBase = u32(ixHeader20, 12)
+        val declared = u32(header8, 4)
+        if (!isIxFourcc(AviChunk.fourcc(header8, 0)) ||
+            longsPer != IX_LONGS_PER_ENTRY ||
+            indexType != INDEX_OF_CHUNKS ||
+            inUse <= 0 ||
+            inUse > MAX_IX_ENTRIES ||
+            AviChunk.streamIndex(chunkId.toInt()) != streamIx ||
+            declared < IX_HEADER_BYTES + inUse * IX_ENTRY_BYTES
+        ) {
+            return superAbandon(holder, "ix header invalid fourcc=${fcc(header8, 0)} n=$inUse")
+        }
+        if (superTempOff.size < inUse) {
+            val grown = maxOf(inUse, superTempOff.size * 2)
+            superTempOff = LongArray(grown)
+            superTempSize = IntArray(grown)
+        }
+        try {
+            for (i in 0 until inUse) {
+                readFully(input, ixEntry8)
+                superTempOff[i] = u32(ixEntry8, 0)
+                superTempSize[i] = u32(ixEntry8, 4).toInt()
+            }
+        } catch (_: EOFException) {
+            return superAbandon(holder, "ix entries eof")
+        }
+        superChunkId = chunkId.toInt()
+        superEntryCount = inUse
+        superTry = 0
+        superStep = SuperStep.VERIFY
+        return Extractor.RESULT_CONTINUE
+    }
+
+    /**
+     * 基址对账：ix 条目偏移是相对量，muxer 写的 qwBaseOffset 有几种口径（相对 movi
+     * fourcc / 相对 movi 数据起点 / 绝对 0）。与 idx1 的 verifyBase 同一政策——读到首条
+     * entry 指向的 chunk fourcc，与 ix 头的 dwChunkId 对上才算数；对不上换下一个候选，
+     * 全灭就回扫描。对过一次账后（muxer 全文件口径一致）后续 ix 块只试「写值+增量」。
+     */
+    private fun verifySuperBase(input: ExtractorInput, holder: PositionHolder): Int {
+        val base = superBaseCandidate(superTry)
+        if (base == null) return superAbandon(holder, "base verify exhausted")
+        val abs = base + superTempOff[0]
+        if (input.position != abs) {
+            holder.position = abs
+            return Extractor.RESULT_SEEK
+        }
+        try {
+            readFully(input, four4)
+        } catch (_: EOFException) {
+            superTry++
+            return Extractor.RESULT_CONTINUE
+        }
+        if (AviChunk.fourcc(four4, 0) == superChunkId) {
+            superBaseDelta = base - superWrittenBase
+            superVerified = true
+            flushSuperTemp()
+            return advanceSuper(holder)
+        }
+        superTry++
+        return Extractor.RESULT_CONTINUE
+    }
+
+    private fun superBaseCandidate(tryIdx: Int): Long? = if (superVerified) {
+        if (tryIdx == 0) superWrittenBase + superBaseDelta else null
+    } else {
+        when (tryIdx) {
+            0 -> superWrittenBase
+            1 -> moviFccPos
+            2 -> moviDataStart
+            3 -> 0L
+            else -> null
+        }
+    }
+
+    /** 临时区条目按对好的基址换算绝对偏移，落进当前流收集器 */
+    private fun flushSuperTemp() {
+        val streamIx = superOrder[superStreamPos]
+        val collector = superData.getOrPut(streamIx) { SuperCollector() }
+        val abs = superWrittenBase + superBaseDelta
+        for (i in 0 until superEntryCount) {
+            val flags = superTempSize[i]
+            collector.add(
+                abs + superTempOff[i],
+                flags and DELTAFRAME_BIT.inv(),
+                flags and DELTAFRAME_BIT != 0,
+            )
+        }
+    }
+
+    /** 当前 ix 块收尾：推进块游标/流游标；全部读完就归并进 EMIT */
+    private fun advanceSuper(holder: PositionHolder): Int {
+        superIxPos++
+        if (superIxPos >= streams[superOrder[superStreamPos]].superIndex!!.offsets.size) {
+            superStreamPos++
+            superIxPos = 0
+        }
+        if (superStreamPos >= superOrder.size) {
+            materializeSuper()
+            phase = Phase.EMIT
+            return Extractor.RESULT_CONTINUE
+        }
+        ixReadAt = streams[superOrder[superStreamPos]].superIndex!!.offsets[superIxPos]
+        superStep = SuperStep.READ_IX
+        holder.position = ixReadAt
+        return Extractor.RESULT_SEEK
+    }
+
+    private fun superAbandon(holder: PositionHolder, why: String): Int {
+        Log.d(TAG, "wmv2 superidx unusable: $why → scan")
+        superOrder.clear()
+        superData.clear()
+        return startScan(holder)
+    }
+
+    /**
+     * 超级索引归并：每流时间戳按流序算好（视频 ordinal × scale/rate、音频按累计字节
+     * 折块——与 materialize 同口径），再按绝对偏移把所有流归并成**文件序**样本表。
+     * 文件序是 seek 二分与「seek 后两流都从附近继续」的前提（idx1 天然文件序，这里
+     * 归并补齐）；若某流条目偏移乱序，退回 seek 线性扫（与 idx1 路径同一守卫）。
+     */
+    private fun materializeSuper() {
+        samples.clear()
+        keyframesReliable = true
+        samplesOffsetSorted = true
+        val ordinals = IntArray(streams.size)
+        val audioBytes = LongArray(streams.size)
+        val cursors = IntArray(superOrder.size)
+        var merged = 0
+        while (true) {
+            var pick = -1
+            var pickOffset = Long.MAX_VALUE
+            for (s in cursors.indices) {
+                val data = superData[superOrder[s]] ?: continue
+                if (cursors[s] < data.count && data.offset[cursors[s]] < pickOffset) {
+                    pickOffset = data.offset[cursors[s]]
+                    pick = s
+                }
+            }
+            if (pick < 0) break
+            val streamIx = superOrder[pick]
+            val data = superData[streamIx] ?: break
+            val c = cursors[pick]++
+            val stream = streams[streamIx]
+            val scale = stream.scale.coerceAtLeast(1L)
+            val rate = stream.rate.coerceAtLeast(1L)
+            val timeUs: Long = if (stream.videoMime != null || stream.blockAlign <= 0) {
+                val n = ordinals[streamIx]
+                ordinals[streamIx] = n + 1
+                n * 1_000_000L * scale / rate
+            } else {
+                val total = audioBytes[streamIx] + data.size[c]
+                audioBytes[streamIx] = total
+                total / stream.blockAlign * 1_000_000L * scale / rate
+            }
+            samples.add(streamIx, data.offset[c], data.size[c], timeUs, !data.delta[c])
+            merged++
+        }
+        // 收集器与样本表同量级（十几万条 × 流数），建完就放手
+        superData.clear()
+        var prev = Long.MIN_VALUE
+        for (i in 0 until samples.count) {
+            if (samples.offset[i] < prev) {
+                samplesOffsetSorted = false
+                break
+            }
+            prev = samples.offset[i]
+        }
+        Log.d(TAG, "wmv2 superidx samples=$merged streams=${superOrder.size} sorted=$samplesOffsetSorted")
     }
 
     private fun buildByScan(input: ExtractorInput, holder: PositionHolder): Int {
@@ -754,6 +1064,7 @@ class Wmv2AviExtractor : Extractor {
         var rate = 1L
         var length = 0L
         var strf: ByteArray? = null
+        var superIndex: SuperIndexRef? = null
         while (p + 8 <= end) {
             val id = fcc(buf, p)
             val size = u32(buf, p + 4).toInt()
@@ -767,6 +1078,8 @@ class Wmv2AviExtractor : Extractor {
                 length = u32(buf, data + 32)
             } else if (id == "strf") {
                 strf = buf.copyOfRange(data, data + size)
+            } else if (id == "indx") {
+                superIndex = parseSuperIndexRef(buf, data, data + size, index)
             }
             val step = 8 + size + (size and 1)
             if (step <= 0) break
@@ -817,7 +1130,39 @@ class Wmv2AviExtractor : Extractor {
             blockAlign = blockAlign,
             bitsPerSample = bitsPerSample,
             audioExtra = if (!video) strf else null,
+            superIndex = superIndex,
         )
+    }
+
+    /**
+     * strl 里的 `indx`（AVISUPERINDEX，bIndexType=AVI_INDEX_OF_INDEXES）：
+     * wLongsPerEntry=4、每条 16 字节 {qwOffset=ix## 块的**绝对**文件偏移, dwSize,
+     * dwDuration}。dwBase 按规范不参与（超级索引条目是绝对偏移）。dwChunkId 必须是
+     * 本流的媒体 chunk id（`'0Xdc'`/`'0Xwb'`），不一致说明索引错位，直接放弃。
+     */
+    private fun parseSuperIndexRef(buf: ByteArray, start: Int, end: Int, streamIndex: Int): SuperIndexRef? {
+        if (start + 20 > end) return null
+        val longsPer = u16(buf, start)
+        val indexType = buf[start + 3].toInt() and 0xFF
+        val inUse = u32(buf, start + 4).toInt()
+        val chunkId = u32(buf, start + 8)
+        if (longsPer != SUPER_LONGS_PER_ENTRY ||
+            indexType != INDEX_OF_INDEXES ||
+            inUse <= 0 ||
+            inUse > MAX_SUPER_ENTRIES ||
+            AviChunk.streamIndex(chunkId.toInt()) != streamIndex
+        ) {
+            return null
+        }
+        if (start + 20 + inUse * 16L > end) return null
+        val offsets = LongArray(inUse)
+        for (i in 0 until inUse) {
+            val p = start + 20 + i * 16
+            val off = (u32(buf, p + 4) shl 32) or u32(buf, p)
+            if (off <= 0L) return null
+            offsets[i] = off
+        }
+        return SuperIndexRef(chunkId.toInt(), offsets)
     }
 
     private fun skipPad(input: ExtractorInput, size: Long) {
@@ -862,6 +1207,22 @@ class Wmv2AviExtractor : Extractor {
         const val MAX_CHUNK = 32L * 1024 * 1024
         const val KEYFRAME = 0x10L
 
+        // OpenDML 超级索引（AVI MTL File Format v1.02 §7）：AVI_INDEX_OF_INDEXES 的
+        // indx 头 20 字节、条目 16 字节（wLongsPerEntry 恒 4）；AVI_INDEX_OF_CHUNKS 的
+        // ix## 头 20 字节、条目 8 字节（wLongsPerEntry 恒 2），dwSize 最高位是
+        // AVISTDINDEX_DELTAFRAME（置位 = 差分帧，清零 = 关键帧）。
+        const val INDEX_OF_INDEXES = 0x00
+        const val INDEX_OF_CHUNKS = 0x01
+        const val SUPER_LONGS_PER_ENTRY = 4
+        const val IX_LONGS_PER_ENTRY = 2
+        const val IX_HEADER_BYTES = 20L
+        const val IX_ENTRY_BYTES = 8L
+        val DELTAFRAME_BIT: Int = Int.MIN_VALUE
+
+        /** 单个 ix## 块与整份 indx 的条目上限：远超任何真实 muxer 的写法，只防畸形头把内存顶爆 */
+        const val MAX_IX_ENTRIES = 1 shl 20
+        const val MAX_SUPER_ENTRIES = 1 shl 16
+
         /** 扫描就地跳读的 payload 上限：常规样本几 KB～几百 KB；超过按 SEEK 跳过 */
         const val BUILD_INLINE_SKIP_LIMIT = 2L * 1024 * 1024
 
@@ -870,6 +1231,20 @@ class Wmv2AviExtractor : Extractor {
 
         /** media3 没有 WMA 的 MimeTypes 常量；FFmpeg 的解码表按这个 mime 认 wmav1/2 */
         const val AUDIO_WMA = "audio/x-ms-wma"
+    }
+
+    /**
+     * `ix##` 块的 fourcc 形状：`'00ix'`（流号在前，规范写法）或 `'ix00'`（ix 在前，
+     * 少数 muxer 的变体）都认，流号必须十进制两位数字。
+     */
+    private fun isIxFourcc(four: Int): Boolean {
+        val c0 = (four and 0xFF).toChar()
+        val c1 = ((four ushr 8) and 0xFF).toChar()
+        val c2 = ((four ushr 16) and 0xFF).toChar()
+        val c3 = ((four ushr 24) and 0xFF).toChar()
+        fun digit(c: Char) = c in '0'..'9'
+        return (digit(c0) && digit(c1) && c2 == 'i' && c3 == 'x') ||
+            (c0 == 'i' && c1 == 'x' && digit(c2) && digit(c3))
     }
 }
 

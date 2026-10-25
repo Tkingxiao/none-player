@@ -1,0 +1,85 @@
+E227 设备证据汇编（emulator-5554，2026-10-25）
+================================================================
+
+设备：Pixel_Tablet 模拟器（2560x1600/density420/Android 15/API 35）。
+安装：adb install -r "None Player/app/build/outputs/apk/release/app-release.apk"
+（release 29,208,295 B；含 E227 超索引 + 探测 EOF 守卫修复，二次构建）
+夹具：fixtures/avi-odml/np-odml-wmv2-pcm.avi（10 分钟 68,321,724 B，still-image
+WMV2+PCM 48kHz，tools/gen-avi-odml-fixture.py 重组为 OpenDML 容器：
+strl 带 indx、movi 内组间交错 ix00/ix01（每 500 块一个）、**无 idx1**；
+15000 视频帧（源 idx1 关键帧 1250）+ 28125 音频块，87 个 ix 块）
+推送 Movies 后 scan_volume 入库 _id=1000000374。
+
+----------------------------------------------------------------
+1. 修复前：探测误判「没有解析到受支持的视频编码」（真缺陷，非播放链问题）
+----------------------------------------------------------------
+第一版（超索引已实现、探测未修）冷启深链起播：
+
+  FormatProbe: matched=gn4 ch=seekable expectedMime=video/avi … reads=2 formats=0 mimes=[]
+  Wmv2Avi    : wmv2 superidx samples=43125 streams=2 sorted=true
+  Wmv2Avi    : emit 640x360 extra=4 durationUs=600000000
+  PlaybackState{state=PLAYING(3), position=10216…}
+
+——播放链经超索引正常出画推进（ff×3 seek 22s→39s→56s→74s 每按 +17s），
+但探测在 `position >= totalLength` 守卫上被截断：无 idx1 的 ODML 文件 movi 即
+最后一个 chunk，提取器 seek 到 moviEnd 读一次 EOF 以确认「无 idx1」再回落
+超索引——探测驱动把「恰好到文件尾」当终点，0 格式 → transient Unplayable
+（unknownVideoCodec）→ **每次打开都弹「无法播放此文件：没有解析到受支持的
+视频编码」失败面板**（screenshots 对比：失败面板盖着正常播放的彩条画面）。
+用户点「重试」→ 重开 → 重探（再次 0 格式）→ 断点重开循环，会话读数混乱
+（46244 = 持久化断点反复出现）。
+
+根因两层，各修一处：
+① FormatProbe 两路驱动（probeOnChannel/probeViaDataSource）的 SEEK 守卫
+  `position >= totalLength` 改 `position > totalLength`：恰在文件尾放行
+  （读一步立刻 EOF，无成本），只拦越界寻位。
+② Wmv2AviExtractor.readHeader 的 movi 分支：已知文件长度且 moviEnd >= length
+  时不再 seek 到 moviEnd 做 EOF 探测（idx1 在 movi 之后必然不存在），直接进
+  超索引/扫描；长度未知才保留 EOF 探测。
+
+----------------------------------------------------------------
+2. 修复后：探测/播放/可拖全链（同一夹具，冷启深链）
+----------------------------------------------------------------
+  FormatProbe: matched=gn4 ch=seekable … reads=177 formats=2
+               mimes=[video/x-np-wmv2, audio/raw]
+  FormatProbe: decide platform=false ffmpeg=false bitmap=false legacy=true npff=false
+  Wmv2Avi    : wmv2 superidx samples=43125 streams=2 sorted=true
+  Wmv2Avi    : emit 640x360 extra=4 durationUs=600000000
+  PlaybackState{state=PLAYING(3), position=3723, buffered position=600000}
+
+reads=2→177：探测走完 indx→ix## 两级解析（87 个 ix 块逐块读 + 基址对账），
+43125 条样本（15000 视频 + 28125 音频）与夹具逐块对上；600s 时长精确；
+WMV2 判给 legacy 软解（libnplegacy）；buffered 60s 门生效。
+
+seek 压力（媒体键 90=快进 / 89=快退，每按间隔 1.5s，dumpsys 读 position）：
+
+  t0  =15814 → ff1 32917 → ff2 49792 → ff3 66645 → ff4 83648 → ff5 100458
+      → ff6 117333（每按 +16.9s = 15s seek + 1.5s 墙钟，单调前进不回弹）
+  rew1 114176 → rew2 111061 → rew3 107968 → rew4 104874（双向可拖）
+
+压力期间 0 次重开：无新 FormatProbe 行、无新 surface clone、无
+onPlaybackResumption；全程 0 FATAL / 0 onPlayerError。
+截图 screenshots/e227-2026-10-25/emulator-5554/seeked-playing.png
+（seek 后全屏彩条出画、控制层自动隐藏）。
+
+----------------------------------------------------------------
+3. idx1 路径回归（wl-wmv2-regression.avi，1.7MB 10s 带 idx1）
+----------------------------------------------------------------
+  Wmv2Avi : wmv2 samples=719 base=9982 streams=2 idx1=true
+  Wmv2Avi : emit 640x360 extra=4 durationUs=10000000
+  PlaybackState{state=PLAYING(3), position=3081}
+
+——idx1 优先级与 VERIFY 基址路径零变化；快进越过片尾钳位自然 ENDED
+（state=STOPPED position=10022），0 FATAL。
+
+----------------------------------------------------------------
+4. 边界与备注
+----------------------------------------------------------------
+- 模拟器无真实 (60dd2f94) 真机在场；seek 手感/拖动条逐帧走查未做，
+  seek 能力由媒体键 seek 的位置读数作证（E204 同口径）。
+- 修复前的失败面板截图由用户会话内提供（面板盖着正常播放的画面），
+  修复后同一文件无面板；未单独复摄修复前截图。
+- ASP 侧（Media3Avi 路径）无 idx1 正片的取证仍留任务文档（本批只动
+  Wmv2AviExtractor 通路）。
+- 首轮构建曾把夹具 push 到 MSYS 路径改写产物（C:/Program Files/Git/sdcard），
+  已清理；后续 push 均 MSYS_NO_PATHCONV=1（e218 教训的又一形态）。
