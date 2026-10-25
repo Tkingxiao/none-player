@@ -249,6 +249,16 @@ private const val ORIENTATION_CONFIRM_TIMEOUT_MS = 1200L
 private const val ORIENTATION_CONFIRM_POLL_MS = 150L
 
 /**
+ * 冷启深链（`fs=1`）的确认窗。热态点 ⛶ 时转屏动画几百毫秒内落地，1.2s 足够；
+ * **冷启**时请求发出在首帧绘制之前，HyperOS 3 真机（Redmi rothko / API 36）
+ * 实测 1.2s 内系统尚未完成转屏 → 误判失败 → 回退 UNSPECIFIED 把旋转请求
+ * 撤销掉，深链承诺的"落地即全屏"在自然竖屏设备上永远不成立（平板自然横屏
+ * 从未转过屏，此路径直到 E218 才被真机覆盖）。冷启放宽到 4s：真拒绝（信箱化）
+ * 的场景屏幕形状不会变，只是 toast 晚一点；误判撤销的成本远大于晚提示。
+ */
+private const val ORIENTATION_CONFIRM_COLD_START_MS = 4_000L
+
+/**
  * 播放页方向锁（E48）：UI 只表达**意图**，窗口方向由一个 effect 单点落地，
  * 避免多处命令式 `requestedOrientation` 互相覆盖。
  */
@@ -288,8 +298,11 @@ private fun landscapeApplied(activity: ComponentActivity): Boolean {
 }
 
 /** 轮询到系统把方向落地为止；超时返回最后一次判定结果。 */
-private suspend fun awaitLandscapeApplied(activity: ComponentActivity): Boolean {
-    val deadline = SystemClock.elapsedRealtime() + ORIENTATION_CONFIRM_TIMEOUT_MS
+private suspend fun awaitLandscapeApplied(
+    activity: ComponentActivity,
+    timeoutMs: Long = ORIENTATION_CONFIRM_TIMEOUT_MS,
+): Boolean {
+    val deadline = SystemClock.elapsedRealtime() + timeoutMs
     while (SystemClock.elapsedRealtime() < deadline) {
         if (landscapeApplied(activity)) return true
         delay(ORIENTATION_CONFIRM_POLL_MS)
@@ -752,9 +765,13 @@ fun PlayerScreen(
     // A28 曾建议平板/类 PC 横窗保留状态栏；2026-10-23 复核仍选择本裁定（不区分形态）。
     val isImmersive = isFullscreen
     var orientationLock by rememberSaveable { mutableStateOf(OrientationLock.FollowSensor) }
+    // 本次 Landscape 请求的确认窗时长（热态 1.2s / 冷启深链 4s，见 ORIENTATION_CONFIRM_COLD_START_MS）。
+    // remember 而非 saveable：跨进程恢复后不再有"冷启"语义，回默认窗即可。
+    var orientationConfirmMs by remember { mutableStateOf(ORIENTATION_CONFIRM_TIMEOUT_MS) }
 
-    fun setFullscreen(fullscreen: Boolean) {
+    fun setFullscreen(fullscreen: Boolean, confirmMs: Long = ORIENTATION_CONFIRM_TIMEOUT_MS) {
         orientationLock = if (fullscreen) OrientationLock.Landscape else OrientationLock.Portrait
+        orientationConfirmMs = confirmMs
     }
 
     // 方向只在用户显式操作时锁定；FollowSensor 用 UNSPECIFIED 而非 SENSOR，
@@ -765,8 +782,12 @@ fun PlayerScreen(
         if (inPipMode) return@LaunchedEffect // A14：小窗内冻结方向锁
         val act = activity ?: return@LaunchedEffect
         act.requestedOrientation = orientationLock.requestedOrientation
-        // 请求发出去不等于屏幕真的转了：不转就收回，否则用户拿到一条信箱化的窄带
-        if (orientationLock == OrientationLock.Landscape && !awaitLandscapeApplied(act)) {
+        // 请求发出去不等于屏幕真的转了：不转就收回，否则用户拿到一条信箱化的窄带。
+        // 确认窗按请求来源取：冷启深链给长窗（见 ORIENTATION_CONFIRM_COLD_START_MS），
+        // 热态点按维持 1.2s。
+        if (orientationLock == OrientationLock.Landscape &&
+            !awaitLandscapeApplied(act, orientationConfirmMs)
+        ) {
             orientationLock = OrientationLock.FollowSensor
             toast.show(
                 if (rotationLocked(act)) "方向已被系统锁定，无法横屏"
@@ -823,8 +844,12 @@ fun PlayerScreen(
     }
     // fs=1（详情「全屏观看」/ 右栏 ⛶）：落地即全屏——竖窗先请求横向，
     // 横窗（平板自然方向）本来就是全屏，无需请求。
+    // 冷启时请求发出在首帧之前，确认窗给冷启长档（ORIENTATION_CONFIRM_COLD_START_MS），
+    // 否则 1.2s 窗在转屏完成前过期、请求被撤销，深链在竖屏自然方向设备上永远进不了全屏。
     LaunchedEffect(immersiveEntry, inPipMode) {
-        if (!inPipMode && immersiveEntry && windowIsPortrait) setFullscreen(true)
+        if (!inPipMode && immersiveEntry && windowIsPortrait) {
+            setFullscreen(true, ORIENTATION_CONFIRM_COLD_START_MS)
+        }
     }
 
     /**

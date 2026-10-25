@@ -24,6 +24,11 @@ class PlayerDeepLinkTemplateTest {
         shape("uri", "title", "mime", "id", "from", "fs", "audio"),
         // 内部导航与详情页/右栏：全量形状
         shape("uri", "title", "mime", "id", "from", "fs"),
+        // E218：外部「全屏播放」深链（adb 验收 / 第三方入口）——不补模板时 fs
+        // 会被"仅 uri"模板静默丢掉，冷启落竖屏而非全屏（真机实锤）
+        shape("uri", "title", "mime", "id", "fs"),
+        shape("uri", "id", "fs"),
+        shape("uri", "fs"),
         shape("uri", "title", "mime", "id", "audio"),
         shape("uri", "mime"),
         // 通知/锁屏/PiP 回跳（PlaybackService.deepLinkPendingIntent）：只带 uri 与权威 id

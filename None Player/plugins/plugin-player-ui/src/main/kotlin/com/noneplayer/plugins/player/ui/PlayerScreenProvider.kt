@@ -29,10 +29,18 @@ class PlayerScreenProvider : ScreenProvider {
     // "仅 uri"那条上，`id` 被静默丢掉 → 播放页拿到的 mediaId 为空，
     // 全部 per-media 记忆挤进同一个空键桶（实测孤儿键 `audio_only_` / `display_`）。
     // 通知/锁屏/PiP 回跳的深链正是这个形状（服务侧只带 uri 与 id）。
+    //
+    // E218 补 `fs` 子集：外部深链（adb 验收 / 第三方「全屏播放」入口）的
+    // `?uri=…&fs=1` 同样会落到"仅 uri"模板上，`fs` 被静默丢掉——冷启落竖屏
+    // 播放页而非全屏（Redmi rothko/HyperOS 3 实测 immersiveEntry=false）。
+    // 含 fs 的子集模板由此补上；确认窗时长走 PlayerScreen 的冷启长档。
     override val deepLinks: List<String> =
         listOf(
             "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}&audio={audio}",
             "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&from={from}&fs={fs}",
+            "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&fs={fs}",
+            "noneplayer://player?uri={uri}&id={id}&fs={fs}",
+            "noneplayer://player?uri={uri}&fs={fs}",
             "noneplayer://player?uri={uri}&title={title}&mime={mime}&id={id}&audio={audio}",
             "noneplayer://player?uri={uri}&mime={mime}",
             "noneplayer://player?uri={uri}&id={id}",
