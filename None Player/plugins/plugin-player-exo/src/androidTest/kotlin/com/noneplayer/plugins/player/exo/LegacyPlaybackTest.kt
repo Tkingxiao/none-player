@@ -36,6 +36,10 @@ import org.junit.runner.RunWith
  * 或 `nplegacy` 静态最小 avcodec，按库可用性路由；E239 起两者都算合规）、
  * Simple Profile 仍是平台 mpeg4、MJPEG 仍是 BitmapFactory。
  * 硬件优先用 EXTENSION_RENDERER_MODE_ON。
+ *
+ * E240 起真机也能跑：平台解码器在部分机型以厂商像素格式（高通 UBWC 0x7fa30c04）连
+ * ImageReader(RGBA_8888)，取帧直接抛 UnsupportedOperationException——监听器里吞掉并记因，
+ * 出画判定改用 renderedOutputBufferCount，位图抽样只在拿得到帧的软解/CPU 路径上断言。
  */
 @UnstableApi
 @RunWith(AndroidJUnit4::class)
@@ -52,7 +56,10 @@ class LegacyPlaybackTest {
     fun wmv2RendersFrames() {
         val played = play("np-wmv2.avi", 320, 240)
         assertSoftwareBackend(played.decoder, "wmv2")
-        assertTrue("frames=${played.frames} images=${played.images}", played.frames > 0 && played.images > 0)
+        assertTrue(
+            "frames=${played.frames} images=${played.images} mismatch=${played.surfaceMismatch}",
+            played.frames > 0 && played.images > 0,
+        )
         assertTrue("duration=${played.durationMs}", played.durationMs in 2_500..3_500)
     }
 
@@ -69,7 +76,10 @@ class LegacyPlaybackTest {
         val played = play("xvid-qpel.avi", 320, 240)
         assertSoftwareBackend(played.decoder, "mpeg4")
         assertTrue(played.audioMime, played.audioMime == "audio/mpeg")
-        assertTrue("frames=${played.frames} images=${played.images}", played.frames > 0 && played.images > 0)
+        assertTrue(
+            "frames=${played.frames} images=${played.images} mismatch=${played.surfaceMismatch}",
+            played.frames > 0 && played.images > 0,
+        )
         assertTrue("duration=${played.durationMs}", played.durationMs in 3_500..5_000)
     }
 
@@ -78,14 +88,19 @@ class LegacyPlaybackTest {
         val played = play("xvid-clip.avi", 320, 240)
         assertFalse(played.decoder, played.decoder.contains("nplegacy"))
         assertTrue(played.decoder, played.decoder.contains("mpeg4"))
-        assertTrue(played.frames > 0)
+        // 平台解码器在真机上常以厂商像素格式连 Surface，取不到位图不算失败：
+        // 出画判定看 renderedOutputBufferCount。
+        assertTrue(
+            "frames=${played.frames} images=${played.images} mismatch=${played.surfaceMismatch}",
+            played.frames > 0,
+        )
     }
 
     @Test
     fun wmv2PictureSample() {
         val played = play("np-wmv2.avi", 320, 240, saveFrame = true)
         assertSoftwareBackend(played.decoder, "wmv2")
-        assertTrue(played.images > 0)
+        assertTrue("images=${played.images} mismatch=${played.surfaceMismatch}", played.images > 0)
         assertWmv2ColorBars()
     }
 
@@ -284,8 +299,19 @@ class LegacyPlaybackTest {
         val reader = ImageReader.newInstance(width, height, android.graphics.PixelFormat.RGBA_8888, 3)
         val images = AtomicInteger()
         val saved = AtomicInteger()
+        val mismatch = AtomicReference<String?>(null)
         reader.setOnImageAvailableListener({ imageReader ->
-            val image = imageReader.acquireLatestImage() ?: return@setOnImageAvailableListener
+            // E240：真机平台解码器可能以厂商像素格式连上 Surface（高通 UBWC 0x7fa30c04），
+            // 这时 acquireLatestImage 直接抛 UnsupportedOperationException 把测试进程带走。
+            // 出画判定另有 videoDecoderCounters.renderedOutputBufferCount，位图抽样只是旁证，
+            // 记下不匹配原因后继续跑，不让"取不到像素"演变成"整条套件崩"。
+            val image = try {
+                imageReader.acquireLatestImage()
+            } catch (e: UnsupportedOperationException) {
+                android.util.Log.i("LegacyPlaybackTest", "ImageReader 取帧被生产者格式挡住: ${e.message}")
+                mismatch.compareAndSet(null, e.message)
+                return@setOnImageAvailableListener
+            } ?: return@setOnImageAvailableListener
             try {
                 val n = images.incrementAndGet()
                 // 先判 n 再 compareAndSet：原顺序会在第 1 帧就把闸门锁死，文件永远不落盘
@@ -371,6 +397,7 @@ class LegacyPlaybackTest {
                         frames = player?.videoDecoderCounters?.renderedOutputBufferCount ?: 0,
                         images = images.get(),
                         durationMs = player?.duration ?: -1L,
+                        surfaceMismatch = mismatch.get(),
                     ),
                 )
                 statsLatch.countDown()
@@ -396,6 +423,8 @@ class LegacyPlaybackTest {
         val frames: Int,
         val images: Int,
         val durationMs: Long,
+        /** E240：ImageReader 与生产者像素格式不匹配的原因（null = 能取到帧） */
+        val surfaceMismatch: String? = null,
     )
 }
 
