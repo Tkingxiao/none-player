@@ -2640,6 +2640,11 @@ fun PlayerScreen(
                                             dismiss()
                                             screenshot()
                                         },
+                                        // E237：全屏菜单「详情」→ 文件信息卡（与竖屏信息区同一实现）
+                                        onFileInfo = {
+                                            dismiss()
+                                            fileInfoVisible = true
+                                        },
                                         onSleepPage = { fsMenuPage = FsMenuPage.SLEEP },
                                         contributors = menuContributors,
                                         contributorMedia = overlayMedia,

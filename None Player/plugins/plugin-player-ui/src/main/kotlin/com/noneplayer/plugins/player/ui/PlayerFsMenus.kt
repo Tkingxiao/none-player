@@ -870,6 +870,11 @@ fun FsMainMenuContent(
      * 缺省不渲染，不摆一个点了没反应的假入口。
      */
     showHalfLock: Boolean = false,
+    /**
+     * E237：文件详情入口（打开 FileInfoCard）。全屏形态传；右栏内嵌没有信息卡宿主，
+     * 缺省不渲染——不摆一个点了没反应的假入口。
+     */
+    onFileInfo: (() -> Unit)? = null,
     halfLocked: Boolean = false,
     onHalfLock: () -> Unit = {},
     /** 插件贡献的选项行（[PlaybackMenuContributor]，如弹幕开关）；渲染在列表尾部 */
@@ -900,6 +905,10 @@ fun FsMainMenuContent(
     FsMenuRow(label = "画面", icon = NpIcon.AspectRatio, chevron = true, onClick = { onPage(FsMenuPage.PICTURE) })
     if (hasChapters) {
         FsMenuRow(label = "章节", icon = NpIcon.ListView, chevron = true, onClick = { onPage(FsMenuPage.CHAPTERS) })
+    }
+    // E237：全屏菜单补「详情」入口（与竖屏信息区的「详情」同一张 FileInfoCard）
+    if (onFileInfo != null) {
+        FsMenuRow(label = "详情", icon = NpIcon.Info, onClick = onFileInfo)
     }
     FsMenuRow(label = "画中画", icon = NpIcon.Pip, onClick = onPip)
     if (showHalfLock) {

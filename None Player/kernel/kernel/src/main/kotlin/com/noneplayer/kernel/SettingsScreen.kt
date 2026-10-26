@@ -231,6 +231,11 @@ private fun KernelSettingsScreen(
                 item(key = "gesture-group") {
                     GestureSettingsGroup(gutter = gutter)
                 }
+                // E237：字幕与截图（开关都是 AppSettings 真值；样式说明行指向播放页入口）
+                item(key = "subtitle-capture-head") { EyebrowBlock(text = "字幕与截图", gutter = gutter) }
+                item(key = "subtitle-capture-group") {
+                    SubtitleCaptureSettingsGroup(gutter = gutter)
+                }
 
                 // ---- 插件贡献的设置区块 ----
                 sections.forEach { section ->
@@ -446,6 +451,55 @@ private fun BackgroundScreenSettingsGroup(gutter: Dp) {
         // E236：「音频输出」只读行撤下——输出设备由系统路由决定，应用侧没有可靠的
         // "当前生效设备"读数（AudioManager 只能列候选设备，不能声明哪条在响）；
         // 与其摆一个不保证真值的"系统默认"，不如等引擎诊断通道到位再回来。
+    }
+}
+
+/**
+ * `.eyebrow`：字幕与截图（E237）。
+ *
+ * 两个开关都是 AppSettings 真值，与播放页 ⋯／竖屏「更多」面板同一份数据（同一写路径）；
+ * 「字幕样式」是**说明行**（无 onClick）——颜色/大小/位置等细调在播放页字幕面板里，
+ * 这里只负责把入口说清楚，不复制一排控件、也不摆只读假值。
+ */
+@Composable
+private fun SubtitleCaptureSettingsGroup(gutter: Dp) {
+    val kernel = LocalKernel.current
+    val settings = remember { kernel.services.get<AppSettings>() }
+    val scope = rememberCoroutineScope()
+    val subtitleEnabled by settings.subtitleEnabled.collectAsStateWithLifecycle(initialValue = true)
+    val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
+
+    Column(modifier = Modifier.padding(horizontal = gutter)) {
+        NpSettingRow(
+            title = "开启字幕",
+            subtitle = "外挂 / 内嵌 / 图形字幕的统一总开关",
+            icon = NpIcon.Subtitle,
+            onClick = { scope.launch { settings.setSubtitleEnabled(!subtitleEnabled) } },
+            trailing = {
+                NpSwitch(
+                    checked = subtitleEnabled,
+                    onCheckedChange = { scope.launch { settings.setSubtitleEnabled(it) } },
+                )
+            },
+        )
+        NpSettingRow(
+            title = "允许屏幕截图",
+            subtitle = "关闭后播放页禁止截图与录屏（画中画不可用）",
+            icon = NpIcon.Screenshot,
+            onClick = { scope.launch { settings.setScreenshotBlocked(!screenshotBlocked) } },
+            trailing = {
+                NpSwitch(
+                    checked = !screenshotBlocked,
+                    onCheckedChange = { scope.launch { settings.setScreenshotBlocked(!it) } },
+                )
+            },
+        )
+        NpSettingRow(
+            title = "字幕样式",
+            subtitle = "颜色 / 大小 / 位置 / 描边 / 延时在播放页 ⋯ → 字幕里调整，偏好全局生效",
+            icon = NpIcon.Info,
+            showDivider = false,
+        )
     }
 }
 
