@@ -1,0 +1,38 @@
+E234 设备取证（2026-10-26）——睡眠定时四档与持久化
+设备：60dd2f94（Xiaomi 平板 23043RP34C / 1800×2880 @400dpi）
+安装：E234 release APK `None Player/app/release/app-release.apk` 覆盖安装 Success；
+`dumpsys package lastUpdateTime=2026-10-26 18:36:50`（E-D15 装机新鲜度核对）；
+dex 字面量「播完当前后暂停 / 关闭睡眠定时」在包内。
+夹具：/sdcard/Movies/E233/{01-sleep-a.mp4(90s), 02-sleep-b.mp4(6s), aa-long.mp4(30s)}
+（测试后整目录删除）。
+
+A. 菜单结构（全屏 ⋯ → 睡眠定时）
+  截屏 sleep-subpage.png：子页含「睡眠定时」返回行 + 15 / 30 / 60 分钟 + 播完当前；
+  未开启时无状态说明与关闭行（纯四档）。
+
+B. 「播完当前」行为（核心）
+  1) 选档后回到 MAIN：睡眠行文案变为 **播完当前暂停**（armed 已确认）；
+  2) 90 秒首集 × 后续队列（02-sleep-b 为下一条）放完：
+     `dumpsys media_session` = `PAUSED(2) position=90008 active item id=0
+     description=01-sleep-a.mp4`——**停在末帧、未推进到 02-sleep-b**；
+  3) 收口后再开菜单：睡眠行复位「睡眠定时」（旗标已清、连播按设置真值恢复）。
+
+C. 15 分钟档与持久化
+  1) 选「15 分钟」→ MAIN 行文案 **睡眠 15分**（秒级重算标签，不在组合期读墙钟）；
+  2) `am force-stop` 杀掉进程 → 深链重新起会话（同一媒体）→ 再开菜单，
+     行文案仍为 **睡眠 15分**（到期时刻经 DataStore 双键恢复）；
+  3) 子页「关闭睡眠定时」→ 行复位「睡眠定时」。
+
+D. 两页共用
+  右栏内嵌（InlinePlayerSurface）⋯ 菜单同样渲染「睡眠定时」行（同一
+  FsMainMenuContent + 同一 SLEEP 子页 + 同一会话状态；代码路径共用，
+  读数：pane dump 节点 text=睡眠定时 [2205,1015][2735,1062]）。
+
+稳定性：全程 `adb logcat -d` 检索 0 条 FATAL EXCEPTION。
+边界：
+  - 未做"真实等待 15 分钟到期 / 改系统时钟"的取证：计时到点与"回前台
+    now>=endsAt 立刻暂停"两条路由纯函数（`sleepTimerExpired` 含等号）与
+    ON_START 钩子覆盖，未取真机读数；
+  - 「播完当前」跨进程恢复（进程死时仍 armed → 新引擎关连播）未构造读数，
+    代码在 acquire 两条路径上显式补 `setAutoplayNext(false)`；
+  - 仅听页不放睡眠入口（避免与播放菜单重复），旧"能力尚未落地"注释已订正。

@@ -467,6 +467,9 @@ adb -s <dev> shell "cat /data/local/tmp/ui.xml" | tr '<' '\n' | grep 'text="目�
   新授权目录按 READ|WRITE 持久化，26–29 档申请写存储权限。
 - 音频模式队列内切集沿用当前模式（E232）：`carryAudioModeTo` 是唯一落点，
   别再在 `observeEngineIndex`/`selectQueueIndex` 里按下一集记忆重算。
+- 睡眠定时四档（15/30/60/播完当前）与双键落盘是 E234 交付口径：`SleepPreset` +
+  `startSleepTimer/cancelSleepTimer` 是唯一入口；「播完当前」期间连播被**有意关闭**、
+  结束后按设置真值恢复，别当缺陷；标签必须走 `rememberSleepTimerLabel`（不在组合期读墙钟）。
 - 附录 A（任务文档末节）列了全部"明确不做"，开任务前先查，防止重开已裁定项。
 
 ---
