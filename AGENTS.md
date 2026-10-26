@@ -443,6 +443,14 @@ adb -s <dev> shell "cat /data/local/tmp/ui.xml" | tr '<' '\n' | grep 'text="目�
 - 拖进度条不暂停（E231 裁定，边拖边播）；`onScrubStart` 不得再 pause，
   右栏/内嵌（InlinePlayerSurface）与全屏（PlayerScreen）两处实现同口径。
 - release APK 统一落 `None Player/app/release/`（E231 起，构建收尾自动拷贝）。
+- 全屏按视频方向分两种（E232 裁定）：竖屏视频进竖屏全屏（`OrientationLock.PortraitFullscreen`），
+  横屏/未知进传统横屏全屏；"全屏 ≡ 窗口横向"已不成立——在两侧都判断全屏前先看这个。
+- 迷你条耳机钮是**单向入口**（E232 裁定，只进音频）；退出仅听走音频页「切回视频」，
+  别再给耳机钮加"切回视频"的反向语义。
+- 删除只有**一层应用内确认**（E232 裁定，无 `createDeleteRequest` 系统框）；直连删除依赖
+  「所有文件访问」或 SAF 写授权，无权限时是失败提示，不是漏实现。
+- 音频模式队列内切集沿用当前模式（E232）：`carryAudioModeTo` 是唯一落点，
+  别再在 `observeEngineIndex`/`selectQueueIndex` 里按下一集记忆重算。
 - 附录 A（任务文档末节）列了全部"明确不做"，开任务前先查，防止重开已裁定项。
 
 ---

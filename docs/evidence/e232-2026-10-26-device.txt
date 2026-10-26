@@ -1,0 +1,40 @@
+E232 设备取证（2026-10-26）
+设备：60dd2f94（Xiaomi 平板机型 23043RP34C；物理面板 1800×2880 / 400dpi；另用 wm size/density 临时模拟手机窗做迷你条复测）
+安装：release APK `None Player/app/release/app-release.apk`（29,224,679 B）覆盖安装 Success；dex 内含本批新增字面量（播放列表 / 删除失败提示 / 系统未允许竖屏全屏 / 切到仅听音频）。
+夹具：/sdcard/Movies/E232/{ep1,ep2,ep3,portrait,delete-me,long}.mp4（bitmovin 风格测试图案 + 正弦音轨，20s/15s/6s/300s）；测试收尾已删除整个目录。
+
+A. 音频模式切集保持（不退回视频）
+  1) 音频页播放 ep1（media_session active id=1）→ 点「下一首」→ active id=2 description=ep2；
+  2) 截屏 22-audio-next-ep2.png：界面仍是黑胶「正在播放 ep2」，无视频舞台。
+  读数：AUDIO 形态跨集保持（修复前该路径会落回视频形态）。
+
+B. 迷你条耳机钮单向进音频
+  1) 首页迷你条（long.mp4 播放中）点耳机 → 打开音频页（52-mini-headphone-enter.png）；
+  2) 返回首页：迷你条耳机下缘出现「音频」角标（53-mini-badge.png）；
+  3) 再点同一颗耳机 → 仍是音频页（54-mini-headphone-second.png），未再向视频态回切。
+
+C. 删除正在播放的条目 → 会话收口
+  1) portrait.mp4 为当前项（media_session PLAYING/STOPPED active id=4）→ 首页长按卡片「删除」→ 仅出现**应用自己的**确认卡（截图 33-delete-confirm.png；无 MediaStore 系统二次确认框）→ 点「删除」；
+  2) 授权「所有文件访问」（adb appops 临时 allow）时：文件从 /sdcard/Movies/E232 消失、toast「已删除」、右栏收回、媒体库 100→99 项（36-after-delete-current.png）、`dumpsys media_session` 由 STOPPED(active id=4) 变为 state=NONE(0) metadata=null；
+  3) 未授权时（34-after-delete-confirm.png）：toast「删除失败：请在系统设置中开启「所有文件访问」后重试」，文件保持、播放不受影响。
+  （测试后 appops 已恢复 default；此为该产品口径的显式边界：直连删除依赖「所有文件访问」或 SAF 写授权。）
+
+D. 音频播放列表原生样式
+  截屏 20-audio-playlist.png：底部抽屉为应用 ink 风格（把手 + eyebrow「播放列表 5 项」+ 5/5 + 关闭），行内 56×32/40×40 封面、等宽序号、标题、时长、当前项 accent 底 + 左侧竖条 + 声柱；与媒体库行语言一致。
+
+E. 全屏锁定钮随分辨率缩放
+  平板全屏锁徽标（截图 50-fs-episodes2.png 右上区域像素测量）：圆形直径约 140 px @400dpi ≈ 56dp；`lockBadgeScale(720dp)=1.8` 预期 32×1.8=57.6dp（旧实现恒 32dp=80px）。手机档 360dp 短边时系数 1.0（单测钉住）。
+
+F. 竖屏全屏模式
+  1) portrait.mp4 在右栏点「全屏播放」→ 窗口转竖（letterbox 1443×1800，config w577×h680dp，`dumpsys activity` mBounds 719,0-2162,1800），进入竖屏全屏：顶栏（返回/标题/时钟/选集/⋯）+ 全屏视频 + 底栏（播放键作 leading + 进度 + 字幕/倍速/耳机/全屏） + 央「已播放完」层（截图 11/14-portrait-fullscreen*.png）；系统「重新播放」后竖屏视频铺满窗高。
+  2) 返回键：退出全屏（该平板自然方向为横向 → 回浏览态右栏续播同一会话）；横屏视频 ep1 点全屏仍进横向全屏并正常退出（48/49-video-form*.png）。
+
+G. 全屏选集带封面
+  截屏 50-fs-episodes2.png：全屏顶栏「选集」下拉「选集（4）」，每行封面缩略图 + 两位序号 + 标题 + 当前项「播放中」accent 标注；菜单仍为画面暗色玻璃语言。
+
+稳定性：`adb logcat -d` 检索全程 0 条 FATAL EXCEPTION。
+边界：
+  - 竖屏全屏在自然横向平板上被 MIUI 信箱化（letterboxed）为竖向窗口，不是物理转屏；手机上应与既有横屏请求一致（未在第二台手机复测）；
+  - 删除的直连路径需要「所有文件访问」或 SAF 写授权（见 C-3），否则给失败提示而不弹系统确认框；
+  - 迷你条复测在平板上用 `wm size 1080x2400 / density 440` 模拟窄窗 + 深链会话完成，之后已 `wm size/density reset` 恢复；
+  - 音频「下一首」的 UI 稳态已验，未做自动连播跨三集的长时计数（队列 20s 短片，读数以 media_session active id 变化 + 截屏为准）。
