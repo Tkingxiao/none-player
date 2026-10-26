@@ -40,6 +40,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.noneplayer.core.ui.LocalNpInk
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpIcon
@@ -108,15 +109,51 @@ internal fun BoxScope.SeekGestureBubbleHost(
  * 的定位结果"，播起来之后进度条自己会说话；常驻胶囊每 250ms 重排信息区、
  * 还会在每次播放时都挂着一条，既噪音又浪费（§9.2）。
  *
- * 倍速常驻胶囊（[SpeedPill]）同占左上角：它可见时本提示下移一行避让。
+ * E238 起与倍速/睡眠胶囊合并进 [TopStartStatusPills]：三条按出现顺序堆叠，
+ * 位置与间距集中在一处（旧实现是倍速 56dp、续播 56/88 两档各自写死，
+ * 再加第三枚必打架）。
  */
 @Composable
-internal fun ResumePositionNotice(
-    resumeMs: Long?,
+internal fun TopStartStatusPills(
     speed: Float,
+    /** 睡眠剩余（null = 未开启）；内容由调用方用 `rememberSleepTimerLabel` 秒级重算 */
+    sleepText: String?,
+    resumeMs: Long?,
     modifier: Modifier = Modifier,
 ) {
-    // 退场动画期间 resumeMs 已置空——留住最后一次的值，避免淡出时文字跳成 0:00
+    Column(
+        modifier = modifier.padding(start = NpSpace.lg, top = 56.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+        horizontalAlignment = Alignment.Start,
+    ) {
+        if (speed != 1f) {
+            StatusPill(text = speedLabel(speed))
+        }
+        sleepText?.let { StatusPill(text = it, accent = true) }
+        ResumeStatusPill(resumeMs)
+    }
+}
+
+/** 深色玻璃小胶囊（状态位统一外观；accent = 用品牌色文字，与倍速白字区分） */
+@Composable
+private fun StatusPill(text: String, accent: Boolean = false) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(NpRadius.chip))
+            .background(Color.Black.copy(alpha = 0.62f))
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+    ) {
+        Text(
+            text = text,
+            style = NpMono,
+            color = if (accent) LocalNpInk.current.accent else Color.White,
+        )
+    }
+}
+
+/** 续播提示胶囊（退场动画期间 resumeMs 已置空——留住最后一次的值，避免淡出时文字跳成 0:00） */
+@Composable
+private fun ResumeStatusPill(resumeMs: Long?) {
     var lastMs by remember { mutableStateOf(0L) }
     LaunchedEffect(resumeMs) { if (resumeMs != null) lastMs = resumeMs }
     AnimatedVisibility(
@@ -126,21 +163,8 @@ internal fun ResumePositionNotice(
         // 进得完整、走得干脆才对。
         enter = fadeIn(animationSpec = npMotion(Motion.Panel)),
         exit = fadeOut(animationSpec = npMotion(Motion.Field)),
-        modifier = modifier,
     ) {
-        Box(
-            modifier = Modifier
-                .padding(start = NpSpace.lg, top = if (speed == 1f) 56.dp else 88.dp)
-                .clip(RoundedCornerShape(NpRadius.chip))
-                .background(Color.Black.copy(alpha = 0.62f))
-                .padding(horizontal = 12.dp, vertical = 7.dp),
-        ) {
-            Text(
-                text = "已为您定位到 ${formatTimestamp(lastMs)}",
-                style = NpMono,
-                color = Color.White,
-            )
-        }
+        StatusPill(text = "已为您定位到 ${formatTimestamp(lastMs)}")
     }
 }
 
@@ -322,25 +346,9 @@ private fun StageLockBadge(
 }
 
 /**
- * 倍速常驻胶囊（§4.6）：任何非 1.0x 状态在左上角常驻，**不随控制层显隐**——
- * "我现在不是正常速度"必须永远看得见。
+ * 倍速常驻胶囊已并入 [TopStartStatusPills]（E238：三条状态位统一堆叠，
+ * 不再各自写 56/88 两档偏移）——"我现在不是正常速度"仍然常驻、不随控制层显隐。
  */
-@Composable
-internal fun SpeedPill(speed: Float, modifier: Modifier = Modifier) {    if (speed == 1f) return
-    Box(
-        modifier = modifier
-            .padding(start = NpSpace.lg, top = 56.dp)
-            .clip(RoundedCornerShape(NpRadius.chip))
-            .background(Color.Black.copy(alpha = 0.55f))
-            .padding(horizontal = 10.dp, vertical = 4.dp),
-    ) {
-        Text(
-            text = "%.2fx".format(speed).removeSuffix("0").removeSuffix("."),
-            style = NpMono,
-            color = Color.White,
-        )
-    }
-}
 
 /** 播放页主操作行的图标族（设计稿 .pactions 的三个 `.btnp`） */
 internal enum class ActionGlyph { More, Audio, Fav, Info }

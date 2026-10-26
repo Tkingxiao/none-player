@@ -1919,6 +1919,9 @@ fun PlayerScreen(
     val sleepTimerEndsAtMs by session.sleepTimerEndsAtMs.collectAsStateWithLifecycle()
     val sleepAtTrackEnd by session.sleepAtTrackEnd.collectAsStateWithLifecycle()
     val sleepActive = sleepTimerEndsAtMs > 0L || sleepAtTrackEnd
+    // E238：控制层状态位（左上角胶囊列）里的睡眠剩余；未开启为 null（不起秒级循环）
+    val sleepStatusText = rememberSleepTimerLabel(sleepTimerEndsAtMs, sleepAtTrackEnd)
+        .takeIf { sleepActive }
 
     /** E234：四档选择（15/30/60/播完当前）；重复选同档 = 重新计时 */
     fun pickSleepPreset(preset: SleepPreset) {
@@ -2383,10 +2386,11 @@ fun PlayerScreen(
                             modifier = Modifier.align(Alignment.Center),
                         )
                     }
-                    SpeedPill(speed = speed, modifier = Modifier.align(Alignment.TopStart))
-                    ResumePositionNotice(
-                        resumeMs = resumeNoticeMs,
+                    // E238：倍速 / 睡眠剩余 / 续播提示三条状态胶囊统一堆叠（见 TopStartStatusPills）
+                    TopStartStatusPills(
                         speed = speed,
+                        sleepText = sleepStatusText,
+                        resumeMs = resumeNoticeMs,
                         modifier = Modifier.align(Alignment.TopStart),
                     )
                     // E231：M8 半屏水波已随"双击改暂停"下线（触发者不存在）。
@@ -2868,10 +2872,11 @@ fun PlayerScreen(
                                     modifier = Modifier.align(Alignment.Center),
                                 )
                             }
-                            SpeedPill(speed = speed, modifier = Modifier.align(Alignment.TopStart))
-                            ResumePositionNotice(
-                                resumeMs = resumeNoticeMs,
+                            // E238：竖屏舞台的状态胶囊列（与全屏同一实现）
+                            TopStartStatusPills(
                                 speed = speed,
+                                sleepText = sleepStatusText,
+                                resumeMs = resumeNoticeMs,
                                 modifier = Modifier.align(Alignment.TopStart),
                             )
                             GestureHintPill(
