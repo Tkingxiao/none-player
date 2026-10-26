@@ -151,6 +151,24 @@ scanner-local 源码才迫使真跑，暴露 bench 挂死。
 不等于异常（与"同字节用哈希+mtime+全量 executed 三件套核对"口径互证）。
 ```
 
+### E-B7 仪器测试的 ImageReader 取帧会在真机带走进程（E240 实录 ★）
+```
+症状：模拟器 8/8 全绿的 LegacyPlaybackTest，到真机跑到某一项直接
+  INSTRUMENTATION_RESULT: shortMsg=Process crashed.（后续用例全不执行）。
+病因：平台解码器在真机以**厂商像素格式**连上 ImageReader(RGBA_8888) 的 Surface
+  （高通 UBWC 0x7fa30c04），`acquireLatestImage()` 抛 UnsupportedOperationException
+  ——监听器在 ImageReader 自己的线程上抛，无人接，进程即崩。模拟器 ranchu 解码器
+  能直出 RGBA，所以这条永远复现不了。
+排查：`adb -s <dev> shell am instrument -w -e class <类> <测试包>/androidx.test.runner.AndroidJUnitRunner`
+  单独跑一类，看栈顶是不是 nativeImageSetup。
+修复：监听器 try/catch 记因（不当失败、只当"取不到位图"），
+  出画判定改用 `player.videoDecoderCounters.renderedOutputBufferCount`；
+  像素级断言（彩条花屏闸）留在软解/CPU 路径上——那两条真机确证能取帧。
+  换 YUV_420_888 **不解决**：厂商格式与 0x23 同族不匹配，还要多背一段 YUV→RGB。
+预防：仪器测试里凡是"消费者是 ImageReader"的断言，都要问一句"真机给的是这个格式吗"；
+  两机同插时别用 `connectedDebugAndroidTest`（会打到另一台），改 assemble + install -t + am instrument -s。
+```
+
 ---
 
 ## 4. 错误目录 B：Git / 提交
@@ -325,6 +343,31 @@ adb shell "content query --uri content://media/external/video/media --where \"_d
   时间不是本次即未更新。签名不符的 QA 机（模拟器）卸载重装（数据可弃）；
   真机与发布包同签名时 -r 正常。另：本轮首测误导也提示"行为与代码不符先查装机
   新鲜度"，与 E-B6（APK 同字节判新鲜度）是同一族纪律。
+```
+
+### E-D16 播放中 uiautomator dump 只拿到半棵树（E240 实录 ★）
+```
+症状：全屏播放页 dump 出来只有状态栏 + 一条字幕节点（3KB），控制层/顶栏/底栏全不见，
+  以为"控件没渲染"或"点错了页面"。
+病因（两条叠加）：① 控制层自动收起后 Compose 真的不再组合那些节点（不是 dump 丢的）；
+  ② 画面在动时窗口永不 idle，dump 等不到就返回局部树。
+排查/修复：把"唤醒 + dump"压进同一条 shell 抢时间窗，或先暂停再取：
+  adb -s <dev> shell "input tap <中心>; uiautomator dump /data/local/tmp/ui.xml"
+  adb -s <dev> shell "input keyevent 127; uiautomator dump /data/local/tmp/ui.xml"  # 暂停后必成
+预防：dump 字节数 <5K 即判定"没拿到应用树"，重来而不是照节点猜。
+另：全屏 ⋯ 下拉是**可滚动**的，一屏只见 3 行不代表菜单只有 3 行——先 swipe 再 dump
+  才算过完整个菜单（E240 据此差点误判「睡眠/收藏」行缺失）。
+```
+
+### E-D17 深链指向未入库媒体会静默回落（E240 实录）
+```
+症状：新 push 到 /sdcard/Movies 的夹具用 content://<id> 深链起播，界面仍是上一条视频
+  （或 force-stop 后仍播旧条目），误判"深链坏了/fs=1 不生效"。
+病因：MediaStore 广播扫描有延迟，且**应用侧**也要重扫才把条目进库；URI 解析不到库内
+  媒体时不报错，播放会话沿用上次状态。
+排查：`content query --uri content://media/external/video/media --where "_display_name='x.mp4'"`
+  拿 id；再 dump 播控层标题核对"现在到底在放哪条"（E-D13 的前台陷阱同源）。
+修复：进一次库页/文件夹页触发应用重扫（或等广播），确认列表里出现该文件名再深链。
 ```
 
 ---

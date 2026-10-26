@@ -1,0 +1,62 @@
+E240 设备取证（2026-10-26）——真机跑通 LegacyPlaybackTest：平板 ImageReader 厂商格式崩溃收口
+设备：**60dd2f94**（Xiaomi Pad 6 / pipa，2880×1800 物理、400dpi，MIUI）；
+对照：**emulator-5554**（Pixel_10_Pro，API 36）。
+夹具：androidTest assets（np-wmv2.avi / xvid-qpel.avi / xvid-clip.avi / np-mjpeg.avi / np-h264.mp4），
+测试 APK `plugin-player-exo-debug-androidTest.apk`（69,023,065 B），两机
+`adb install -r -t` Success；执行
+`adb -s <dev> shell am instrument -w -e class com.noneplayer.plugins.player.exo.LegacyPlaybackTest com.noneplayer.plugins.player.exo.test/androidx.test.runner.AndroidJUnitRunner`。
+
+A. 修复前（上一轮 APK，21:07 构建——即任务文档 §7 观察项的复现证据）
+  - 8 项跑到第 7 项**测试进程崩溃**，剩余用例不再执行（`INSTRUMENTATION_RESULT: shortMsg=Process crashed.`
+    / `INSTRUMENTATION_CODE: 0`）：
+      java.lang.UnsupportedOperationException: The producer output buffer format 0x7fa30c04
+        doesn't match the ImageReader's configured buffer format 0x1
+        at android.media.ImageReader.nativeImageSetup
+        at android.media.ImageReader.acquireLatestImage(ImageReader.java:541)
+        at com.noneplayer.plugins.player.exo.LegacyPlaybackTest.play$lambda$13(LegacyPlaybackTest.kt:288)
+  - 崩溃点：平台解码器用例（xvidClipStaysOnPlatformDecoder）的取帧监听器——
+    高通平台解码器以 **UBWC 厂商像素格式**连上 ImageReader(RGBA_8888) 的 Surface；
+  - 同轮已跑完的部分：软解 WMV2（含彩条抽样）**通过**，qpel 一项红（见 C 段）。
+    → 「平板被挡」不是猜测，是这台机器的确定性行为。
+
+B. 修复后（本轮，同一台真机）
+  | 读数 | 值 |
+  |------|----|
+  | 用例执行 | 8 / 8 跑满，无进程崩溃 |
+  | 通过 | 7（工厂两次构建、WMV2 出画、WMV2 彩条、xvid 平台解码器、H264↔WMV2 切换、H264↔MJPEG 切换、MJPEG 位图渲染） |
+  | 失败 | 1（qpelRendersFramesInSyncWithAudio——既有解码器兜底缺口，非本批引入，见 C 段） |
+  | 用时 | 17.651s（首轮）/ 18.238s（末轮，与入库代码同一 APK） |
+  - **花屏回归闸在真机有效**：npff/nplegacy 软解与 BitmapFactory CPU 路径仍能取到 RGBA 帧，
+    六段彩条断言在真机通过（不是只在模拟器通过）；
+  - 降级路径旁证：`adb logcat -d -s LegacyPlaybackTest` 多条
+    「ImageReader 取帧被生产者格式挡住: … 0x7fa30c04 … 0x1」，全部落在平台解码器用例期间。
+
+C. 真机解码器兜底缺口（留账，不在本批修）
+  - `qpelRendersFramesInSyncWithAudio` 红：`MediaCodecVideoRenderer error, index=0,
+    format=Format(video/mp4v-es, [320,240,15.0]), format_supported=YES`——
+    平台 MPEG-4 解码器**认领轨道后运行时失败**；`EXTENSION_RENDERER_MODE_ON` +
+    `setEnableDecoderFallback(true)` 的兜底发生在**初始化**失败时，运行时失败不回落，
+    npff/nplegacy 没有接手的机会；
+  - 同一现象在应用侧可见：真机放 xvid-clip.avi 弹「无法播放此文件 + 转码建议」卡
+    （模拟器同文件正常出画）——即 MPEG-4 ASP 在该机型整体不可播；
+  - 已记入任务文档 §9（P2）：平台解码器「认领后运行时失败」的兜底路径设计。
+
+D. 处置口径（测试侧改了什么、为什么这样改）
+  - `play()` 的取帧监听器 try/catch `UnsupportedOperationException`：吞掉并记因
+    （`Played.surfaceMismatch`），同时 `Log.i` 留一行设备侧可读证据；不再让「取不到像素」
+    演变成「整条套件崩」；
+  - 出画判定统一以 `player.videoDecoderCounters.renderedOutputBufferCount`（frames）为准，
+    `images`（位图抽样）只在软解/CPU 路径断言——真机确证这两类能取帧，模拟器全绿；
+  - **没有**按 §7 原拟「第一选支」改 `YUV_420_888`：0x7fa30c04 是厂商 UBWC 格式，
+    与 YUV_420_888(0x23) 同样不匹配，改过去仍是同一异常，且彩条抽样要额外补 YUV→RGB 转换；
+    现方案保留 RGBA 强断言（模拟器 + 软解/CPU）+ 平台路径降级为计数器判定，覆盖面不缩水。
+    —— 该偏离如实记在这里，§7 条目按"已复现、按替代选支收口"改写。
+
+E. 模拟器回归（同包对照）
+  - emulator-5554 装同一测试 APK：`OK (8 tests)`，24.218s（末轮 22.429s）——修复未放宽任何模拟器侧断言。
+
+稳定性：两机本轮 `logcat` 0 条应用 FATAL EXCEPTION（崩溃只出现在修复前的旧 APK 上）。
+边界：
+  - 只覆盖 LegacyPlaybackTest 一个类（8 项）；core 11 项 + SubtitleQueueTest 4 项仍只有模拟器读数；
+  - 真机只有这一台（高通 pipa），MTK / 三星等同类厂商格式未覆盖；
+  - qpel 一项在真机仍红，按 C 段留账，**未**用断言放宽掩盖。

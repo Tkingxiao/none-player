@@ -29,6 +29,8 @@ E239 设备取证（2026-10-26）——LegacyPlaybackTest 在模拟器跑通（�
 稳定性：三轮共 3 次安装/启动 instrumentation，无 FATAL；无 Surface CPU 连接回归
 （switch 两用例覆盖 h264→wmv2(软解)→h264 与 h264→mjpeg(位图)→h264 各自三步）。
 边界：
-  - 平板 ImageReader 格式问题**未复现也未修**（设备离线；若日后平板再挡，按条目
-    第一选支把 reader 换 YUV_420_888 需逐素材核对尺寸/格式，风险较高，另立批）；
+  - ~~平板 ImageReader 格式问题未复现也未修（设备离线）~~ → **E240 已复现并收口**：
+    真机 60dd2f94 上该异常（0x7fa30c04 UBWC vs 0x1 RGBA）确实把测试进程带走，
+    修法未走原拟的 YUV_420_888 选支（同格式族仍不匹配），改走「监听器吞异常 +
+    出画判定用 renderedOutputBufferCount」，读数见 `e240-2026-10-26-device.txt`；
   - core 11 项 + SubtitleQueueTest 4 项（条目已记"已过"）本批未复跑。
