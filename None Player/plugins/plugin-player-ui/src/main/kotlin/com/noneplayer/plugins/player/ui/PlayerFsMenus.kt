@@ -145,7 +145,7 @@ import kotlinx.coroutines.launch
  */
 
 /** 菜单页：MAIN 是 ⋯ 的一级页，其余为子页（同一锚点内切换，带返回行） */
-enum class FsMenuPage { MAIN, SPEED, SUBTITLE, AUDIO, PICTURE, CHAPTERS, EPISODES }
+enum class FsMenuPage { MAIN, SPEED, SUBTITLE, AUDIO, PICTURE, CHAPTERS, EPISODES, SLEEP }
 
 /**
  * 下拉锚点：触发控件在窗口中的边界 + 展开方向。
@@ -858,7 +858,8 @@ fun FsMainMenuContent(
     onPip: () -> Unit,
     onFavorite: () -> Unit,
     onScreenshot: () -> Unit,
-    onSleep: () -> Unit,
+    /** E234：睡眠定时子页（MAIN 行的 drill-in 落点）——四档 + 关闭 */
+    onSleepPage: () -> Unit,
     /**
      * D3 半锁行（「只护画面」轻一档）：只在有画面区手势的形态渲染——播放页两个形态
      * 传 true；右栏内嵌播放器的画面区没有手势（只有点按），半锁在那里无从生效，
@@ -910,7 +911,9 @@ fun FsMainMenuContent(
         label = sleepLabel,
         icon = NpIcon.SleepTimer,
         active = sleepActive,
-        onClick = onSleep,
+        // E234：从"点一下开关 30 分钟"改成 drill-in 四档页（15/30/60/播完当前）
+        chevron = true,
+        onClick = onSleepPage,
     )
     FsMenuRow(
         label = if (favorited) "已收藏" else "收藏",
@@ -1507,4 +1510,62 @@ private fun FsEpisodeCover(item: MediaItem) {
             )
         }
     }
+}
+
+/**
+ * E234：睡眠定时子页——四档（15/30/60 分钟 + 播完当前）+ 关闭。
+ *
+ * 处于开启态时先给一行状态说明（剩余分钟 / 播完当前暂停）与关闭行；两页
+ * （全屏菜单与右栏菜单）共用本页与会话状态。倒计时标签走
+ * [rememberSleepTimerLabel]，不在组合期直接读墙钟。
+ */
+@Composable
+fun FsSleepMenuContent(
+    endsAtMs: Long,
+    atTrackEnd: Boolean,
+    onPick: (SleepPreset) -> Unit,
+    onCancel: () -> Unit,
+    onBack: () -> Unit,
+) {
+    FsMenuBackRow(title = "睡眠定时", onBack = onBack)
+    if (endsAtMs > 0L || atTrackEnd) {
+        FsMenuCaption(rememberSleepTimerLabel(endsAtMs, atTrackEnd))
+        FsMenuRow(
+            label = "关闭睡眠定时",
+            icon = NpIcon.Close,
+            danger = true,
+            onClick = onCancel,
+        )
+    } else {
+        FsMenuCaption("到点自动暂停播放")
+    }
+    FsMenuTitle("计时暂停")
+    listOf(SleepPreset.MIN15, SleepPreset.MIN30, SleepPreset.MIN60).forEach { preset ->
+        FsMenuRow(label = "${preset.minutes} 分钟", onClick = { onPick(preset) })
+    }
+    FsMenuTitle("播放结束")
+    FsMenuRow(label = "播完当前", onClick = { onPick(SleepPreset.TRACK_END) })
+}
+
+/**
+ * E234：睡眠标签的**秒级重算**（剩余分钟随真实时间走）。
+ *
+ * 约束来自任务文档 §4：「倒计时不在组合期读墙钟」——直接 `System.currentTimeMillis()`
+ * 写在组合里既不会按时重算、又把时钟读进渲染路径。这里把时钟读放进 `LaunchedEffect`
+ * 的循环里，每秒只写一次状态；未开启/播完当前档直接返回静态文案，不起循环。
+ */
+@Composable
+fun rememberSleepTimerLabel(endsAtMs: Long, atTrackEnd: Boolean): String {
+    if (endsAtMs <= 0L || atTrackEnd) return sleepTimerLabel(endsAtMs, 0L, atTrackEnd)
+    var label by remember(endsAtMs) {
+        mutableStateOf(sleepTimerLabel(endsAtMs, System.currentTimeMillis(), false))
+    }
+    LaunchedEffect(endsAtMs) {
+        while (true) {
+            label = sleepTimerLabel(endsAtMs, System.currentTimeMillis(), false)
+            if (endsAtMs - System.currentTimeMillis() <= 0L) break
+            delay(1_000L)
+        }
+    }
+    return label
 }

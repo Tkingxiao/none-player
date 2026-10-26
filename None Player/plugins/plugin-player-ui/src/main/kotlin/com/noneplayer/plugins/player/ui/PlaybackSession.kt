@@ -125,18 +125,114 @@ class PlaybackSession(
     private val foreground = MutableStateFlow(ForegroundState())
     private val _sleepTimerEndsAtMs = MutableStateFlow(0L)
     val sleepTimerEndsAtMs: StateFlow<Long> = _sleepTimerEndsAtMs.asStateFlow()
+
+    /** E234：「播完当前」档（当前条目放完即暂停，不自动连播） */
+    private val _sleepAtTrackEnd = MutableStateFlow(false)
+    val sleepAtTrackEnd: StateFlow<Boolean> = _sleepAtTrackEnd.asStateFlow()
+
     private var sleepJob: Job? = null
 
-    fun toggleSleepTimer() {
+    /**
+     * E234：开启睡眠定时。四档 15/30/60 分钟与「播完当前」——
+     * 到期时刻与旗标**双键落盘**（进程死/重进按同一份真相恢复）。
+     */
+    fun startSleepTimer(preset: SleepPreset) {
         sleepJob?.cancel()
-        if (_sleepTimerEndsAtMs.value > 0L) {
+        sleepJob = null
+        val deadline = sleepDeadlineAtMs(System.currentTimeMillis(), preset)
+        if (deadline == null) {
+            // 「播完当前」：关掉自动连播让它停在末帧；观察器在 Ended 上收口
             _sleepTimerEndsAtMs.value = 0L
-        } else {
-            _sleepTimerEndsAtMs.value = System.currentTimeMillis() + 30 * 60_000L
+            _sleepAtTrackEnd.value = true
+            scope.launch { settings.setSleepTimerEndsAt(0L) }
+            scope.launch { settings.setSleepAtTrackEnd(true) }
+            player?.setAutoplayNext(false)
+            return
+        }
+        releaseTrackEndSleep()
+        _sleepTimerEndsAtMs.value = deadline
+        scope.launch { settings.setSleepTimerEndsAt(deadline) }
+        sleepJob = scope.launch {
+            delay((deadline - System.currentTimeMillis()).coerceAtLeast(0L))
+            fireSleepTimer()
+        }
+    }
+
+    /** E234：取消睡眠定时（两档共用；不触发暂停） */
+    fun cancelSleepTimer() {
+        sleepJob?.cancel()
+        sleepJob = null
+        releaseTrackEndSleep()
+        _sleepTimerEndsAtMs.value = 0L
+        scope.launch { settings.setSleepTimerEndsAt(0L) }
+    }
+
+    /** 到期：暂停 + 清两键（进程内/回前台/计时到达三条路共用） */
+    private fun fireSleepTimer() {
+        sleepJob?.cancel()
+        sleepJob = null
+        pause()
+        _sleepTimerEndsAtMs.value = 0L
+        scope.launch { settings.setSleepTimerEndsAt(0L) }
+    }
+
+    /**
+     * 「播完当前」在 Ended 上收口。此时暂停对 ENDED 是空操作，关键动作是
+     * 恢复用户的自动连播设置与旗标——否则下一条又被自动推进，"播完当前"形同虚设。
+     */
+    private fun fireSleepAtTrackEnd() {
+        if (!_sleepAtTrackEnd.value) return
+        pause()
+        releaseTrackEndSleep()
+    }
+
+    private fun releaseTrackEndSleep() {
+        if (!_sleepAtTrackEnd.value) return
+        _sleepAtTrackEnd.value = false
+        scope.launch { settings.setSleepAtTrackEnd(false) }
+        restoreAutoplayAfterSleep()
+    }
+
+    /**
+     * 恢复自动连播：读**设置真值**而不是硬写 true——用户在菜单里关过连播，
+     * 睡眠结束不该把它悄悄打开。旗标落下后再写，避免 init 里的连播订阅
+     * 在睡眠期间把它改回 true。
+     */
+    private fun restoreAutoplayAfterSleep() {
+        val p = player ?: return
+        scope.launch {
+            if (_sleepAtTrackEnd.value) return@launch
+            p.setAutoplayNext(settings.autoplayNext.first())
+        }
+    }
+
+    /** E234：过期即停（回前台 / 进程起两处调用）。无会话（队列空）时只清键。 */
+    private fun enforceSleepDeadlineNow() {
+        val deadline = _sleepTimerEndsAtMs.value
+        if (!sleepTimerExpired(deadline, System.currentTimeMillis())) return
+        if (_queue.value.isNotEmpty()) pause()
+        _sleepTimerEndsAtMs.value = 0L
+        scope.launch { settings.setSleepTimerEndsAt(0L) }
+    }
+
+    /** E234：进程起/会话创建时按落盘恢复两档（过期直接收口）。 */
+    private fun restoreSleepTimer() {
+        scope.launch {
+            val storedDeadline = settings.sleepTimerEndsAtMs.first()
+            if (settings.sleepAtTrackEnd.first()) {
+                _sleepAtTrackEnd.value = true
+                player?.setAutoplayNext(false)
+            }
+            if (storedDeadline <= 0L) return@launch
+            if (sleepTimerExpired(storedDeadline, System.currentTimeMillis())) {
+                if (_queue.value.isNotEmpty()) pause()
+                settings.setSleepTimerEndsAt(0L)
+                return@launch
+            }
+            _sleepTimerEndsAtMs.value = storedDeadline
             sleepJob = scope.launch {
-                delay(30 * 60_000L)
-                pause()
-                _sleepTimerEndsAtMs.value = 0L
+                delay((storedDeadline - System.currentTimeMillis()).coerceAtLeast(0L))
+                fireSleepTimer()
             }
         }
     }
@@ -229,7 +325,12 @@ class PlaybackSession(
             val lifecycle = ProcessLifecycleOwner.get().lifecycle
             lifecycle.addObserver(LifecycleEventObserver { _, event ->
                 when (event) {
-                    Lifecycle.Event.ON_START -> foreground.value = ForegroundState()
+                    Lifecycle.Event.ON_START -> {
+                        foreground.value = ForegroundState()
+                        // E234：回前台先核对睡眠到期——后台睡过头的定时必须在
+                        // 用户看到画面之前就生效（"回前台 now>=endsAt 立刻暂停"）。
+                        enforceSleepDeadlineNow()
+                    }
                     Lifecycle.Event.ON_STOP -> {
                         persistPosition()
                         foreground.value = foreground.value.copy(visible = false)
@@ -258,7 +359,10 @@ class PlaybackSession(
         // 后新实例回到默认值，只订阅设置变化会漏掉这一次补发。
         scope.launch {
             combine(settings.autoplayNext, _player) { autoplay, player -> autoplay to player }
-                .collect { (autoplay, player) -> player?.setAutoplayNext(autoplay) }
+                .collect { (autoplay, player) ->
+                    // E234：「播完当前」睡眠档生效期间不把连播改回来（睡眠结束统一恢复）
+                    if (!_sleepAtTrackEnd.value) player?.setAutoplayNext(autoplay)
+                }
         }
         // E232：库页删掉了正在播的媒体 → 整条会话收口。
         // 不这么做时引擎仍握着已删除文件的上一个句柄，画面/声音继续走，迷你条也停在
@@ -469,6 +573,20 @@ class PlaybackSession(
     init {
         observeEngineIndex()
         observePlaybackStarted()
+        observeSleepAtTrackEnd()
+        // E234：进程起/会话创建时按落盘恢复睡眠两档
+        restoreSleepTimer()
+    }
+
+    /** E234：「播完当前」睡眠档在引擎进入 Ended 时收口（恢复连播 + 落旗标）。 */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private fun observeSleepAtTrackEnd() {
+        scope.launch {
+            _player.flatMapLatest { it?.state ?: flowOf(PlaybackState.Idle) }
+                .collect { state ->
+                    if (state == PlaybackState.Ended) fireSleepAtTrackEnd()
+                }
+        }
     }
 
     /**
@@ -638,6 +756,8 @@ class PlaybackSession(
         if (existing != null && targetEngineId != null && targetEngineId == engineId) {
             // 复用时顺手清掉上一次失败的原因：引擎其实好着，面板不该继续挂着
             _engineError.value = null
+            // E234：「播完当前」睡眠档跨引擎换代也要保持连播关闭
+            if (_sleepAtTrackEnd.value) existing.setAutoplayNext(false)
             return existing
         }
         // A23：**先建新、再放旧**。反过来的话 create 失败时旧引擎已经被释放，
@@ -666,6 +786,8 @@ class PlaybackSession(
         _player.value = created
         created.setSubtitleOffsetMs(_subtitleOffsetMs.value)
         created.setVideoTracksEnabled(!_audioOnly.value)
+        // E234：「播完当前」睡眠档在新引擎上同样要关连播（init 的订阅会跳过）
+        if (_sleepAtTrackEnd.value) created.setAutoplayNext(false)
         existing?.release()
         return created
     }
@@ -798,8 +920,8 @@ class PlaybackSession(
      * 否则通知栏会残留一条"已暂停"的媒体通知——迷你条与通知应当同生命周期。
      */
     fun stop() {
-        sleepJob?.cancel()
-        _sleepTimerEndsAtMs.value = 0L
+        // E234：睡眠两档随会话一起复位（含「播完当前」的连播恢复）
+        cancelSleepTimer()
         startJob?.cancel()
         startJob = null
         startingIntent = null
@@ -926,6 +1048,38 @@ internal fun shouldStopInBackground(
  * 编译器与 UI 走查都抓不到，只有把决策从 Compose 里拆出来才钉得住
  * （同 [resolveQueueStart] 的取舍）。
  */
+/** E234 睡眠定时档位（播放菜单四档；两页共用同一份会话状态）。 */
+enum class SleepPreset(val minutes: Int) {
+    MIN15(15),
+    MIN30(30),
+    MIN60(60),
+
+    /** 播完当前：没有到期时刻，由引擎 Ended 观察器收口（期间关闭自动连播）。 */
+    TRACK_END(0),
+}
+
+/** 该档的绝对到期时刻；「播完当前」没有时刻（null）。纯函数便于单测。 */
+internal fun sleepDeadlineAtMs(nowMs: Long, preset: SleepPreset): Long? =
+    if (preset == SleepPreset.TRACK_END) null else nowMs + preset.minutes * 60_000L
+
+/** 到期判定：0（未开启）与未来都不算；等号算过期（"now>=endsAt 立刻暂停"口径）。 */
+internal fun sleepTimerExpired(endsAtMs: Long, nowMs: Long): Boolean =
+    endsAtMs > 0L && nowMs >= endsAtMs
+
+/**
+ * 菜单标签（纯函数）：`睡眠 15分` / `播完当前暂停`；未开启给 `睡眠定时`。
+ * 剩余分钟向上取整——剩 10 秒也读作 1 分，不做"0分"闪烁。
+ */
+internal fun sleepTimerLabel(endsAtMs: Long, nowMs: Long, atTrackEnd: Boolean): String = when {
+    atTrackEnd -> "播完当前暂停"
+    endsAtMs <= 0L -> "睡眠定时"
+    else -> {
+        val remaining = endsAtMs - nowMs
+        // 已过期（计时到点与清键之间的瞬态）回落到未开启文案，不闪"0分"
+        if (remaining <= 0L) "睡眠定时" else "睡眠 ${(remaining + 59_999L) / 60_000L}分"
+    }
+}
+
 internal fun resolveAudioOnlyMode(
     storedPreference: Boolean?,
     isAudioMedia: Boolean,

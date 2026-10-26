@@ -97,6 +97,8 @@ private class InlineMenuData(
     val loopMode: NpLoopMode,
     val favorited: Boolean,
     val sleepEndsAt: Long,
+    /** E234：「播完当前」睡眠档（菜单行文案与选档页共用） */
+    val sleepAtTrackEnd: Boolean,
     val screenshotBlocked: Boolean,
     val savedSubtitle: String?,
     val subtitleOffsetMs: Long,
@@ -123,6 +125,7 @@ private fun InlineMenuScope(
     val loopMode by session.loopMode.collectAsStateWithLifecycle()
     val favorites by history.favoriteKeys.collectAsStateWithLifecycle(initialValue = emptySet())
     val sleepEndsAt by session.sleepTimerEndsAtMs.collectAsStateWithLifecycle()
+    val sleepAtTrackEnd by session.sleepAtTrackEnd.collectAsStateWithLifecycle()
     val screenshotBlocked by settings.screenshotBlocked.collectAsStateWithLifecycle(initialValue = false)
     val mediaKey = mediaMemoryKey(media.sourceId, media.id)
     val savedSubtitle by remember(mediaKey) { settings.subtitleUri(mediaKey) }
@@ -136,6 +139,7 @@ private fun InlineMenuScope(
             loopMode = loopMode,
             favorited = HistoryEntry.keyOf(media) in favorites,
             sleepEndsAt = sleepEndsAt,
+            sleepAtTrackEnd = sleepAtTrackEnd,
             screenshotBlocked = screenshotBlocked,
             savedSubtitle = savedSubtitle,
             subtitleOffsetMs = subtitleOffsetMs,
@@ -603,8 +607,8 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                             volumePercent = volumeState,
                             favorited = data.favorited,
                             hasChapters = data.chapters.isNotEmpty(),
-                            sleepLabel = if (data.sleepEndsAt > 0) "睡眠定时已开启" else "睡眠定时",
-                            sleepActive = data.sleepEndsAt > 0,
+                            sleepLabel = rememberSleepTimerLabel(data.sleepEndsAt, data.sleepAtTrackEnd),
+                            sleepActive = data.sleepEndsAt > 0L || data.sleepAtTrackEnd,
                             onClose = dismiss,
                             onPage = { menuPage = it },
                             onLoopMode = session::setLoopMode,
@@ -630,7 +634,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                                 dismiss()
                                 savePlaybackScreenshot(context, surfaceRef.value, scope, data.screenshotBlocked, toast::show)
                             },
-                            onSleep = session::toggleSleepTimer,
+                            onSleepPage = { menuPage = FsMenuPage.SLEEP },
                             contributors = data.contributors,
                             contributorMedia = media,
                             contributorPlayer = player,
@@ -694,6 +698,24 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                         FsMenuPage.CHAPTERS -> FsChaptersMenuContent(
                             data.chapters, player.positionMs.collectAsStateWithLifecycle(),
                             onSelect = { player.seekTo(it.startMs) }, onBack = back,
+                        )
+                        FsMenuPage.SLEEP -> FsSleepMenuContent(
+                            endsAtMs = data.sleepEndsAt,
+                            atTrackEnd = data.sleepAtTrackEnd,
+                            onPick = { preset ->
+                                session.startSleepTimer(preset)
+                                toast.show(
+                                    if (preset == SleepPreset.TRACK_END) "播完当前后暂停"
+                                    else "将在 ${preset.minutes} 分钟后暂停",
+                                )
+                                dismiss()
+                            },
+                            onCancel = {
+                                session.cancelSleepTimer()
+                                toast.show("睡眠定时已取消")
+                                dismiss()
+                            },
+                            onBack = back,
                         )
                     }
                 }

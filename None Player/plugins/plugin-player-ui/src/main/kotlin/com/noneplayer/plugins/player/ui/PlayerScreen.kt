@@ -148,6 +148,7 @@ import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpToastHost
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
+import com.noneplayer.core.ui.NpOptRow
 import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatFileSize
 import com.noneplayer.core.ui.NpEasing
@@ -1337,6 +1338,8 @@ fun PlayerScreen(
     var speedPickerVisible by remember { mutableStateOf(false) }
     var subtitleSheetVisible by remember { mutableStateOf(false) }
     var moreSheetVisible by remember { mutableStateOf(false) }
+    // E234：竖屏「睡眠定时」子表（四档 + 关闭）；与全屏菜单 SLEEP 子页同源同会话状态
+    var sleepSheetVisible by remember { mutableStateOf(false) }
     // 审查批次 B1：这三个原本声明在"锁定"清理块之后，而统一收口函数必须能引用
     // 全部弹层状态——局部函数引用晚于自己声明的变量会直接编译不过。
     // 所有"弹层开关"集中在这里，收口函数与新增状态都在同一处可见。
@@ -1756,6 +1759,7 @@ fun PlayerScreen(
         audioTrackSheetVisible = false
         pictureSheetVisible = false
         moreSheetVisible = false
+        sleepSheetVisible = false
         fileInfoVisible = false
     }
 
@@ -1908,18 +1912,23 @@ fun PlayerScreen(
     )
     LaunchedEffect(player, subtitleEnabled) { player.setTextTracksEnabled(subtitleEnabled) }
 
-    // 睡眠定时：绝对到期时间（epoch ms），0 = 关。到期暂停播放。
+    // 睡眠定时（E234）：两档状态都在会话里（进程级、双键落盘），页面只做展示与转发。
+    // 标签由 `rememberSleepTimerLabel` 秒级重算——不在组合期直接读墙钟。
     val sleepTimerEndsAtMs by session.sleepTimerEndsAtMs.collectAsStateWithLifecycle()
-    val sleepLabel = if (sleepTimerEndsAtMs > 0) {
-        "睡眠 ${((sleepTimerEndsAtMs - System.currentTimeMillis()).coerceAtLeast(0) / 60_000 + 1)}分"
-    } else {
-        "睡眠定时"
+    val sleepAtTrackEnd by session.sleepAtTrackEnd.collectAsStateWithLifecycle()
+    val sleepActive = sleepTimerEndsAtMs > 0L || sleepAtTrackEnd
+
+    /** E234：四档选择（15/30/60/播完当前）；重复选同档 = 重新计时 */
+    fun pickSleepPreset(preset: SleepPreset) {
+        session.startSleepTimer(preset)
+        toast.show(
+            if (preset == SleepPreset.TRACK_END) "播完当前后暂停" else "将在 ${preset.minutes} 分钟后暂停",
+        )
     }
 
-    /** 睡眠定时两态开关（30 分钟档）：档位扩展留给设置页 */
-    fun toggleSleepTimer() {
-        session.toggleSleepTimer()
-        toast.show(if (session.sleepTimerEndsAtMs.value > 0) "将在 30 分钟后暂停" else "睡眠定时已取消")
+    fun cancelSleepTimer() {
+        session.cancelSleepTimer()
+        toast.show("睡眠定时已取消")
     }
 
     // 截图（TextureView 取当前帧，落 Pictures/None Player）
@@ -2072,7 +2081,7 @@ fun PlayerScreen(
     // 键盘就静默失灵。弹层全关且仍在本页时重新请求一次。
     val anyOverlayOpen = fsMenuPage != null || speedPickerVisible || episodePanelVisible ||
         chaptersPanelVisible || subtitleSheetVisible || audioTrackSheetVisible ||
-        pictureSheetVisible || fileInfoVisible || moreSheetVisible
+        pictureSheetVisible || fileInfoVisible || moreSheetVisible || sleepSheetVisible
     LaunchedEffect(anyOverlayOpen) {
         if (!anyOverlayOpen) runCatching { keyFocus.requestFocus() }
     }
@@ -2229,6 +2238,7 @@ fun PlayerScreen(
                             pictureSheetVisible -> pictureSheetVisible = false
                             fileInfoVisible -> fileInfoVisible = false
                             moreSheetVisible -> moreSheetVisible = false
+                            sleepSheetVisible -> sleepSheetVisible = false
                             audioOnly -> navigator.popBackStack()
                             else -> exitFullscreenOrLeave()
                         }
@@ -2595,8 +2605,8 @@ fun PlayerScreen(
                                         volumePercent = volumeState,
                                         favorited = favorited,
                                         hasChapters = chapters.isNotEmpty(),
-                                        sleepLabel = sleepLabel,
-                                        sleepActive = sleepTimerEndsAtMs > 0,
+                                        sleepLabel = rememberSleepTimerLabel(sleepTimerEndsAtMs, sleepAtTrackEnd),
+                                        sleepActive = sleepActive,
                                         onClose = dismiss,
                                         onPage = { fsMenuPage = it },
                                         onLoopMode = { mode ->
@@ -2627,7 +2637,7 @@ fun PlayerScreen(
                                             dismiss()
                                             screenshot()
                                         },
-                                        onSleep = ::toggleSleepTimer,
+                                        onSleepPage = { fsMenuPage = FsMenuPage.SLEEP },
                                         contributors = menuContributors,
                                         contributorMedia = overlayMedia,
                                         contributorPlayer = player,
@@ -2727,6 +2737,20 @@ fun PlayerScreen(
                                             session.selectQueueIndex(index)
                                             dismiss()
                                             controlsVisible = false
+                                        },
+                                        onBack = back,
+                                    )
+
+                                    FsMenuPage.SLEEP -> FsSleepMenuContent(
+                                        endsAtMs = sleepTimerEndsAtMs,
+                                        atTrackEnd = sleepAtTrackEnd,
+                                        onPick = { preset ->
+                                            dismiss()
+                                            pickSleepPreset(preset)
+                                        },
+                                        onCancel = {
+                                            dismiss()
+                                            cancelSleepTimer()
                                         },
                                         onBack = back,
                                     )
@@ -3391,6 +3415,7 @@ fun PlayerScreen(
                 // 文件信息 / 倍速 / 移除——选集只在多集时出现，正好凑满 2 行。
                 // 残行不足 4 个时靠左（CSS grid 行为），不能用 SpaceEvenly——那会把
                 // 残行居中，列就对不上上一行了。
+                val sleepTileLabel = rememberSleepTimerLabel(sleepTimerEndsAtMs, sleepAtTrackEnd)
                 val quickTiles = buildList {
                     add(
                         QuickTileSpec(NpIcon.Pip, "画中画") {
@@ -3432,10 +3457,12 @@ fun PlayerScreen(
                     add(
                         QuickTileSpec(
                             icon = NpIcon.SleepTimer,
-                            label = sleepLabel,
-                            selected = sleepTimerEndsAtMs > 0,
+                            label = sleepTileLabel,
+                            selected = sleepActive,
                         ) {
-                            toggleSleepTimer()
+                            // E234：从"30 分钟开关"升级为子表四档（与全屏菜单同源）
+                            moreSheetVisible = false
+                            sleepSheetVisible = true
                         },
                     )
                     add(
@@ -3608,6 +3635,39 @@ fun PlayerScreen(
                         media = overlayMedia,
                         player = player,
                     )
+                }
+            }
+        }
+
+        // E234：竖屏「睡眠定时」子表——四档 + 关闭，与全屏菜单 SLEEP 子页共用会话状态
+        if (sleepSheetVisible) {
+            NpSheet(
+                onDismiss = { sleepSheetVisible = false },
+                title = "睡眠定时",
+            ) {
+                if (sleepActive) {
+                    Text(
+                        text = rememberSleepTimerLabel(sleepTimerEndsAtMs, sleepAtTrackEnd),
+                        style = NpMonoSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
+                listOf(SleepPreset.MIN15, SleepPreset.MIN30, SleepPreset.MIN60).forEach { preset ->
+                    NpOptRow(text = "${preset.minutes} 分钟", onClick = {
+                        sleepSheetVisible = false
+                        pickSleepPreset(preset)
+                    })
+                }
+                NpOptRow(text = "播完当前", onClick = {
+                    sleepSheetVisible = false
+                    pickSleepPreset(SleepPreset.TRACK_END)
+                })
+                if (sleepActive) {
+                    NpOptRow(text = "关闭睡眠定时", onClick = {
+                        sleepSheetVisible = false
+                        cancelSleepTimer()
+                    })
                 }
             }
         }

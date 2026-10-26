@@ -191,6 +191,11 @@ class AppSettings(private val context: Context) {
         private val KEY_KEEP_SCREEN_ON = booleanPreferencesKey("keep_screen_on")
         private val KEY_GESTURES_ENABLED = booleanPreferencesKey("playback_gestures")
 
+        // E234 睡眠定时：绝对到期时刻（epoch ms；0 = 关）与「播完当前」旗标。
+        // 两键分开存：前者是时刻，后者不是时刻；会话/进程重启按这两个键恢复。
+        private val KEY_SLEEP_TIMER_ENDS_AT = longPreferencesKey("sleep_timer_ends_at_ms")
+        private val KEY_SLEEP_AT_TRACK_END = booleanPreferencesKey("sleep_at_track_end")
+
         // ---- 字幕样式（E131：对齐参考示例的「字幕设置」面板）----
         // 与 `subtitle_<mediaKey>` 那族**per-media** 记忆不同：样式是**全局偏好**
         // （用户挑的字体颜色/大小不该每换一部片就重置），所以不带 mediaKey 后缀。
@@ -491,6 +496,22 @@ class AppSettings(private val context: Context) {
 
     suspend fun setKeepScreenOn(enabled: Boolean) {
         context.dataStore.edit { it[KEY_KEEP_SCREEN_ON] = enabled }
+    }
+
+    /** E234 睡眠定时：绝对到期时刻（epoch ms，0 = 未开启） */
+    val sleepTimerEndsAtMs: Flow<Long> = context.dataStore.data
+        .map { it[KEY_SLEEP_TIMER_ENDS_AT] ?: 0L }
+
+    suspend fun setSleepTimerEndsAt(endsAtMs: Long) {
+        context.dataStore.edit { it[KEY_SLEEP_TIMER_ENDS_AT] = endsAtMs.coerceAtLeast(0L) }
+    }
+
+    /** E234 睡眠定时：「播完当前」档（当前条目放完即暂停，不自动连播） */
+    val sleepAtTrackEnd: Flow<Boolean> = context.dataStore.data
+        .map { it[KEY_SLEEP_AT_TRACK_END] ?: false }
+
+    suspend fun setSleepAtTrackEnd(enabled: Boolean) {
+        context.dataStore.edit { it[KEY_SLEEP_AT_TRACK_END] = enabled }
     }
 
     /**
