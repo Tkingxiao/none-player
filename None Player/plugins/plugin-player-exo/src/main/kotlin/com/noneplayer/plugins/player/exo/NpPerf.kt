@@ -64,7 +64,7 @@ internal object NpPerf {
      * [force] 用于 disable/release——收尾必须落一条最终读数，否则片尾那几帧的
      * 丢弃与最深积压会丢；非强制调用按 2s 限频且同一行不重复打。
      */
-    fun frameSummary(stats: NpFrameStats, force: Boolean = false) {
+    fun frameSummary(stats: NpFrameStats, timing: NpStageTiming? = null, force: Boolean = false) {
         if (!on) return
         val now = SystemClock.elapsedRealtime()
         if (!force && now - lastFrameSummaryAtMs < FRAME_SUMMARY_INTERVAL_MS) return
@@ -73,5 +73,9 @@ internal object NpPerf {
         lastFrameSummaryAtMs = now
         lastFrameSummaryLine = line
         Log.d(TAG, "frames $line")
+        // E245：分段耗时与帧计数同拍输出，两行共用一次限频判断——分开发会让两边的
+        // 采样时点错位，A/B 时算不出"同一时间段"的占比。
+        val stages = timing?.snapshot()
+        if (stages != null && !stages.isEmpty) Log.d(TAG, "stages " + timing.summaryLine())
     }
 }

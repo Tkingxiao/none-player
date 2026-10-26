@@ -70,6 +70,9 @@ class LegacyVideoRenderer(
     /** E245：帧级计数按渲染器实例累计（解码器重建不清零，disable 时收尾并复位）。 */
     private val frameStats = NpFrameStats(rendererName)
 
+    /** E245：分段耗时与 [frameStats] 同生命周期、同一次摘要输出。 */
+    private val stageTiming = NpStageTiming(rendererName)
+
     override fun getName(): String = rendererName
 
     override fun supportsFormat(format: Format): Int {
@@ -96,6 +99,7 @@ class LegacyVideoRenderer(
             codecNameFor = codecNameFor,
             codecFactory = codecFactory,
             stats = frameStats,
+            timing = stageTiming,
         ).also { decoder = it }
     }
 
@@ -103,7 +107,7 @@ class LegacyVideoRenderer(
         try {
             val active = decoder ?: throw DecoderException("legacy decoder released", null)
             active.render(outputBuffer, surfaces.surfaceFor(surface))
-            NpPerf.frameSummary(frameStats)
+            NpPerf.frameSummary(frameStats, stageTiming)
         } catch (e: DecoderException) {
             frameStats.onNativeError()
             throw e
@@ -118,8 +122,9 @@ class LegacyVideoRenderer(
 
     /** 换集/换轨时解码器释放回调之外的兜底——有时 renderer 先 disable 再重建解码器 */
     override fun onDisabled() {
-        NpPerf.frameSummary(frameStats, force = true)
+        NpPerf.frameSummary(frameStats, stageTiming, force = true)
         frameStats.reset()
+        stageTiming.reset()
         surfaces.release()
         super.onDisabled()
     }
@@ -145,6 +150,7 @@ private class LegacyVideoDecoder(
     codecNameFor: (String?) -> String?,
     codecFactory: (codecName: String, extradata: ByteArray?, width: Int, height: Int) -> VideoCodec,
     private val stats: NpFrameStats,
+    private val timing: NpStageTiming,
 ) :
     Decoder<DecoderInputBuffer, VideoDecoderOutputBuffer, DecoderException> {
 
@@ -221,7 +227,11 @@ private class LegacyVideoDecoder(
             // direct scratch 复制处理，行为不变。
             val direct = if (!eos && data != null && data.remaining() > 0) data else null
             stats.onInput()
+            // E245：send 窗口只包 JNI 调用本身（含 native 内部分配），不含记账。
+            val sendStart = System.nanoTime()
+            timing.onFirstInput(sendStart)
             codec.send(direct, pts, eos)
+            timing.onSend(System.nanoTime() - sendStart)
             if (eos) eosReceived = true
             pump(fallbackPts = pts)
         } catch (e: LegacyDecoderException) {
@@ -262,6 +272,8 @@ private class LegacyVideoDecoder(
     fun render(buffer: VideoDecoderOutputBuffer, surface: Surface) {
         val planes = buffer.yuvPlanes ?: throw DecoderException("missing yuv planes", null)
         try {
+            // E245：上屏窗口只包 codec.render（YUV→Surface），不含下方记账。
+            val renderStart = System.nanoTime()
             codec.render(
                 y = planes[0],
                 yStride = buffer.yuvStrides?.get(0) ?: buffer.yStride,
@@ -274,6 +286,8 @@ private class LegacyVideoDecoder(
                 matrix = outputMatrices.remove(buffer) ?: 0,
                 surface = surface,
             )
+            val renderEnd = System.nanoTime()
+            timing.onRender(renderEnd, renderEnd - renderStart)
             stats.onRendered(buffer.skippedOutputBufferCount)
         } catch (e: LegacyDecoderException) {
             stats.onNativeError()
@@ -285,12 +299,18 @@ private class LegacyVideoDecoder(
         // 原生队列必须每次排空（≤4 帧，原生内存），否则 send 撞 EAGAIN；
         // 上屏消费的背压由 dequeueInputBuffer 在 readyOut 满时挡（见上）。
         while (true) {
+            // E245：recv 是"排空原生命令 + 等解码出帧"，copy 是 YUV 拷进 media3 缓冲，
+            // 两者分开记——解 1080p 时到底哪一段在吃时间，只能这样分辨。
+            val recvStart = System.nanoTime()
             val frame = codec.receive() ?: break
+            timing.onRecv(System.nanoTime() - recvStart)
             if (outputStartTimeUs != C.TIME_UNSET && frame.ptsUs != C.TIME_UNSET && frame.ptsUs < outputStartTimeUs) {
                 skipCarry++
                 continue
             }
+            val copyStart = System.nanoTime()
             readyOut.add(fill(frame, fallbackPts))
+            timing.onCopy(System.nanoTime() - copyStart)
             stats.onDecoded(readyOut.size)
         }
         // 原生队列上限只有 4 帧，EOS 后的尾帧要等解码器真正排空再发 EOS。
