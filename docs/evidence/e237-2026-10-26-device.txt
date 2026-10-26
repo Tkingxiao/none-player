@@ -1,0 +1,27 @@
+E237 设备取证（2026-10-26）——全屏菜单「详情」+ 设置页「字幕与截图」组
+设备：**emulator-5554**（Pixel_10_Pro，API 36）。真机 60dd2f94 本批期间 USB 掉线
+（`adb devices` 持续 offline），两处改动均为纯 UI 增量（菜单行 / 设置行 + 既有 AppSettings
+真开关），故以模拟器取证；真机复测欠账已记入边界。
+安装：E237 release APK 覆盖安装 Success（`lastUpdateTime` 为当轮）。
+
+A. 全屏 ⋯ 菜单「详情」行（E237 新增）
+  - 深链起播（xvid-clip.avi，`fs=1` 落纵横屏）→ 顶栏 `播放选项` 点开下拉 →
+    菜单滚到「更多」段：`音轨 / 详情 / 画中画`（详情 bounds [1926,898][2634,959]）；
+  - 点「详情」→ 菜单收起、`视频详情` 卡浮出（dump：视频详情 / 大小 / 文件夹 / 时长
+    等行），与竖屏信息区「详情」同一张 FileInfoCard；
+  - 截图 detail-card.png。
+
+B. 设置页「字幕与截图」组（E237 新增）
+  - 设置 Tab 顶部三组之后新增 eyebrow「字幕与截图」+ 三行：
+    「开启字幕」（开关，AppSettings.subtitleEnabled）、「允许屏幕截图」（开关，
+    screenshotBlocked 取反）、「字幕样式」（无 onClick 的说明行：颜色/大小/位置/描边/
+    延时在播放页 ⋯ → 字幕里调整）；
+  - 开关是真读写：点「允许屏幕截图」行 → dump 的 Switch `checked` 由 true→false，
+    再点 → false→true（DataStore 往返与既有播放页同键同写路径）；
+  - 截图 settings-group.png。
+
+稳定性：模拟器 `adb logcat -d` 检索 0 条 FATAL EXCEPTION。
+边界：
+  - 真机 60dd2f94 USB offline，未在真机复测两处 UI（纯增行，风险面低；下一批可真机补看）；
+  - 「字幕样式」说明行未加跳转（设置页到播放页无直达路由），文案已写明入口位置；
+  - 设置组顺序固定在「手势」之后、「外观与关于」（含插件区块）之前，未做长列表滚动性能读数。
