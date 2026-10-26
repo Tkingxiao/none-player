@@ -313,6 +313,20 @@ adb shell "content query --uri content://media/external/video/media --where \"_d
   一律 MSYS_NO_PATHCONV=1 或整段引号（E-D1），两招都行但要有一招。
 ```
 
+### E-D15 install -r 签名不符会静默失败（E233 实录 ★）
+```
+症状：模拟器 install -r 之后应用"装上了"，但行为还是旧包（旧弹框/旧交互）——
+  首轮 E233 删除测试据此得出了错误结论（"SAF 删除也弹系统框"实为 10-22 旧包的
+  createDeleteRequest）。
+病因：INSTALL_FAILED_UPDATE_INCOMPATIBLE（新包与既有安装签名不符）时 install
+  失败、exit code 非 0，但输出常被 `| tail -1` / 忽略 $? 遮盖成"看起来成功"。
+修复/预防：装机后先核对——
+  adb -s <dev> shell "dumpsys package <pkg> | grep lastUpdateTime"
+  时间不是本次即未更新。签名不符的 QA 机（模拟器）卸载重装（数据可弃）；
+  真机与发布包同签名时 -r 正常。另：本轮首测误导也提示"行为与代码不符先查装机
+  新鲜度"，与 E-B6（APK 同字节判新鲜度）是同一族纪律。
+```
+
 ---
 
 ## 6. 错误目录 D：Shell / Windows
@@ -447,9 +461,10 @@ adb -s <dev> shell "cat /data/local/tmp/ui.xml" | tr '<' '\n' | grep 'text="目�
   横屏/未知进传统横屏全屏；"全屏 ≡ 窗口横向"已不成立——在两侧都判断全屏前先看这个。
 - 迷你条耳机钮是**单向入口**（E232 裁定，只进音频）；退出仅听走音频页「切回视频」，
   别再给耳机钮加"切回视频"的反向语义。
-- 删除只有**一层应用内确认**（E232 裁定，无 `createDeleteRequest` 系统框）；直连删除依赖
-  「所有文件访问」或 SAF 写授权，失败时弹**应用风格引导卡**（E233，去开启 all-files），
-  不是漏实现；新授权目录按 READ|WRITE 持久化。
+- 删除只有**一层应用内确认**（E232 裁定，无 `createDeleteRequest` 系统框）；API 30+ 无
+  「所有文件访问」且文件非本应用属主时，应用**有意不发起删除**（MediaProvider 必弹系统
+  同意框），直接给应用风格引导卡（E233，去开启 all-files）；有权限时走 SAF 树/直删；
+  新授权目录按 READ|WRITE 持久化，26–29 档申请写存储权限。
 - 音频模式队列内切集沿用当前模式（E232）：`carryAudioModeTo` 是唯一落点，
   别再在 `observeEngineIndex`/`selectQueueIndex` 里按下一集记忆重算。
 - 附录 A（任务文档末节）列了全部"明确不做"，开任务前先查，防止重开已裁定项。
