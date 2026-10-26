@@ -57,6 +57,7 @@ import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.npDisplacementAllowed
 import com.noneplayer.core.ui.npMotion
 import com.noneplayer.core.ui.rememberNpHaptics
+import com.noneplayer.plugins.player.ui.chapterSnapPositionMs
 import kotlin.math.roundToInt
 
 /**
@@ -117,6 +118,11 @@ internal fun NpSeekBar(
      * 仍传小值时由本组件夹取，新增调用点没有"忘记改"的机会。
      */
     touchBand: Dp = NpDimens.touchTarget,
+    /**
+     * E235：章节起点（ms）。非空时在轨道上画刻度，且**点按**离刻度 12dp 内时
+     * 吸附到章节起点（拖动保持精确 seek，不被吸走）。
+     */
+    chapterStartsMs: List<Long> = emptyList(),
 ) {
     val ink = LocalNpInk.current
     // A27：44dp 红线在组件内部兜底（竖屏拆行曾显式传 18dp）。
@@ -189,12 +195,21 @@ internal fun NpSeekBar(
                         true
                     }
                 }
-                .pointerInput(maxPosition) {
+                .pointerInput(maxPosition, chapterStartsMs) {
                     detectTapGestures { offset ->
                         haptics.performHaptic(NpHaptic.Tick)
+                        val width = size.width.toFloat()
+                        val fraction = if (width > 0f) offset.x.coerceIn(0f, width) / width else 0f
+                        val snapFraction = if (width > 0f) CHAPTER_SNAP_DP.toPx() / width else 0f
                         onScrubStart()
+                        // E235：点按吸附到最近章起点（12dp 内），拖动手势不走这条
                         onScrubChange(
-                            offset.x.coerceIn(0f, size.width.toFloat()) / size.width * maxPosition,
+                            chapterSnapPositionMs(
+                                tapFraction = fraction,
+                                durationMs = durationMs,
+                                chapterStartsMs = chapterStartsMs,
+                                snapFraction = snapFraction,
+                            ).toFloat(),
                         )
                         onScrubEnd()
                     }
@@ -257,6 +272,22 @@ internal fun NpSeekBar(
                 size = Size(size.width * fraction, trackH),
                 cornerRadius = radius,
             )
+            // E235：章节刻度——细竖线压在轨道上（起点与片尾不画）；深/浅主题取 fg 半透明
+            if (durationMs > 0L && chapterStartsMs.isNotEmpty()) {
+                val tickHalf = 4.dp.toPx()
+                val stroke = 1.5.dp.toPx()
+                chapterStartsMs.forEach { ms ->
+                    if (ms in 1 until durationMs) {
+                        val x = size.width * (ms.toFloat() / maxPosition)
+                        drawLine(
+                            color = ink.fg.copy(alpha = 0.45f),
+                            start = Offset(x, centerY - tickHalf),
+                            end = Offset(x, centerY + tickHalf),
+                            strokeWidth = stroke,
+                        )
+                    }
+                }
+            }
             drawCircle(
                 color = ink.accent,
                 radius = knobRadius.toPx(),
@@ -326,3 +357,6 @@ private val NpSeekBubbleFallDp = 8.dp
 
 /** 落点胶囊静止时高出轨道的距离——把它抬到拇指上方，避免手指遮住读数 */
 private val NpSeekBubbleRiseDp = 28.dp
+
+/** E235：点按吸附到章节刻度的最大距离（dp；轨道像素按轨宽换取 snapFraction） */
+private val CHAPTER_SNAP_DP = 12.dp

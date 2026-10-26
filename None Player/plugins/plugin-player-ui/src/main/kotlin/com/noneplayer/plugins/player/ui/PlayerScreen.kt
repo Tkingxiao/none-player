@@ -1847,6 +1847,8 @@ fun PlayerScreen(
     // 内嵌轨道与章节（引擎经 onTracksChanged/onMetadata 推送；面板据此渲染）
     val tracks by player.tracks.collectAsStateWithLifecycle()
     val chapters by player.chapters.collectAsStateWithLifecycle()
+    // E235：进度条章节刻度/点按吸附的输入（章节每片固定，按列表记忆即可）
+    val chapterStartsMs = remember(chapters) { chapters.map { it.startMs } }
     val subtitleEnabled by settings.subtitleEnabled.collectAsStateWithLifecycle(initialValue = true)
     // 字幕三态文案：外挂优先，其次内嵌轨被选中（CC 钮点亮与面板取值同一真相）
     val subtitleText = when {
@@ -2564,6 +2566,7 @@ fun PlayerScreen(
                         // 2026-10-23 用户裁定：窄屏全屏也不拆行——进度条与操作键同排，
                         // 放不下时先省总时长，不再退回两行。
                         preferSingleRow = true,
+                        chapterStartsMs = chapterStartsMs,
                         // 全屏形态恒处于全屏，但**出口不是同一个**（E129 / 审查 #10）：
                         // 手机横窗是退出沉浸、留在播放页；类 PC 横窗走 popBackStack 回浏览。
                         // 两种结果给两枚不同的形状与名称，一个展开折角不再暗示两件事。
@@ -2949,6 +2952,7 @@ fun PlayerScreen(
                                 showTransport = false,
                                 // 手机竖屏一条到底，不要再叠一行进度把画面盖住。
                                 preferSingleRow = true,
+                                chapterStartsMs = chapterStartsMs,
                                 // A27（2026-10-15 订正）：拆行（Split）那条路曾传 18dp，实报点不中；
                                 // 44dp 红线由 NpSeekBar 内部夹取，这里传令牌把调用点也写对。
                                 seekTouchBand = NpDimens.touchTarget,

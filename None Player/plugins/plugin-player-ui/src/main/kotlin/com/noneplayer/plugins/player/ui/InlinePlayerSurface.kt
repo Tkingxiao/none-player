@@ -507,6 +507,9 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                         if (userDragging) dragPositionMs else positionState.value.toFloat()
                     }
                 }
+                // E235：进度条章节刻度/点按吸附（章节每片固定，按列表记忆）
+                val inlineChapters by player.chapters.collectAsStateWithLifecycle()
+                val inlineChapterStarts = remember(inlineChapters) { inlineChapters.map { it.startMs } }
                 PlayerBottomControls(
                         visible = controlsVisible && !locked,
                         applyInsets = false,
@@ -564,6 +567,7 @@ internal class InlinePlayerSurface : InlinePlaybackProvider {
                         onSubtitleAnchor = { subtitleAnchor = it },
                         onSeekBarAnchor = { seekAnchor = it },
                         preferSingleRow = true,
+                        chapterStartsMs = inlineChapterStarts,
                 )
             }
             if (mediaOpened && state is PlaybackState.Error) {

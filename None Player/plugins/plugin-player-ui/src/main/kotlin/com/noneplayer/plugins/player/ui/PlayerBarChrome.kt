@@ -507,6 +507,8 @@ internal fun PlayerBottomControls(
      * 右栏传 true 时，只要单行还放得下就与全屏保持同一行。
      */
     preferSingleRow: Boolean = false,
+    /** E235：章节起点（ms）——进度条画刻度并点按吸附，空表 = 无章节 */
+    chapterStartsMs: List<Long> = emptyList(),
 ) {
     val idleColor = Color.White.copy(alpha = 0.9f)
     val content: @Composable () -> Unit = {
@@ -592,6 +594,7 @@ internal fun PlayerBottomControls(
                             onScrubEnd = onScrubEnd,
                             onScrubCancel = onScrubCancel,
                             touchBand = seekTouchBand,
+                            chapterStartsMs = chapterStartsMs,
                             modifier = Modifier.fillMaxWidth().anchorReporter(onSeekBarAnchor),
                         )
                     }
@@ -643,6 +646,7 @@ internal fun PlayerBottomControls(
                     // E129（审查 #3）：取消与提交是两个出口——被系统边缘返回打断的拖动不 seek
                     onScrubCancel = onScrubCancel,
                     touchBand = inlineSeekBand,
+                    chapterStartsMs = chapterStartsMs,
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 8.dp)

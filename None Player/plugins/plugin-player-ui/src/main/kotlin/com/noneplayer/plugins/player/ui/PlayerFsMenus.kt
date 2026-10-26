@@ -38,6 +38,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
@@ -502,7 +503,8 @@ private fun KeyEvent.isRowConfirmUp(): Boolean =
  * 菜单行：图标（可选）+ 文字 + 右侧值/勾选/箭头。
  *
  * [check] 非 null 时展示勾选位（未选中也占位，避免选中瞬间文字被挤动）；
- * [chevron] 表示"点进去还有一层"（drill-in 子页）。
+ * [chevron] 表示"点进去还有一层"（drill-in 子页）；
+ * [enabled] = false 时降透明度且点击/键盘确认无效（E235：章节面板的端点按钮）。
  */
 @Composable
 fun FsMenuRow(
@@ -514,12 +516,14 @@ fun FsMenuRow(
     check: Boolean? = null,
     chevron: Boolean = false,
     danger: Boolean = false,
+    enabled: Boolean = true,
 ) {
-    val tint = when {
+    val baseTint = when {
         danger -> OnMediaDanger
         active -> MaterialTheme.colorScheme.primary
         else -> Color.White
     }
+    val tint = if (enabled) baseTint else baseTint.copy(alpha = 0.38f)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -529,15 +533,15 @@ fun FsMenuRow(
             .clip(RoundedCornerShape(10.dp))
             // A27：显式 focusable（原因同 FsMenuBackRow）——菜单行可被方向键 / D-pad 命中。
             .onKeyEvent { event ->
-                if (event.isRowConfirmUp()) {
+                if (enabled && event.isRowConfirmUp()) {
                     onClick()
                     true
                 } else {
                     false
                 }
             }
-            .focusable()
-            .clickable(onClick = onClick)
+            .focusable(enabled = enabled)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 10.dp, vertical = 9.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -1347,10 +1351,14 @@ fun FsPictureMenuContent(
 }
 
 /**
- * 章节页：列表 + 当前章标记。
+ * 章节页：列表 + 当前章标记 + **上一章/下一章**（E235）。
  *
  * §9.2：位置以 [State] 传入并折成派生的"当前章下标"——进度上报约 250ms 一次，
  * 直接逐行比对会让整张下拉菜单跟着重画（它是浮在播放画面上的重组热点）。
+ *
+ * E235：① 顶部两行导航按当前下标步进（端点行降透明度、点击无效）；
+ * ② 打开面板自动滚到当前章（`LazyColumn` + `scrollToItem`），集数多时不必手找；
+ * ③ 章节行本就有点击跳章，这里不改。
  */
 @Composable
 fun FsChaptersMenuContent(
@@ -1368,15 +1376,40 @@ fun FsChaptersMenuContent(
             }
         }
     }
+    val current = activeIndex.value
+    val listState = rememberLazyListState()
     FsMenuBackRow(title = "章节（${chapters.size}）", onBack = onBack)
-    chapters.forEachIndexed { index, chapter ->
-        val current = index == activeIndex.value
-        FsMenuRow(
-            label = "${index + 1}. ${chapter.title}",
-            value = formatTimestamp(chapter.startMs),
-            active = current,
-            onClick = { onSelect(chapter) },
-        )
+    FsMenuRow(
+        label = "上一章",
+        icon = NpIcon.SkipPrevious,
+        enabled = current > 0,
+        onClick = { chapterStepIndex(current, chapters.size, forward = false)?.let { onSelect(chapters[it]) } },
+    )
+    FsMenuRow(
+        label = "下一章",
+        icon = NpIcon.SkipNext,
+        enabled = current in 0 until chapters.lastIndex,
+        onClick = { chapterStepIndex(current, chapters.size, forward = true)?.let { onSelect(chapters[it]) } },
+    )
+    FsMenuTitle("章节列表")
+    LazyColumn(
+        state = listState,
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(max = 320.dp),
+    ) {
+        itemsIndexed(chapters) { index, chapter ->
+            FsMenuRow(
+                label = "${index + 1}. ${chapter.title}",
+                value = formatTimestamp(chapter.startMs),
+                active = index == current,
+                onClick = { onSelect(chapter) },
+            )
+        }
+    }
+    // 打开面板/换章时把当前章带进视口；-1（位置在全部章之前）落到第 0 章。
+    LaunchedEffect(current, chapters) {
+        if (chapters.isNotEmpty()) runCatching { listState.scrollToItem(current.coerceAtLeast(0)) }
     }
 }
 
