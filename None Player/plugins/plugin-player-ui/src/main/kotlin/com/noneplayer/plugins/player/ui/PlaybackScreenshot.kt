@@ -21,6 +21,16 @@ internal fun savePlaybackScreenshot(
         notify("当前已禁止截图")
         return
     }
+    // E233：API 26–28 的 MediaStore 插入需要 WRITE_EXTERNAL_STORAGE（29+ 贡献自有
+    // 媒体不需要）。权限已由 E233 的清单与申请表（sdkInt ≤ 29 → READ|WRITE）覆盖，
+    // 但用户可能还没补授权——这里先给明确提示，不再让 insert 抛异常后只说"保存失败"。
+    val writeAccessOk = android.os.Build.VERSION.SDK_INT > 28 ||
+        context.checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    if (screenshotLegacyWriteMissing(android.os.Build.VERSION.SDK_INT, writeAccessOk)) {
+        notify("缺少存储权限，无法保存截图（请在媒体库补授权后重试）")
+        return
+    }
     if (surface == null || surface.width <= 0 || surface.height <= 0) {
         notify("画面尚未就绪，稍后再试")
         return
@@ -65,3 +75,12 @@ internal fun savePlaybackScreenshot(
         notify(if (saved) "截图已保存到相册" else "截图保存失败")
     }
 }
+
+/**
+ * E233：API 26–28 的截图保存是否卡在缺失的写存储权限（纯函数，便于单测）。
+ *
+ * 29+ 向 MediaStore 贡献自有媒体不需要 `WRITE_EXTERNAL_STORAGE`（且该权限在 30+
+ * 已失效），只有 26–28 的 legacy 插入把它当硬前置——缺它时 insert 直接抛异常。
+ */
+internal fun screenshotLegacyWriteMissing(sdkInt: Int, writeAccessOk: Boolean): Boolean =
+    sdkInt <= 28 && !writeAccessOk
