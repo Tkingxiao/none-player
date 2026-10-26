@@ -1,0 +1,49 @@
+# E245 软解渲染链帧级计数真机取证（2026-10-27）
+
+## 设备 / 安装
+
+- 设备：`60dd2f94`，Xiaomi 23043RP34C / pipa，Android 14（SDK 34），HyperOS `OS2.0.20.0.UMZCNXM`。
+- 应用：`com.noneplayer.app` debug APK（本轮 `:app:assembleDebug` 构建）；测试包 `com.noneplayer.plugins.player.exo.test`。
+- 安装：`adb -s 60dd2f94 install -r -t <app-debug.apk>` → `Success`；`dumpsys package com.noneplayer.app | grep lastUpdateTime` = `2026-10-27 00:51:06`（本次安装，不是旧包）。
+- 日志开关：`adb -s 60dd2f94 shell setprop log.tag.NpPerf DEBUG`（默认静默，只有显式打开才输出）。
+
+## 读数：WMV2 legacy 软解路径的帧计数
+
+命令：
+
+```text
+adb -s 60dd2f94 logcat -c
+adb -s 60dd2f94 shell am instrument -w -r \
+  -e class com.noneplayer.plugins.player.exo.LegacyPlaybackTest#wmv2RendersFrames \
+  com.noneplayer.plugins.player.exo.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+结果：`OK (1 test)`，耗时 `3.483s`，`INSTRUMENTATION_CODE: -1`。
+
+```text
+10-27 00:51:19.931  4068  4095 D NpPerf  : frames renderer=LegacyVideoRenderer in=8  dec=8  rend=1  drop=0 qavg=4.50 qmax=8 err=0
+10-27 00:51:21.979  4068  4095 D NpPerf  : frames renderer=LegacyVideoRenderer in=40 dec=40 rend=32 drop=0 qavg=7.28 qmax=8 err=0
+10-27 00:51:22.960  4068  4095 D NpPerf  : frames renderer=LegacyVideoRenderer in=46 dec=45 rend=45 drop=0 qavg=7.36 qmax=8 err=0
+```
+
+读数含义：
+
+| 字段 | 读数 | 判定 |
+|---|---|---|
+| `in` / `dec` | 46 / 45 | 输入与解出一致（末帧 EOS 之后不再计输入），无丢包式缺口 |
+| `rend` | 45 | 解出的帧全部上屏，`drop=0` |
+| `qavg` / `qmax` | 7.36 / 8 | 队列深度贴着 `MAX_READY_OUT=8` 运行——**E204 的入口背压生效**（解码快于上屏时不再无限吃输入） |
+| `err` | 0 | 本轮无 native 解码错误 |
+
+摘要节奏：首帧后一条、约 2s 一条限频摘要、`onDisabled` 再强制收尾一条（共 3 条），符合"禁止逐帧打日志"的设计。
+
+## 稳定性
+
+- 全量 logcat（2110 行）`FATAL EXCEPTION` 计数 **0**；测试进程正常结束。
+- 同段日志可见 `NpFfmpegRenderer surface clone ok` 与 `LegacyVideoRenderer surface clone ok`（Surface 克隆路径未被计数改动影响）。
+
+## 边界（没做什么）
+
+- 只给 `LegacyVideoRenderer`（legacy / npff 两个后端共用）加了计数；**平台 renderer（MediaCodecVideoRenderer）与 NpFfmpegVideoRenderer 委托层没有帧计数**（后者是纯委托，拿不到内部帧循环）。
+- 只测了一条 320×240 WMV2 短片（8 帧级用例）；**没有做** 480p/720p/1080p BT.709 三路径 60s A/B、JNI copy 开关对照、extractor read / JNI send / 帧拷贝 / 首帧的分段耗时与功耗读数——这些仍是 E245 的后续切片。
+- 计数只在 `log.tag.NpPerf DEBUG` 打开时输出，release 包默认静默（不改变正常播放路径时序）。

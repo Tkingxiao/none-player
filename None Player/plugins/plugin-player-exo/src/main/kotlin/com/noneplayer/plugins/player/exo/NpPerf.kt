@@ -46,9 +46,32 @@ internal class NpPerfClock {
 internal object NpPerf {
     private const val TAG = "NpPerf"
 
+    /** E245：帧摘要限频；逐帧打日志会反过来改变被测时序。 */
+    private const val FRAME_SUMMARY_INTERVAL_MS = 2_000L
+
+    private var lastFrameSummaryAtMs = 0L
+    private var lastFrameSummaryLine: String? = null
+
     private val on get() = Log.isLoggable(TAG, Log.DEBUG)
 
     fun sessionMark(label: String) {
         if (on) Log.d(TAG, "session $label")
+    }
+
+    /**
+     * E245：软解渲染链帧摘要（输入/解出/上屏/丢弃/队列深度）。
+     *
+     * [force] 用于 disable/release——收尾必须落一条最终读数，否则片尾那几帧的
+     * 丢弃与最深积压会丢；非强制调用按 2s 限频且同一行不重复打。
+     */
+    fun frameSummary(stats: NpFrameStats, force: Boolean = false) {
+        if (!on) return
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastFrameSummaryAtMs < FRAME_SUMMARY_INTERVAL_MS) return
+        val line = stats.summaryLine()
+        if (!force && line == lastFrameSummaryLine) return
+        lastFrameSummaryAtMs = now
+        lastFrameSummaryLine = line
+        Log.d(TAG, "frames $line")
     }
 }

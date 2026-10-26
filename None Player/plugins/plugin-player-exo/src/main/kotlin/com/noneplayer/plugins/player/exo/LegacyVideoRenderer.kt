@@ -67,6 +67,9 @@ class LegacyVideoRenderer(
     private var decoder: LegacyVideoDecoder? = null
     private val surfaces = OwnedSurfaceCloner(rendererName)
 
+    /** E245：帧级计数按渲染器实例累计（解码器重建不清零，disable 时收尾并复位）。 */
+    private val frameStats = NpFrameStats(rendererName)
+
     override fun getName(): String = rendererName
 
     override fun supportsFormat(format: Format): Int {
@@ -92,6 +95,7 @@ class LegacyVideoRenderer(
             rendererName = rendererName,
             codecNameFor = codecNameFor,
             codecFactory = codecFactory,
+            stats = frameStats,
         ).also { decoder = it }
     }
 
@@ -99,6 +103,10 @@ class LegacyVideoRenderer(
         try {
             val active = decoder ?: throw DecoderException("legacy decoder released", null)
             active.render(outputBuffer, surfaces.surfaceFor(surface))
+            NpPerf.frameSummary(frameStats)
+        } catch (e: DecoderException) {
+            frameStats.onNativeError()
+            throw e
         } finally {
             outputBuffer.release()
         }
@@ -110,6 +118,8 @@ class LegacyVideoRenderer(
 
     /** 换集/换轨时解码器释放回调之外的兜底——有时 renderer 先 disable 再重建解码器 */
     override fun onDisabled() {
+        NpPerf.frameSummary(frameStats, force = true)
+        frameStats.reset()
         surfaces.release()
         super.onDisabled()
     }
@@ -134,6 +144,7 @@ private class LegacyVideoDecoder(
     rendererName: String,
     codecNameFor: (String?) -> String?,
     codecFactory: (codecName: String, extradata: ByteArray?, width: Int, height: Int) -> VideoCodec,
+    private val stats: NpFrameStats,
 ) :
     Decoder<DecoderInputBuffer, VideoDecoderOutputBuffer, DecoderException> {
 
@@ -209,10 +220,12 @@ private class LegacyVideoDecoder(
             // `ByteArray(remaining())` 拷一份；非 direct 兜底由 LegacyCodec 的
             // direct scratch 复制处理，行为不变。
             val direct = if (!eos && data != null && data.remaining() > 0) data else null
+            stats.onInput()
             codec.send(direct, pts, eos)
             if (eos) eosReceived = true
             pump(fallbackPts = pts)
         } catch (e: LegacyDecoderException) {
+            stats.onNativeError()
             throw DecoderException(e.message ?: "legacy decoder", e)
         } finally {
             inputBuffer.clear()
@@ -261,7 +274,9 @@ private class LegacyVideoDecoder(
                 matrix = outputMatrices.remove(buffer) ?: 0,
                 surface = surface,
             )
+            stats.onRendered(buffer.skippedOutputBufferCount)
         } catch (e: LegacyDecoderException) {
+            stats.onNativeError()
             throw DecoderException(e.message ?: "legacy decoder", e)
         }
     }
@@ -276,6 +291,7 @@ private class LegacyVideoDecoder(
                 continue
             }
             readyOut.add(fill(frame, fallbackPts))
+            stats.onDecoded(readyOut.size)
         }
         // 原生队列上限只有 4 帧，EOS 后的尾帧要等解码器真正排空再发 EOS。
         if (eosReceived && !eosQueued && codec.isEof) {
