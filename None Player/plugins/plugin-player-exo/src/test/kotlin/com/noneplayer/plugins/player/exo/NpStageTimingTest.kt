@@ -49,7 +49,7 @@ class NpStageTimingTest {
         val line = t.summaryLine()
         assertTrue(line, line.startsWith("renderer=LegacyVideoRenderer n=1 "))
         assertTrue(line, line.contains(" send=1.00ms "))
-        assertTrue(line, line.endsWith(" first=-"))
+        assertTrue(line, line.contains(" first=- "))
     }
 
     @Test
@@ -63,6 +63,42 @@ class NpStageTimingTest {
     }
 
     @Test
+    fun percentilesReportBucketUpperBound() {
+        val t = NpStageTiming("r")
+        t.onFirstInput(0)
+        repeat(90) { t.onSend(ms(1)); t.onRender(1, ms(1)) }
+        repeat(9) { t.onSend(ms(2)); t.onRender(1, ms(10)) }
+        t.onSend(ms(3)); t.onRender(1, ms(50))
+        val s = t.snapshot()
+        // 0.25ms 一档：1ms → 1.25，10ms → 10.25，50ms → 50.25
+        assertEquals(1_250L, s.renderP50Us)
+        assertEquals(10_250L, s.renderP95Us)
+        assertEquals(2_250L, s.sendP95Us)  // send 95 分位落在 2ms 桶（上界 2.25ms）
+    }
+
+    @Test
+    fun percentilesWithoutSamplesShowDash() {
+        val t = NpStageTiming("r")
+        val s = t.snapshot()
+        assertEquals(-1L, s.renderP50Us)
+        assertEquals(-1L, s.renderP95Us)
+        assertEquals(-1L, s.sendP95Us)
+        val line = t.summaryLine()
+        assertTrue(line, line.contains(" rend_p50=- rend_p95=- send_p95=-"))
+    }
+
+    @Test
+    fun resetClearsPercentiles() {
+        val t = NpStageTiming("r")
+        t.onFirstInput(0)
+        repeat(10) { t.onSend(ms(4)); t.onRender(1, ms(20)) }
+        t.reset()
+        val s = t.snapshot()
+        assertEquals(-1L, s.renderP95Us)
+        assertEquals(-1L, s.sendP95Us)
+    }
+
+    @Test
     fun resetClearsAccumulatorsAndFirstFrame() {
         val t = NpStageTiming("r")
         t.onFirstInput(0)
@@ -73,6 +109,6 @@ class NpStageTimingTest {
         assertEquals(0L, s.frames)
         assertEquals(-1L, s.firstFrameUs)
         assertTrue(s.isEmpty)
-        assertTrue(t.summaryLine().endsWith(" first=-"))
+        assertTrue(t.summaryLine().contains(" first=- "))
     }
 }
