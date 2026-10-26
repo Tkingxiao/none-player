@@ -222,6 +222,9 @@ class MainActivity : ComponentActivity() {
         // 系统转屏截图和用户看见的就是剧集封面，而不是竖屏播放页。
         // 旋转角也要先记下，交接起飞才能算出这一下转了 ±90 还是 180。
         NpDevicePose.noteDisplayRotation(displayRotation())
+        // E247：交班前先按「旧形态」抓一帧快照。这一刻窗口还是旧尺寸、Compose 还是旧版式，
+        // 抓到的是用户真正离开的那一屏；晚到 super 之后抓就变成新布局（首页）了。
+        runCatching { NpRotationGhost.captureAndShow(this, NpDevicePose.turnDegrees) }
         NpFormHandoff.handoffForWindowSize(newConfig.screenWidthDp, newConfig.screenHeightDp)
         super.onConfigurationChanged(newConfig)
     }

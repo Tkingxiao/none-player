@@ -62,6 +62,9 @@ object NpFormHandoff {
      */
     private var flipState = NpFormFlipState(desktop = false)
 
+    /** 上一次因为"显示真的转过"而起过 morph 的旋转角；防同一次转屏被多次上报重复起飞。 */
+    private var rotationMorphAt = -1
+
     /**
      * 档位变化的轮次号。**同一轮只允许起飞一次**（第四轮真机取证）：
      * 转屏会被两条路径各报一次，第二次进来时手里既没有帧也没有源矩形（那一侧的画面已经
@@ -290,7 +293,14 @@ object NpFormHandoff {
         val (next, changed) = npReduceFormFlip(flipState, config)
         flipState = next
         // 档位没变 = 不是交接，同一份配置的第二次上报也在这里被拒。
-        if (!changed) return
+        if (!changed) {
+            // E247：手机两向都落在紧凑档，档位不翻 → 从前永远不起飞，转屏读起来就是硬闪
+            //（用户实报"手机横竖屏切换是直接闪现，没有切换动画"）。播放页在场时，只要显示
+            // 真的转了角度就补一轮同形 morph：画面与按钮从旧窗口的矩形飞进新窗口，版式不变。
+            beginRotationMorph(next.desktop)
+            return
+        }
+        rotationMorphAt = NpDevicePose.displayRotation
         val leaving = !next.desktop
         // **换版式之前**冻结这一批部件矩形：morph 的起点就是"上一形态里它们所在的位置"，
         // 晚一步登记上来的已经是新形态的矩形，起点就没了（E133）。
@@ -298,6 +308,21 @@ object NpFormHandoff {
         // 搬——后者会把竖屏顶部满宽的画面搬到横屏窗口正中央（用户实报的"先全屏再跳右栏"）。
         NpMorph.begin(desktop = next.desktop, turn = NpDevicePose.turnDegrees)
         if (leaving) handOverToPlayerPage() else handOverToPane()
+    }
+
+    /**
+     * 手机档的转屏补间：档位没翻，但显示真的转了 90°/180° 时也起一轮 morph（E247）。
+     *
+     * 只给播放页补：库页没有跨形态要搬位置的部件，补了只是让整块列表抖一下。
+     */
+    private fun beginRotationMorph(desktop: Boolean) {
+        val rotation = NpDevicePose.displayRotation
+        if (rotation == rotationMorphAt) return
+        rotationMorphAt = rotation
+        if (!playerPageAlive) return
+        if (NpDevicePose.turnDegrees == 0) return
+        if (NpMorph.isFlying) return
+        NpMorph.begin(desktop = desktop, turn = NpDevicePose.turnDegrees)
     }
 
     /**

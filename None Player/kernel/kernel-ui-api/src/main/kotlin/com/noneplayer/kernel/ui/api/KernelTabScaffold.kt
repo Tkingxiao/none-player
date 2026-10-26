@@ -496,7 +496,12 @@ fun KernelTabScaffold(
                 // 也要下一帧才落值，所以转屏那一帧 `paneProgress` 还是 1.0——右栏的
                 // TextureView 还挂在树上、列表还被挤成 320dp。既然右栏只在类 PC 档存在，
                 // 离开那一档就没有"正在收起"可言，进度直接按 0 算。
-                val paneShown = if (windowInfo.isDesktopLike) paneProgress else 0f
+                // E247：进类 PC 的那一轮交接里，右栏宽度动画即使 snap() 也要下一帧才落值，
+                // 首帧 paneShown=0 会把画面按"列表铺满"排一次——用户读成"先切全屏、再缩进
+                // 右栏"。交接窗口内直接按 1 排版，让画面第一帧就有自己的落点可飞。
+                val paneShown = if (windowInfo.isDesktopLike) {
+                    if (NpFormHandoff.tookOverToPane()) 1f else paneProgress
+                } else 0f
                 val detailPaneOccupied = paneInUse || paneShown > 0.04f
                 CompositionLocalProvider(LocalNpPaneOccupied provides detailPaneOccupied) {
                     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {

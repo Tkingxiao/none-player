@@ -8,6 +8,7 @@ import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Rect
@@ -20,6 +21,7 @@ import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.npDisplacementAllowed
 import com.noneplayer.core.ui.npDuration
+import kotlinx.coroutines.flow.first
 
 /**
  * 形态切换（横屏三栏 ↔ 竖屏播放页）的**整屏 morph**。
@@ -108,6 +110,9 @@ object NpMorph {
      */
     private fun accepts(desktop: Boolean?): Boolean =
         desktop == null || !isFlying || desktop == targetDesktop
+
+    /** 已登记的新形态部件数（驱动者用它决定"有没有东西可飞"）。 */
+    internal val partCount: Int get() = current.size
 
     fun recordWindow(size: IntSize, desktop: Boolean? = null) {
         if (size.width <= 0 || size.height <= 0) return
@@ -351,33 +356,32 @@ fun Modifier.npMorphPart(
 @Composable
 fun NpMorphDriver() {
     val generation = NpMorph.generation
-    val ready = NpMorph.geometryReady
     val duration = npDuration(Motion.FormMorph)
     val displacement = npDisplacementAllowed()
     SideEffect { NpMorph.displacementAllowed = displacement }
-    LaunchedEffect(generation, ready, duration, displacement) {
+    LaunchedEffect(generation, displacement) {
         if (generation == 0) return@LaunchedEffect
         if (!displacement) {
             NpMorph.end()
             return@LaunchedEffect
         }
-        if (!ready) return@LaunchedEffect
-        // 进出对称：见 [NpEasing.Morph] 的取舍说明（Silk 会把行程堆在开头 150ms 里）。
+        // E247：等几何**不许**靠"整页重组顺手带一脚"。真机实测 recordWindow 在 395ms 就量到
+        // 了新窗口，驱动却等到 826ms 才被重组唤醒、911ms 才拿到第一帧——用户看到的"转屏先换
+        // 版式、部件过一会儿才飞"就是这段空窗。这里直接盯状态位，一变就在下一帧起跑。
+        snapshotFlow { NpMorph.geometryReady }.first { it }
+        // 再等第一件部件登记上来才起飞：几何一就位就跑的话，新页面那几个部件还没组合完，
+        // 它们会在飞行**中途**突然出现（进度已 30%+），看起来是"跳到半路开始动"。
+        // 兜底 900ms：目标形态若一件部件都没有（纯淡入页），到点也照样起飞。
+        kotlinx.coroutines.withTimeoutOrNull(900L) {
+            snapshotFlow { NpMorph.partCount }.first { it > 0 }
+        }
         val easing = NpEasing.Morph
         var startedAt = 0L
         while (true) {
             val frameNanos = withFrameNanos { it }
             if (startedAt == 0L) {
-                // **等平台让开**：新形态的几何量到了，但窗口这头几百毫秒里放的是系统自己的
-                // 转屏动画（snapshot 旋转 + 黑底），我们的补间若从这一刻起算，会在"用户还
-                // 看不见"的时候把 Silk 的前段走完——那条曲线的 87% 行程都在前 30% 时间里，
-                // 剩下的尾巴读起来就是"没有动画、直接换版式"（用户实报的两种说法）。
-                // 停在 e=0（各部件仍在旧位置）等它演完，代价是零：这段时间本来就看不见。
-                val holdMs = NpMorph.startedAtMs + MORPH_SETTLE_MS - NpHandoffTime.now()
-                if (holdMs > 0L) {
-                    NpMorph.advance(0f)
-                    continue
-                }
+                // **e=0 那一帧先画出去**：闸门打开的这一帧 progress 仍是 0，部件画在旧位置上；
+                // 补间从下一帧才开始，所以第一帧新版式不会先闪一下落点（见本文档 §节拍）。
                 startedAt = frameNanos
                 NpMorph.advance(0f)
                 continue
@@ -393,22 +397,12 @@ fun NpMorphDriver() {
 }
 
 /**
- * 一轮 morph 的天花板：480ms 的补间 + 一两帧余量。
+ * 一轮 morph 的天花板：560ms 的补间 + 余量（漂移/掉帧时也不会挂在半路）。
  *
  * 驱动者若被中途拆掉（极端情况下整页换掉），`progress` 会停在半路；没有这道天花板，
  * `isFlying` 就会永久压住整页转场与右栏宽度动画。
  */
 private const val FLIGHT_CEILING_MS = 1_500L
-
-/**
- * 平台转屏动画的让位窗（ms，从 [NpMorph.begin] 起算）。
- *
- * 取值来自真机录屏：`ROTATION_ANIMATION_JUMPCUT` 在部分 ROM（本机 HyperOS / Android 14）
- * 上不生效，系统仍会拿旧窗口的 snapshot 转 90° 并压一层黑底，约 250~350ms。
- * 我们的补间必须从**它演完之后**起算——Silk 的 87% 行程都在前 30% 时间里，
- * 若这 260ms 被系统动画盖住，用户看到的就只剩缓入的尾巴，读作"没有动画"。
- */
-private const val MORPH_SETTLE_MS = 260L
 
 /** 画面在飞行中的自转幅度（占显示旋转角的比例）：见 [npMorphPart] 的 `rotate`。 */
 private const val ROTATION_SHARE = 0.4f

@@ -1,0 +1,95 @@
+# E247 转屏交接动画（2026-10-27，真机 60dd2f94）
+
+## 0. 设备 / 安装 / 夹具
+
+- 设备：小米平板 6（60dd2f94），Android 14 / API 34 / MIUI，物理窗口横 2880×1800 ⇄ 竖 1800×2880。
+- 安装：debug 包 `install -r -t`，最后一轮 `lastUpdateTime=2026-10-27 03:09:21`（期间因设备上残留 release 签名包触发
+  `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，按 E-D15 卸载重装并重发三项运行时权限）。
+- 夹具：`sdcard/Movies/np-1080p-h264-60s.mp4`（46,005,968 B，平台路径）、`np-1080p-wmv2-60s.avi`（46,094,828 B，软解路径）。
+- 转屏注入：`settings put system accelerometer_rotation 0` + `user_rotation 1|0`；三项动画缩放均为 1（实测
+  `window_animation_scale`/`transition_animation_scale`/`animator_duration_scale` = 1）。
+- 时间线读数来源：临时插桩 `NpRotDbg`（`adb logcat -d -v time -s NpRotDbg`，dt 一律相对当次 `NpMorph.begin`），
+  **取证后已全部回滚**（`git grep -c NpRotDbg` = 0）。
+
+## 1. 考古：现象不是"动画被删"
+
+- `git log -S` 覆盖 `NpMorph.kt`/`NpFormHandoff.kt`/`Motion.kt`/`Theme.kt`/`KernelTabScaffold.kt`：最近改动为
+  f2c13e3、108585c、611038b、a1640cf（E164），**E241–E245 六次提交没有一个文件命中动画链**；a4d6994 唯一的 UI 文件
+  `LibraryScreen.kt` 只改了 `Uri.parse(...).toUri()` 一行（lint）。
+- 插桩实测（改前 HEAD）：横→竖 `begin parts=23 win=2880x1800` → `flight-end progress=1.0 prev=23`；竖→横
+  `begin parts=12` → `flight-end`。两向都真的在飞，`npDuration(Motion.FormMorph)=560` 全程跑满。
+- 结论：用户看到的是**起跑时机与版式顺序**问题（下面 §2/§3），不是动效被移除。
+
+## 2. 改前时间线（问题复现）
+
+横→竖（播放中，gen=2）：
+- t=0 `activity cfg=720x1112 rot=0` → `noteForm FLIP desktop=false` → `morph begin` →
+  `handOverToPlayerPage route=player?uri=... go=true`（导航确实同毫秒发出）
+- t=395 `morph geom w=1800 h=2880 parts=0`（新窗口几何已量到，部件还没登记）
+- t=450 `driver entry gen=2 ready=false`
+- t=552 `playerPage compose`（此间屏幕上是竖屏外壳，即用户说的"先闪竖屏首页"）
+- t=826 `driver entry gen=2 ready=true` → t=911 `driver START parts=12` → t=1465 `morph end`
+
+竖→横（播放中，gen=3）：
+- t=0 `noteForm FLIP desktop=true` → `morph begin turn=90` → `handOverToPane ... retire=true`
+- t=275 `morph geom w=2880 h=1800` → t=325 `driver entry ready=false`
+- t=710 `paneShown=1.0 desktop=true`（右栏 710ms 才出现，此前按全宽列表排版 = "先进横屏全屏"）
+- t=830 `driver START parts=23` → t=1364 `morph end`
+
+## 3. 改后时间线
+
+驱动重写（`snapshotFlow { geometryReady }.first { it }` + `withTimeoutOrNull(900) { partCount > 0 }` + 首帧
+`advance(0f)` 起算，删除 `MORPH_SETTLE_MS=260` 静态等待）与右栏首帧 `paneShown=1f` 之后：
+
+- 横→竖：`driver START` 从 911ms → **383 / 412 / 463 / 490 / 514 / 528 / 541ms**（多轮抽样）；
+  幽灵层 `ghost show` 落在 150–360ms，正好盖住"新窗口已画出、播放页尚未组合"的那段。
+- 竖→横：`paneShown=1.0` 首帧即满宽（原 710ms），`driver START` 830 → **841ms**（该轮）并稳定在 0.8s 内收尾。
+- 飞行时长两向恒 560ms（`driver START` → `morph end` 差值），无跳帧。
+- 播放态 vs 暂停态差异不稳定：暂停态 `START=574/849(幽灵)`，播放态多轮 383–541ms——**不是恒定的 700ms 卡顿**，
+  见 §7 边界。
+
+## 4. 幽灵层方向（用户实报"先倒转 180°"的根因）
+
+做法：临时把 `NpRotationGhost.FADE_DELAY_MS` 改成 4000ms（取证用长停留，取证后已改回 240ms），
+`user_rotation 1` 抓旧帧 `old_land.png`(2880×1800) → 切 `user_rotation 0` → 1.5s 后抓 `ghost.png`(1800×2880)，
+ffmpeg 转灰度 rawvideo 逐像素 MAD（两者字节数均 5,184,000）：
+
+| ghost 对照 | 修正前 `rotation = turnDegrees` | 修正后 `rotation = -turnDegrees` |
+|---|---|---|
+| `transpose=2`（逆时针 90°） | **MAD 0.89** | 42.29 |
+| `transpose=1`（顺时针 90°） | 42.25 | **MAD 0.87** |
+| `transpose=1,transpose=1`（180°） | 46.76 | 48.04 |
+
+- 修正前幽灵层实际逆时针转 90°，而系统口径要求旧画面反向转 −δ（`turnDegrees` 是"画面要转过去的角"，两者符号相反），
+  差 180° —— 与用户"先把横屏界面逆转 180 度再切换"的描述一致。
+- 修正后同法复测落在顺时针 90°（MAD 0.87），方向已翻转。
+
+## 5. 稳定性
+
+- 干净包 4 次连转（`user_rotation` 0/1/0/1）：`pidof com.noneplayer.app` = 7366 存活、`logcat -b crash` 中
+  `com.noneplayer.app` 计数 0、`ANR in` 计数 0。
+- 平板压 Compact 等效（`wm size 1080x2400; wm density 440`）横竖各转一次：无崩溃、进程存活；已 `wm size reset`、
+  `wm density reset`。
+- 收尾状态：`accelerometer_rotation=1`、`user_rotation=0`。
+
+## 6. 门禁读数（2026-10-27）
+
+- `gradlew.bat test assembleDebug assembleRelease lint --console=plain`（cwd `None Player`）**BUILD SUCCESSFUL in 1m 23s**，
+  1291 actionable / 47 executed / 1 from cache / 1243 up-to-date（定稿轮 `tools/gate-e247b.log`；上一轮 2m 7s 同读数、`tools/gate-e247.log`）。
+- test **164 套件 / 1146 项 / 0 失败 / 1 跳过**（基线 1143 + 3，即 E245d 的 `NpStageTiming` 分位用例）；
+  lint **15 份 0 issue**；release **29,257,479 B**、debug **66,222,573 B**。
+- release 与 E245c 同字节，按 E-B6 三件套核对新鲜度：首个门禁轮 `:app:compileReleaseKotlin`/`:app:minifyReleaseWithR8`/
+  `:app:packageRelease`/`:app:assembleRelease` **均非 UP-TO-DATE**；定稿轮只改注释与 import 顺序，`:app:compileReleaseKotlin` 执行、
+  `minifyReleaseWithR8`/`packageRelease` UP-TO-DATE（class 文件逐字节未变）。APK mtime 2026-10-26T19:14:54Z（每轮拷贝覆盖写）；
+  debug 包 dex 内含 `NpRotationGhost` 字面量。
+
+## 7. 边界（没验证什么、为什么）
+
+- **手机档未在真机上验证**：场边只有平板 60dd2f94（另两台真机不在手边），手机形态用 `wm size/density` 压 Compact 等效验证，
+  只覆盖"不崩 + 进程存活"，飞行观感需真机确认。
+- **无有效录屏**：本机 `screenrecord` 产出恒定 2880×1800 画布（亮度序列近乎不变），不能用于判版式切换；`screencap` 单张
+  约 550ms，短于 560ms 飞行，故视觉证据以"幽灵层方向 MAD + 时间线读数"替代逐帧走势。
+- **播放态起跑仍晚于暂停态**（383–541ms vs 574ms 起的个别轮次受设备负载影响），转屏瞬间播放页部件首次布局要等
+  surface/解码器重挂，未在本次消除；验收口径取"幽灵层覆盖住空窗 + 飞行满 560ms"。
+- `keepsDesktopChrome` 的 800ms 窗只在 morph 未量到几何时生效，属兜底，未单独造用例。
+- 手机档 `beginRotationMorph` 只对播放页起飞（库页无跨形态共享部件），库页转屏仍是系统默认过渡，未改。
