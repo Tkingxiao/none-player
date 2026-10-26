@@ -219,6 +219,9 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     val settings = remember { kernel.services.get<AppSettings>() }
     // §8.3：播放历史/收藏（进度、时间序、收藏键都从这里来）
     val history = remember { kernel.services.get<HistoryRepository>() }
+    // E232：删除成功后广播 MediaDeleted（播放会话据此停掉正在播的那一条）。
+    // 声明提前到删除回调之前——Kotlin 局部变量不支持前向引用。
+    val eventBus = remember { kernel.services.get<EventBus>() }
     val windowInfo = LocalNpWindowInfo.current
     val compact = windowInfo.isCompact
     // 跨 Tab 跳转通道（首页"文件夹"区块 → 文件夹 Tab）。见 [FolderNav] 与
@@ -513,70 +516,29 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     }
 
     // ---- 长按菜单「删除」（删除设备上的文件）----
-    // R+ 走 MediaStore.createDeleteRequest：系统弹出自己的确认框，用户确认才删——
-    // 破坏性动作的最后一道门在系统手里，应用侧没有"悄悄删"的路径。
+    // E232 用户裁定：**应用内确认是唯一一道确认**。旧实现在应用确认之后还走
+    // `MediaStore.createDeleteRequest`，Android 11+ 会再弹一次系统确认框——那套
+    // UI/样式与播放器无关，用户明确要求去掉、只保留应用自己的确认。
+    // 删除按能力顺序尝试：SAF 授权树写入（有写授权时）→ ContentResolver 直接删除
+    // （文件属主 / 已授予「所有文件访问」）。都不行就如实提示，不再借系统弹框。
     // 结果无论成败都做一次重扫（增量对比，没变则零写盘）。
     var pendingDelete by remember { mutableStateOf<MediaItem?>(null) }
-    val deleteLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.StartIntentSenderForResult(),
-    ) { result ->
-        if (result.resultCode == android.app.Activity.RESULT_OK) {
-            android.widget.Toast.makeText(context, "已删除", android.widget.Toast.LENGTH_SHORT).show()
-        }
-        scanAll()
-    }
     val requestDelete: (MediaItem) -> Unit = { item ->
-        val uri = runCatching { item.uri.toUri() }.getOrNull()
-        val isDocument = item.id.startsWith("saf-")
-        when {
-            uri?.scheme == null -> android.widget.Toast.makeText(
+        scope.launch {
+            val trees = settings.scanFolderUris.first()
+            val ok = withContext(Dispatchers.IO) {
+                deleteMediaItem(context, item, trees)
+            }
+            android.widget.Toast.makeText(
                 context,
-                "无法解析该条目的地址，删除已取消",
-                android.widget.Toast.LENGTH_SHORT,
+                if (ok) "已删除" else "删除失败：请在系统设置中开启「所有文件访问」后重试",
+                android.widget.Toast.LENGTH_LONG,
             ).show()
-
-            // SAF 文档项：没有系统级删除确认流程；目录为只读授权时会失败并如实告知
-            isDocument -> scope.launch {
-                val ok = withContext(Dispatchers.IO) {
-                    runCatching {
-                        android.provider.DocumentsContract.deleteDocument(context.contentResolver, uri)
-                    }.isSuccess
-                }
-                android.widget.Toast.makeText(
-                    context,
-                    if (ok) "已删除" else "删除失败：该目录为只读授权，无法删除其中的文件",
-                    android.widget.Toast.LENGTH_LONG,
-                ).show()
-                if (ok) scanAll()
-            }
-
-            android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R -> runCatching {
-                val request = android.provider.MediaStore.createDeleteRequest(
-                    context.contentResolver,
-                    listOf(uri),
-                )
-                deleteLauncher.launch(
-                    androidx.activity.result.IntentSenderRequest.Builder(request.intentSender).build(),
-                )
-            }.onFailure {
-                android.widget.Toast.makeText(
-                    context,
-                    "无法发起删除：${it.message ?: "系统拒绝了请求"}",
-                    android.widget.Toast.LENGTH_LONG,
-                ).show()
-            }
-
-            // API 26–29：没有系统确认流程，直接删除；失败如实告知
-            else -> scope.launch {
-                val ok = withContext(Dispatchers.IO) {
-                    runCatching { context.contentResolver.delete(uri, null, null) }.isSuccess
-                }
-                android.widget.Toast.makeText(
-                    context,
-                    if (ok) "已删除" else "删除失败：没有删除该文件的权限",
-                    android.widget.Toast.LENGTH_LONG,
-                ).show()
-                if (ok) scanAll()
+            if (ok) {
+                // E232：让播放会话停掉"正在播的那一条"——引擎握着的旧句柄不会因为
+                // 文件消失而自动停，迷你条/通知也会残留一条不存在的媒体。
+                eventBus.publish(KernelEvent.MediaDeleted(item.id, item.uri))
+                scanAll()
             }
         }
     }
@@ -603,7 +565,6 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     }
     val refreshing = scanProgress.active
     val pullState = androidx.compose.material3.pulltorefresh.rememberPullToRefreshState()
-    val eventBus = remember { kernel.services.get<EventBus>() }
     val haptics = rememberNpHaptics()
 
     // 详情页跟随队列：引擎推进播放项（自动连播 / 通知栏 ⏭）时，右栏画面已经换集，
@@ -2826,3 +2787,136 @@ private fun rememberSortedMediaItems(
     }
     return asyncSorted ?: syncSorted
 }
+
+/**
+ * E232：删除一个媒体文件（**不再走系统二次确认**）。
+ *
+ * 能力顺序：
+ * ① 授权 SAF 树里按 `RELATIVE_PATH + DISPLAY_NAME` 找到文档并 `deleteDocument`
+ *    （目录授权带写权限时可行；只读授权会抛 SecurityException，继续下一步）；
+ * ② `ContentResolver.delete` 直接删（文件属主、或已授予「所有文件访问」）。
+ * 两步都没权限就返回 false，由调用方 toast 告知——不再用 `createDeleteRequest`
+ * 换一次与播放器无关的系统确认框。
+ */
+private suspend fun deleteMediaItem(
+    context: android.content.Context,
+    item: MediaItem,
+    authorizedTrees: List<String>,
+): Boolean = withContext(Dispatchers.IO) {
+    val resolver = context.contentResolver
+    val uri = runCatching { item.uri.toUri() }.getOrNull() ?: return@withContext false
+    if (item.id.startsWith("saf-")) {
+        return@withContext runCatching {
+            android.provider.DocumentsContract.deleteDocument(resolver, uri)
+        }.getOrDefault(false)
+    }
+    val meta = queryMediaFileMeta(resolver, uri)
+    if (meta != null && deleteViaAuthorizedTree(resolver, authorizedTrees, meta.first, meta.second)) {
+        return@withContext true
+    }
+    runCatching { resolver.delete(uri, null, null) > 0 }.getOrDefault(false)
+}
+
+/** MediaStore 条目 → (相对目录, 显示名)；旧系统没有 RELATIVE_PATH 列时返回 null 走直接删除。 */
+private fun queryMediaFileMeta(
+    resolver: android.content.ContentResolver,
+    uri: android.net.Uri,
+): Pair<String, String>? = runCatching {
+    // RELATIVE_PATH 是 API 29+ 列；旧系统没有它，直接走 ContentResolver.delete。
+    if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return null
+    resolver.query(
+        uri,
+        arrayOf(
+            android.provider.MediaStore.MediaColumns.DISPLAY_NAME,
+            android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+        ),
+        null,
+        null,
+        null,
+    )?.use { cursor ->
+        if (!cursor.moveToFirst()) return@use null
+        val name = cursor.getString(0)?.takeIf { it.isNotBlank() } ?: return@use null
+        val relative = cursor.getString(1)?.trim('/') ?: return@use null
+        relative to name
+    }
+}.getOrNull()
+
+/**
+ * 在授权树里逐段下钻到文件所在目录，再按显示名删文档。
+ *
+ * 与播放页字幕查找同一条路径规则（`treeDocId` 冒号后是相对 external storage 的路径），
+ * 但这里不能跨插件引用——插件间禁止互相依赖，同一小段纯字符串逻辑各自持有一份。
+ */
+private fun deleteViaAuthorizedTree(
+    resolver: android.content.ContentResolver,
+    authorizedTrees: List<String>,
+    relativePath: String,
+    displayName: String,
+): Boolean {
+    for (tree in authorizedTrees) {
+        val treeUri = runCatching { tree.toUri() }.getOrNull() ?: continue
+        val treeDocId = runCatching {
+            android.provider.DocumentsContract.getTreeDocumentId(treeUri)
+        }.getOrNull() ?: continue
+        val treeRoot = treeDocId.substringAfter(':', "").trim('/')
+        val segments = treeRelativeSegments(treeRoot, relativePath) ?: continue
+        var dirDocId = treeDocId
+        var walked = true
+        for (segment in segments) {
+            val child = findChildDocument(resolver, treeUri, dirDocId, segment)
+            if (child == null) {
+                walked = false
+                break
+            }
+            dirDocId = child
+        }
+        if (!walked) continue
+        val fileDocId = findChildDocument(resolver, treeUri, dirDocId, displayName) ?: continue
+        val docUri = runCatching {
+            android.provider.DocumentsContract.buildDocumentUriUsingTree(treeUri, fileDocId)
+        }.getOrNull() ?: continue
+        if (runCatching {
+                android.provider.DocumentsContract.deleteDocument(resolver, docUri)
+            }.getOrDefault(false)
+        ) {
+            return true
+        }
+    }
+    return false
+}
+
+/** 视频相对路径落在授权树里的剩余目录段；不在树内返回 null（同播放页字幕查找口径）。 */
+private fun treeRelativeSegments(treeRoot: String, relativePath: String): List<String>? {
+    val tree = treeRoot.trim('/')
+    val target = relativePath.trim('/')
+    if (tree.isEmpty()) return target.split('/').filter { it.isNotEmpty() }
+    if (target == tree) return emptyList()
+    if (!target.startsWith("$tree/")) return null
+    return target.removePrefix("$tree/").split('/').filter { it.isNotEmpty() }
+}
+
+/** 在授权树某目录下按显示名找直接子文档 id；找不到返回 null。 */
+private fun findChildDocument(
+    resolver: android.content.ContentResolver,
+    treeUri: android.net.Uri,
+    parentDocumentId: String,
+    displayName: String,
+): String? = runCatching {
+    val children = android.provider.DocumentsContract
+        .buildChildDocumentsUriUsingTree(treeUri, parentDocumentId)
+    resolver.query(
+        children,
+        arrayOf(
+            android.provider.DocumentsContract.Document.COLUMN_DOCUMENT_ID,
+            android.provider.DocumentsContract.Document.COLUMN_DISPLAY_NAME,
+        ),
+        null,
+        null,
+        null,
+    )?.use { cursor ->
+        while (cursor.moveToNext()) {
+            if (cursor.getString(1) == displayName) return@use cursor.getString(0)
+        }
+        null
+    }
+}.getOrNull()

@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -76,6 +77,7 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -101,10 +103,13 @@ import com.noneplayer.core.data.SUBTITLE_SCALE_MIN
 import com.noneplayer.core.data.SUBTITLE_VERTICAL_MAX
 import com.noneplayer.core.data.SUBTITLE_VERTICAL_MIN
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.kind
 import com.noneplayer.core.ui.Motion
 import com.noneplayer.core.ui.NpDimens
 import com.noneplayer.core.ui.NpEasing
 import com.noneplayer.core.ui.NpIcon
+import com.noneplayer.core.ui.NpMediaColor
 import com.noneplayer.core.ui.NpMediaPalette
 import com.noneplayer.core.ui.NpIconButton
 import com.noneplayer.core.ui.NpMonoSmall
@@ -1372,7 +1377,7 @@ fun FsChaptersMenuContent(
     }
 }
 
-/** 选集页：同文件夹队列 + 当前项标记 */
+/** 选集页：同文件夹队列 + 封面 + 当前项标记 */
 @Composable
 fun FsEpisodesMenuContent(
     queue: List<MediaItem>,
@@ -1393,14 +1398,113 @@ fun FsEpisodesMenuContent(
                 items = queue,
                 key = { index, item -> "ep:${item.sourceId}:${item.id}:$index" },
             ) { index, item ->
-                val current = index == currentIndex
-                FsMenuRow(
-                    label = "${index + 1}. " + item.title.ifBlank { item.uri.substringAfterLast('/') },
-                    value = if (current) "播放中" else null,
-                    active = current,
+                FsEpisodeRow(
+                    item = item,
+                    index = index,
+                    current = index == currentIndex,
                     onClick = { onSelect(index) },
                 )
             }
+        }
+    }
+}
+
+/**
+ * 全屏下拉菜单里的选集行（E232）：封面 + 序号 + 标题 + 播放中标记。
+ *
+ * 封面与迷你条/仅听页共用 `MiniCoverImage` 的采样解码；菜单仍是画面上的暗色玻璃
+ * 语言，所以封面描边/占位底按覆盖层取白系而不是应用 ink。
+ * 行的可聚焦/确认键处理与 [FsMenuRow] 同口径（触摸模式下方向键/D-pad 也能命中）。
+ */
+@Composable
+private fun FsEpisodeRow(
+    item: MediaItem,
+    index: Int,
+    current: Boolean,
+    onClick: () -> Unit,
+) {
+    val activeColor = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 52.dp)
+            .clip(RoundedCornerShape(10.dp))
+            .onKeyEvent { event ->
+                if (event.isRowConfirmUp()) {
+                    onClick()
+                    true
+                } else {
+                    false
+                }
+            }
+            .focusable()
+            .clickable(onClick = onClick)
+            .background(if (current) activeColor.copy(alpha = 0.16f) else Color.Transparent)
+            .padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(9.dp),
+    ) {
+        FsEpisodeCover(item = item)
+        Text(
+            text = "${index + 1}".padStart(2, '0'),
+            style = NpMonoSmall,
+            color = if (current) activeColor else Color.White.copy(alpha = 0.5f),
+            maxLines = 1,
+            modifier = Modifier.width(22.dp),
+        )
+        Text(
+            text = item.title.ifBlank { item.uri.substringAfterLast('/') },
+            style = NpTypography.bodyMedium.copy(
+                fontWeight = if (current) FontWeight.SemiBold else FontWeight.Normal,
+            ),
+            color = if (current) activeColor else Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f),
+        )
+        if (current) {
+            Text(
+                text = "播放中",
+                style = NpMonoSmall,
+                color = activeColor,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/** 全屏选集封面：视频 48×27（16:9）、音频 32×32；无图退回色相底 + 类型图标。 */
+@Composable
+private fun FsEpisodeCover(item: MediaItem) {
+    val isAudio = item.kind == MediaKind.AUDIO
+    val width = if (isAudio) 32.dp else 48.dp
+    val height = if (isAudio) 32.dp else 27.dp
+    val shape = RoundedCornerShape(6.dp)
+    Box(
+        modifier = Modifier
+            .size(width = width, height = height)
+            .clip(shape)
+            .background(
+                NpMediaColor.coverBrush(NpMediaColor.itemHue(item.folder, isAudio = isAudio)),
+            )
+            .border(1.dp, Color.White.copy(alpha = 0.18f), shape),
+    ) {
+        val cover = item.coverUri
+        if (cover != null) {
+            MiniCoverImage(
+                uriString = cover,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+                maxLongestPx = 128,
+            )
+        } else {
+            Icon(
+                imageVector = if (isAudio) NpIcon.Sound else NpIcon.Film,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.55f),
+                modifier = Modifier.align(Alignment.Center).size(15.dp),
+            )
         }
     }
 }

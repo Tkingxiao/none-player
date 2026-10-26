@@ -402,6 +402,7 @@ internal fun AudioPane(
                 visible = visible,
                 queue = queue,
                 currentIndex = queueIndex,
+                title = "播放列表",
                 onSelect = {
                     session.selectQueueIndex(it)
                     queueVisible = false

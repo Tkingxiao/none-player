@@ -16,11 +16,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
@@ -31,7 +33,6 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
@@ -41,20 +42,31 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.noneplayer.core.media.MediaItem
+import com.noneplayer.core.media.MediaKind
+import com.noneplayer.core.media.cardTitle
+import com.noneplayer.core.media.kind
 import com.noneplayer.core.ui.LocalNpInk
+import com.noneplayer.core.ui.NpEyebrow
 import com.noneplayer.core.ui.NpIcon
+import com.noneplayer.core.ui.NpIconButton
+import com.noneplayer.core.ui.NpMediaColor
 import com.noneplayer.core.ui.NpRadius
 import com.noneplayer.core.ui.NpSpace
 import com.noneplayer.core.ui.NpMono
 import com.noneplayer.core.ui.NpMonoSmall
+import com.noneplayer.core.ui.NpTypography
 import com.noneplayer.core.ui.formatTimestamp
 import com.noneplayer.core.ui.LocalNpReduceMotion
 import com.noneplayer.core.ui.npItemFadeSpec
 import com.noneplayer.core.ui.npPressScale
+import com.noneplayer.core.ui.npShadow
+import com.noneplayer.core.ui.npTopHairline
 import com.noneplayer.kernel.ui.api.npMorphPart
 
 /**
@@ -136,6 +148,10 @@ internal fun EndedOverlay(
  *
  * 用**底部抽屉式**而非居中对话框：集数可能几十上百，抽屉天然可滚动、
  * 拇指可达（平板/手机一致），且不遮挡正在播的画面上半部分（半透明 scrim + 列表只占下半屏）。
+ *
+ * E232：整块改成应用原生语言（ink surface / 顶角 r20 / 把手 / NpEyebrow 页头 /
+ * 行内封面与等宽读数），不再用 Material3 `surfaceContainerHigh` 那套与库页割裂的灰面板；
+ * 仅听音频页的「播放列表」与视频页的「选集」共用这一份版式，只换标题。
  */
 @Composable
 internal fun EpisodePanel(
@@ -146,7 +162,12 @@ internal fun EpisodePanel(
     onSelect: (Int) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier,
+    /** 页头称谓：视频形态「选集」，仅听音频形态「播放列表」 */
+    title: String = "选集",
+    /** 队列行的时长（AVI 等 MediaStore 给 0 时由宿主补读文件头） */
+    durationFor: (MediaItem) -> Long = { it.durationMs },
 ) {
+    val ink = LocalNpInk.current
     // 审查批次 C3：抽屉自下推入、向下退出（旧实现是硬切）
     val slide by npSheetSlide(visible)
     Box(
@@ -155,7 +176,7 @@ internal fun EpisodePanel(
             .graphicsLayer {
                 alpha = (1f - slide).coerceIn(0f, 1f)
             }
-            .background(Color.Black.copy(alpha = 0.55f))
+            .background(ink.scrim)
             // 点空白处关闭：给用户"点外面就收起来"的直觉出口
             .clickable(
                 interactionSource = remember { MutableInteractionSource() },
@@ -163,76 +184,186 @@ internal fun EpisodePanel(
                 onClick = onDismiss,
             ),
     ) {
-        Surface(
-            tonalElevation = 6.dp,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-            shape = RoundedCornerShape(topStart = NpRadius.sheet, topEnd = NpRadius.sheet),
+        val shape = RoundedCornerShape(topStart = NpRadius.sheet, topEnd = NpRadius.sheet)
+        Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
                 // 只占下半屏：上半留出画面，用户能边看边选
-                .fillMaxHeight(0.55f)
+                .fillMaxHeight(0.62f)
                 // 审查批次 C3：位移在**绘制期**读，逐帧只重绘不重组整个列表
                 .graphicsLayer { translationY = size.height * slide }
+                .npShadow(ink, shape, elevation = 18.dp)
+                .clip(shape)
+                .background(ink.surface)
+                .border(1.dp, ink.border, shape)
+                .npTopHairline(ink)
                 // E49：横屏手势导航条可能在左/右，用 safeDrawing 而非只认底部
                 .windowInsetsPadding(WindowInsets.safeDrawing),
         ) {
-            Column {
+            // 把手（与 NpSheet 同一形态：38×4 圆头）
+            Box(
+                modifier = Modifier
+                    .padding(top = 8.dp, bottom = 2.dp)
+                    .size(width = 38.dp, height = 4.dp)
+                    .clip(RoundedCornerShape(NpRadius.chip))
+                    .background(ink.border)
+                    .align(Alignment.CenterHorizontally),
+            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 20.dp, end = 6.dp, top = 2.dp, bottom = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                NpEyebrow(text = title)
                 Text(
-                    text = "选集（${queue.size}）",
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(16.dp),
+                    text = "${queue.size} 项",
+                    style = NpMonoSmall,
+                    color = ink.muted,
                 )
-                // M24 增删动画：位移交给 animateItem 的 spring，淡入淡出用 `Switch`(220)
-                // ——删掉的一集 fade 掉、下面的行跟着补位，比"瞬间消失"少一次视觉跳跃。
-                val queueFade = npItemFadeSpec()
-                LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                    itemsIndexed(queue, key = { _, item -> item.id }) { index, item ->
-                        val selected = index == currentIndex
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .animateItem(fadeInSpec = queueFade, fadeOutSpec = queueFade)
-                                .fillMaxWidth()
-                                .clickable { onSelect(index) }
-                                .background(
-                                    if (selected) {
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    } else {
-                                        Color.Transparent
-                                    },
-                                )
-                                .padding(horizontal = 16.dp, vertical = 12.dp),
-                        ) {
-                            Text(
-                                text = "${index + 1}",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.width(32.dp),
-                            )
-                            Text(
-                                text = item.title.ifBlank { item.uri.substringAfterLast('/') },
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = if (selected) {
-                                    MaterialTheme.colorScheme.onPrimaryContainer
-                                } else {
-                                    MaterialTheme.colorScheme.onSurface
-                                },
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
-                            )
-                            if (selected) {
-                                Text(
-                                    text = "播放中",
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
-                                )
-                            }
-                        }
-                    }
+                Spacer(modifier = Modifier.weight(1f))
+                if (currentIndex in queue.indices) {
+                    Text(
+                        text = "${currentIndex + 1} / ${queue.size}",
+                        style = NpMonoSmall,
+                        color = ink.accent,
+                    )
+                }
+                NpIconButton(
+                    icon = NpIcon.Close,
+                    contentDescription = "关闭$title",
+                    onClick = onDismiss,
+                    size = 34.dp,
+                    iconSize = 16.dp,
+                    tint = ink.muted,
+                )
+            }
+            // M24 增删动画：位移交给 animateItem 的 spring，淡入淡出用 `Switch`(220)
+            // ——删掉的一集 fade 掉、下面的行跟着补位，比"瞬间消失"少一次视觉跳跃。
+            val queueFade = npItemFadeSpec()
+            LazyColumn(modifier = Modifier.fillMaxWidth().padding(top = 2.dp)) {
+                itemsIndexed(queue, key = { _, item -> item.identity }) { index, item ->
+                    EpisodeSheetRow(
+                        item = item,
+                        index = index,
+                        selected = index == currentIndex,
+                        durationMs = durationFor(item),
+                        onClick = { onSelect(index) },
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = queueFade,
+                            fadeOutSpec = queueFade,
+                        ),
+                    )
                 }
             }
+        }
+    }
+}
+
+/**
+ * 原生版式选集行：封面 + 序号 + 标题 + 时长；当前项 accent 底 + 左侧 3dp 竖条 + 声柱。
+ *
+ * 封面用与迷你条/音频页同一套 `MiniCoverImage`（按显示尺寸采样解码，不整张解）；
+ * 无封面时退回与媒体库一致的色相底 + 类型图标，不留空洞。
+ */
+@Composable
+private fun EpisodeSheetRow(
+    item: MediaItem,
+    index: Int,
+    selected: Boolean,
+    durationMs: Long,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val ink = LocalNpInk.current
+    val isAudio = item.kind == MediaKind.AUDIO
+    val rowShape = RoundedCornerShape(NpRadius.button)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 10.dp, vertical = 2.dp)
+            .clip(rowShape)
+            .background(if (selected) ink.accentSoft else Color.Transparent)
+            .clickable(onClick = onClick)
+            .heightIn(min = 56.dp)
+            .padding(start = 8.dp, end = 14.dp, top = 7.dp, bottom = 7.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .width(3.dp)
+                .height(22.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(if (selected) ink.accent else Color.Transparent),
+        )
+        Text(
+            text = "${index + 1}".padStart(2, '0'),
+            style = NpMono.copy(fontSize = 11.sp),
+            color = if (selected) ink.accent else ink.muted,
+            maxLines = 1,
+            modifier = Modifier
+                .padding(start = 8.dp, end = 10.dp)
+                .width(24.dp),
+        )
+        EpisodeCover(item = item, isAudio = isAudio)
+        Text(
+            text = item.cardTitle.ifBlank { item.uri.substringAfterLast('/') },
+            style = NpTypography.bodyMedium,
+            color = if (selected) ink.accent else ink.fg,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = 10.dp),
+        )
+        if (selected) {
+            PlayingBars(modifier = Modifier.padding(horizontal = 8.dp))
+        }
+        if (durationMs > 0) {
+            Text(
+                text = formatTimestamp(durationMs),
+                style = NpMonoSmall,
+                color = if (selected) ink.accent else ink.muted,
+                maxLines = 1,
+            )
+        }
+    }
+}
+
+/** 行封面：视频 56×32（16:9），音频 40×40（方形）；无图走色相底 + 类型图标。 */
+@Composable
+private fun EpisodeCover(item: MediaItem, isAudio: Boolean) {
+    val ink = LocalNpInk.current
+    val width = if (isAudio) 40.dp else 56.dp
+    val height = if (isAudio) 40.dp else 32.dp
+    val shape = RoundedCornerShape(NpRadius.cover)
+    Box(
+        modifier = Modifier
+            .size(width = width, height = height)
+            .clip(shape)
+            .background(
+                NpMediaColor.coverBrush(NpMediaColor.itemHue(item.folder, isAudio = isAudio)),
+            )
+            .border(1.dp, ink.border, shape),
+    ) {
+        val cover = item.coverUri
+        if (cover != null) {
+            MiniCoverImage(
+                uriString = cover,
+                contentDescription = item.cardTitle,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+                maxLongestPx = 160,
+            )
+        } else {
+            Icon(
+                imageVector = if (isAudio) NpIcon.Sound else NpIcon.Film,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.55f),
+                modifier = Modifier.align(Alignment.Center).size(16.dp),
+            )
         }
     }
 }
