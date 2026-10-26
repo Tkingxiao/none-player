@@ -51,6 +51,9 @@ internal object NpPerf {
 
     private var lastFrameSummaryAtMs = 0L
     private var lastFrameSummaryLine: String? = null
+    /** E245：平台/NextLib 路径单独一套限频状态——两条路径的摘要不能互相顶掉。 */
+    private var lastPlatformSummaryAtMs = 0L
+    private var lastPlatformSummaryLine: String? = null
 
     private val on get() = Log.isLoggable(TAG, Log.DEBUG)
 
@@ -77,5 +80,22 @@ internal object NpPerf {
         // 采样时点错位，A/B 时算不出"同一时间段"的占比。
         val stages = timing?.snapshot()
         if (stages != null && !stages.isEmpty) Log.d(TAG, "stages " + timing.summaryLine())
+    }
+
+    /**
+     * E245：平台 / NextLib 渲染路径的帧摘要（库回调口径，见 [NpPlatformFrameStats]）。
+     *
+     * 与软解那行分开打（前缀 platform），因为两边计数来源不同——同一次播放可能
+     * 只走其中一条，混在一起会被误读成"同一条路径有两套数"。
+     */
+    fun platformSummary(stats: NpPlatformFrameStats, force: Boolean = false) {
+        if (!on || stats.isEmpty) return
+        val now = SystemClock.elapsedRealtime()
+        if (!force && now - lastPlatformSummaryAtMs < FRAME_SUMMARY_INTERVAL_MS) return
+        val line = stats.summaryLine()
+        if (!force && line == lastPlatformSummaryLine) return
+        lastPlatformSummaryAtMs = now
+        lastPlatformSummaryLine = line
+        Log.d(TAG, "platform " + line)
     }
 }

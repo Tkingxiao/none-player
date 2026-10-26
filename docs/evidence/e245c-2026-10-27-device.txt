@@ -1,0 +1,45 @@
+E245 第三切片 设备取证 —— 平台路径帧读数（轮询 DecoderCounters 口径）
+日期：2026-10-27（本机时钟）
+设备：60dd2f94（Xiaomi 23043RP34C（pipa）/ Android 14 / SDK 34，高通）
+包：com.noneplayer.app debug（install -r -t Success，lastUpdateTime=2026-10-27 01:39:03）
+权限：pm grant READ_MEDIA_VIDEO / READ_MEDIA_AUDIO / POST_NOTIFICATIONS
+日志开关：setprop log.tag.NpPerf DEBUG
+
+夹具（tools/e245-media/）：
+  np-720p-h264-baseline-e.mp4   720p30 H.264 baseline，20s（= baseline 副本改名，绕开续播位置）
+  np-1080p-h264.mp4             1080p24 H.264，10s
+  wl-wmv2-wmav2.asf             WMV2/WMAV2 软解（npff）路径
+
+一、平台路径（MediaCodecVideoRenderer，OMX.qcom.video.decoder.avc）
+  入口：库页卡片 → 详情 sheet →「播放」
+  读数（每 2s 一行，摘要限频 2s）：
+  01:39:29.759 platform renderer=Platform:OMX.qcom.video.decoder.avc n=30  drop=0 in=31  rend=30  skip=0 first=1001ms
+  01:39:33.762 platform renderer=Platform:OMX.qcom.video.decoder.avc n=150 drop=0 in=149 rend=150 skip=0 first=1001ms
+  01:39:39.777 platform renderer=Platform:OMX.qcom.video.decoder.avc n=330 drop=0 in=329 rend=330 skip=0 first=1001ms
+  01:39:47.813 platform renderer=Platform:OMX.qcom.video.decoder.avc n=571 drop=0 in=569 rend=571 skip=0 first=1001ms
+  判定：n 每 2s 涨约 60（≈30fps，与 720p30 夹具一致）；in/rend 与 n 同阶（计数器同源，差 1–2 属采样时点）；drop 恒 0；first=1001ms 与 READY +991ms 对齐（平台首帧含解码器初始化）。
+
+二、连播切集（会话边界）
+  01:39:48.770 session transition reason=1 uri=1000015538
+  01:39:49.846 platform renderer=Platform:OMX.qcom.video.decoder.avc n=32 drop=0 in=30 rend=32 skip=0 first=80ms
+  01:39:53.864 platform renderer=Platform:OMX.qcom.video.decoder.avc n=153 drop=0 in=150 rend=153 skip=0 first=80ms
+  判定：切集后计数从 0 重新起（基线差生效，未沿用上一集 571），decoder 名保持 OMX（reset 不清名字），second-item first=80ms 属解码器已热的正常值。
+
+三、软解路径让路（npff，同一安装包）
+  wl-wmv2-wmav2.asf：
+  01:41:30.950 frames renderer=LegacyVideoRenderer in=59  dec=59  rend=50  drop=0 qavg=7.46 qmax=8 err=0
+  01:41:30.951 stages renderer=LegacyVideoRenderer n=59 send=0.73ms recv=0.10ms copy=0.16ms rend=1.56ms first=18ms
+  01:41:38.919 frames renderer=LegacyVideoRenderer in=251 dec=250 rend=249 drop=0 qavg=7.87 qmax=8 err=0
+  01:41:38.920 stages renderer=LegacyVideoRenderer n=251 send=0.77ms recv=0.12ms copy=0.16ms rend=1.88ms first=18ms
+  判定：整段 11s 内没有任何 platform 行——按解码器名前缀（npff-/ffmpeg/mjpeg）判为软解、主动让路，两条读数线不重复记账。
+
+四、稳定性
+  adb logcat 全量 0 条 FATAL（本轮三次会话：平台 20s / 平台切集 20s / 软解 11s）。
+  无崩溃、无 ANR、无 codec 异常重试。
+
+五、边界（没验证什么、为什么）
+  1. 平台侧只有 queuedInputBufferCount / renderedOutputBufferCount / skippedOutputBufferCount / droppedBufferCount 四类，media3 1.11 的 DecoderCounters 没有 decoded 字段、MediaCodecVideoRenderer.decoderCounters 还是 protected——所以平台行「不报解出帧数」，n 是 renderedOutputBufferCount 的增量，不是解码数。
+  2. onVideoFrameProcessingOffset 本机几乎不回调（只在迟到帧触发）、onVideoDisabled 只在渲染器停用才来——若只靠回调，正常播放会整段零读数；因此改 1s Handler 轮询 player.videoDecoderCounters（renderer 实时更新的同一实例）。轮询引入的读数是「采样时刻快照」，短会话（<2s）可能只落收尾一条。
+  3. first 在平台侧取自首次 renderedOutputBufferCount>0 的轮询点，粒度受 1s 轮询限制（1001ms/80ms 都是采样值，真值可能更小）；软解侧 first 来自渲染线程时间戳，粒度更细。
+  4. 只覆盖视频；音频渲染器没有计数点。单机单 OEM（高通 c2/OMX），MTK/三星的 decoder 名与计数器语义未验证。
+  5. 本轮未做 60s 长跑与「平台 / npff / legacy」三路径同夹具 A/B，也未测 JNI copy 开关与功耗——任务文档 §7 / §9.2 保留。

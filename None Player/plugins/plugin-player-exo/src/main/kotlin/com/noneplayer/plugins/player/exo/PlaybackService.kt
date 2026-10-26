@@ -190,6 +190,8 @@ class PlaybackService : MediaSessionService() {
                 )
                 .setHandleAudioBecomingNoisy(true),
         )
+        // E245：平台 / NextLib 路径的帧读数（默认静默，只有 log.tag.NpPerf DEBUG 才挂监听）
+        NpPlatformAnalytics.install(player)
         val session = MediaSession.Builder(this, player)
             // E3：点媒体通知回应用；具体媒体装载后更新为其深链（见下方监听）
             .setSessionActivity(launcherPendingIntent())
