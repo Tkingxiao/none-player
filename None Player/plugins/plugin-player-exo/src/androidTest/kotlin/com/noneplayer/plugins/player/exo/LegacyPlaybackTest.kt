@@ -32,8 +32,10 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * 模拟器上的出画验收：WMV2 / Qpel 走 nplegacy，Simple Profile 仍是平台 mpeg4，
- * MJPEG 仍是 BitmapFactory。硬件优先用 EXTENSION_RENDERER_MODE_ON。
+ * 模拟器上的出画验收：WMV2 / Qpel 走**软解后端**（`npff`（NextLib 共享 libavcodec）
+ * 或 `nplegacy` 静态最小 avcodec，按库可用性路由；E239 起两者都算合规）、
+ * Simple Profile 仍是平台 mpeg4、MJPEG 仍是 BitmapFactory。
+ * 硬件优先用 EXTENSION_RENDERER_MODE_ON。
  */
 @UnstableApi
 @RunWith(AndroidJUnit4::class)
@@ -49,15 +51,23 @@ class LegacyPlaybackTest {
     @Test
     fun wmv2RendersFrames() {
         val played = play("np-wmv2.avi", 320, 240)
-        assertTrue(played.decoder, played.decoder.contains("nplegacy-wmv2"))
+        assertSoftwareBackend(played.decoder, "wmv2")
         assertTrue("frames=${played.frames} images=${played.images}", played.frames > 0 && played.images > 0)
         assertTrue("duration=${played.durationMs}", played.durationMs in 2_500..3_500)
+    }
+
+    /** E239：软解后端断言——路由可在 npff（NextLib 共享 libavcodec）与 nplegacy 间按可用性切换，两者都算合规。 */
+    private fun assertSoftwareBackend(decoder: String, codec: String) {
+        assertTrue(
+            decoder,
+            decoder.contains("npff-$codec") || decoder.contains("nplegacy-$codec"),
+        )
     }
 
     @Test
     fun qpelRendersFramesInSyncWithAudio() {
         val played = play("xvid-qpel.avi", 320, 240)
-        assertTrue(played.decoder, played.decoder.contains("nplegacy-mpeg4"))
+        assertSoftwareBackend(played.decoder, "mpeg4")
         assertTrue(played.audioMime, played.audioMime == "audio/mpeg")
         assertTrue("frames=${played.frames} images=${played.images}", played.frames > 0 && played.images > 0)
         assertTrue("duration=${played.durationMs}", played.durationMs in 3_500..5_000)
@@ -74,7 +84,7 @@ class LegacyPlaybackTest {
     @Test
     fun wmv2PictureSample() {
         val played = play("np-wmv2.avi", 320, 240, saveFrame = true)
-        assertTrue(played.decoder.contains("nplegacy-wmv2"))
+        assertSoftwareBackend(played.decoder, "wmv2")
         assertTrue(played.images > 0)
         assertWmv2ColorBars()
     }
@@ -118,13 +128,13 @@ class LegacyPlaybackTest {
 
     @Test
     fun switchBetweenH264AndWmv2DoesNotFail() {
-        runSwitchTest("np-h264.mp4", "np-wmv2.avi", "nplegacy-wmv2")
+        runSwitchTest("np-h264.mp4", "np-wmv2.avi", listOf("npff-wmv2", "nplegacy-wmv2"))
     }
 
     /** 切换回平台流时，末端的 MJPEG 位图渲染器不得留下 Surface 的 CPU 连接（同 WMV2 的类缺陷）。 */
     @Test
     fun switchBetweenH264AndMjpegDoesNotFail() {
-        runSwitchTest("np-h264.mp4", "np-mjpeg.avi", "BitmapFactory")
+        runSwitchTest("np-h264.mp4", "np-mjpeg.avi", listOf("BitmapFactory"))
     }
 
     /**
@@ -132,7 +142,7 @@ class LegacyPlaybackTest {
      * 靶子是 Surface 连接：CPU 锁定会以 NATIVE_WINDOW_API_CPU 连上共享 BufferQueue，
      * 不随渲染结束归还的话，下一条平台 MediaCodec 会 `connect: already connected` 起不来。
      */
-    private fun runSwitchTest(assetA: String, assetB: String, expectDecoderForB: String) {
+    private fun runSwitchTest(assetA: String, assetB: String, expectDecoderCandidates: List<String>) {
         val first = copyAsset(assetA)
         val second = copyAsset(assetB)
         val context = instrumentation.targetContext
@@ -204,7 +214,14 @@ class LegacyPlaybackTest {
             val failure = error.get()
             assertTrue("${failure?.errorCodeName} ${failure?.message} decoders=$decoders", failure == null)
             synchronized(decoders) {
-                assertTrue(decoders.toString(), decoders.any { it.contains(expectDecoderForB) })
+                // E239：B 必须由期望的软解/位图渲染器出画——软解后端在 npff 与 nplegacy
+                // 之间按库可用性路由，两者都算合规；MJPEG 仍是裸 `BitmapFactoryDecoder`。
+                assertTrue(
+                    decoders.toString(),
+                    decoders.any { decoder ->
+                        expectDecoderCandidates.any { decoder.contains(it) }
+                    },
+                )
             }
             val back = CountDownLatch(1)
             handler.post {

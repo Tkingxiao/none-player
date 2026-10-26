@@ -1,0 +1,34 @@
+E239 设备取证（2026-10-26）——LegacyPlaybackTest 在模拟器跑通（条目第二选支）
+设备：**emulator-5554**（Pixel_10_Pro，API 36，x86_64）。真机 60dd2f94 仍 offline。
+任务条目给出的两条出路取**"在模拟器跑"**这一支；平板 ImageReader 路径未复跑（设备离线）。
+
+运行：`./gradlew :plugins:plugin-player-exo:connectedDebugAndroidTest`
+
+第 1 轮（未改动，暴露两件事）：
+  - 4 项失败：wmv2RendersFrames / wmv2PictureSample / switchBetweenH264AndWmv2 /
+    qpelRendersFramesInSyncWithAudio；
+  - 失败原因**不是** ImageReader 格式，而是断言基线陈旧：软解路由已可在
+    `npff`（NextLib 共享 libavcodec）与 `nplegacy`（静态最小 avcodec）之间按库
+    可用性切换，实际 decoderName 为 `npff-wmv2` / `npff-mpeg4`，测试仍断言
+    `nplegacy-*`。条目所述的平板 `0x7fa30c04 vs 0x1` 格式错未在模拟器复现。
+
+修复（E239，测试侧）：
+  - 新增 `assertSoftwareBackend(decoder, codec)`：`npff-$codec` 或 `nplegacy-$codec`
+    任一即合规；wmv2RendersFrames / wmv2PictureSample / qpelRendersFramesInSyncWithAudio
+    三处换用；
+  - `runSwitchTest` 改收**候选列表**：H264→WMV2 传 [npff-wmv2, nplegacy-wmv2]、
+    H264→MJPEG 传 [BitmapFactory]（真实名 `BitmapFactoryDecoder`，不走软解前缀）；
+  - 类注释同步改写（软解后端双轨口径）。
+
+第 2 轮：只剩 switchBetweenH264AndMjpegDoesNotFail 失败——我的前缀泛化误伤 MJPEG
+候选；改为候选列表后——
+
+第 3 轮（最终）：`BUILD SUCCESSFUL`；connected 结果 XML
+`tests="15" failures="0" errors="0" skipped="0"`（Pixel_10_Pro(AVD) - 17）。
+
+稳定性：三轮共 3 次安装/启动 instrumentation，无 FATAL；无 Surface CPU 连接回归
+（switch 两用例覆盖 h264→wmv2(软解)→h264 与 h264→mjpeg(位图)→h264 各自三步）。
+边界：
+  - 平板 ImageReader 格式问题**未复现也未修**（设备离线；若日后平板再挡，按条目
+    第一选支把 reader 换 YUV_420_888 需逐素材核对尺寸/格式，风险较高，另立批）；
+  - core 11 项 + SubtitleQueueTest 4 项（条目已记"已过"）本批未复跑。
