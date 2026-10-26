@@ -20,12 +20,21 @@ class MediaAccessTest {
     private val audio = Manifest.permission.READ_MEDIA_AUDIO
     private val selected = Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED
     private val storage = Manifest.permission.READ_EXTERNAL_STORAGE
+    private val writeStorage = Manifest.permission.WRITE_EXTERNAL_STORAGE
 
     // ---- declaredPermissions ----
 
     @Test
-    fun `Android 12L 及以下只申请存储权限`() {
-        assertEquals(listOf(storage), MediaAccessPolicy.declaredPermissions(28))
+    fun `Android 10 及以下申请读写存储权限`() {
+        // E233：26–29 档删除设备文件只能靠写权限（无「所有文件访问」/删除请求）
+        assertEquals(listOf(storage, writeStorage), MediaAccessPolicy.declaredPermissions(26))
+        assertEquals(listOf(storage, writeStorage), MediaAccessPolicy.declaredPermissions(29))
+    }
+
+    @Test
+    fun `Android 11-12L 只申请读存储`() {
+        // 30 起 WRITE_EXTERNAL_STORAGE 失效（清单 maxSdkVersion=29），不该再申请
+        assertEquals(listOf(storage), MediaAccessPolicy.declaredPermissions(30))
         assertEquals(listOf(storage), MediaAccessPolicy.declaredPermissions(32))
     }
 

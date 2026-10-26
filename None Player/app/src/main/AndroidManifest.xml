@@ -10,9 +10,13 @@
     <!-- Android 14+ 部分照片/视频访问：用户选择"仅 selected"时系统走此权限，
          声明后媒体库仍能看到用户勾选的项（SelectedPhotoAccess） -->
     <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
-    <uses-permission
-        android:name="android.permission.READ_EXTERNAL_STORAGE"
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- E233：API 26–29 没有「所有文件访问」与 MediaStore 删除请求，删除设备文件只能靠
+         WRITE_EXTERNAL_STORAGE（直连 ContentResolver.delete）。API 30+ 起该权限失效，
+         删除改走 SAF 写授权 / 「所有文件访问」，故这里以 maxSdkVersion=29 收口。 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <!-- 批次 6（plugin-danmaku）：同名弹幕/字幕文件是**非媒体文件**——scoped storage
          下只持 READ_MEDIA_* 的 app 在 MediaStore.Files 查询里根本看不到它们

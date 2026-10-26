@@ -90,10 +90,17 @@ internal object MediaAccessPolicy {
 
     private const val READ_EXTERNAL_STORAGE = Manifest.permission.READ_EXTERNAL_STORAGE
 
+    @SuppressLint("InlinedApi")
+    private const val WRITE_EXTERNAL_STORAGE = Manifest.permission.WRITE_EXTERNAL_STORAGE
+
     /**
      * 申请用的权限列表：Android 13+ 视频/音频分开申请（一起申请，但分开判定）；
      * Android 14+ 追加「仅选中的照片/视频」，让用户可以选择部分授权而不是一刀切；
      * Android 12L 及以下只有一条存储权限。
+     *
+     * E233：Android 10（29）及以下再带一条 `WRITE_EXTERNAL_STORAGE`——那两档没有
+     * 「所有文件访问」与 `createDeleteRequest`，删除设备文件（E232 单确认直连）
+     * 只能靠写权限；API 30 起该权限失效（清单也以 maxSdkVersion=29 收口）。
      */
     fun declaredPermissions(sdkInt: Int): List<String> = when {
         sdkInt >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE -> listOf(
@@ -102,6 +109,7 @@ internal object MediaAccessPolicy {
             READ_MEDIA_VISUAL_USER_SELECTED,
         )
         sdkInt >= Build.VERSION_CODES.TIRAMISU -> listOf(READ_MEDIA_VIDEO, READ_MEDIA_AUDIO)
+        sdkInt <= Build.VERSION_CODES.Q -> listOf(READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE)
         else -> listOf(READ_EXTERNAL_STORAGE)
     }
 

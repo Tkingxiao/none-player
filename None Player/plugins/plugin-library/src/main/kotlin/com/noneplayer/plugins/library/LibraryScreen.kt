@@ -2817,11 +2817,13 @@ private fun rememberSortedMediaItems(
  * E232/E233：删除一个媒体文件（**不再走系统二次确认**）。
  *
  * 能力顺序：
- * ① 尽力把老目录授权升级为 READ|WRITE，然后按 `RELATIVE_PATH + DISPLAY_NAME`
- *    在授权树里找到文档并 `deleteDocument`（有新写授权时可行）；
- * ② `ContentResolver.delete` 直接删（文件属主、或已授予「所有文件访问」）。
- * 两步都没权限就返回 false，由调用方弹**应用风格**的权限引导卡——不再用
- * `createDeleteRequest` 换一次与播放器无关的系统确认框。
+ * ① `saf-` 文档项直接 `deleteDocument`；
+ * ② MediaStore 项：Android 11+ 缺「所有文件访问」且文件**不属于本应用**时，
+ *    任何删除路径都会被 MediaProvider 转成系统同意框（模拟器实测 SAF 树也一样），
+ *    故直接返回 false 交给引导卡，不发起会弹系统框的尝试；
+ * ③ 有权限（all-files / 本应用属主）时：尽力升级老目录为 READ|WRITE →
+ *    授权树按 `RELATIVE_PATH + DISPLAY_NAME` 下钻删文档 → `ContentResolver.delete`。
+ * 两步都没权限就返回 false，由调用方弹**应用风格**的权限引导卡。
  */
 private suspend fun deleteMediaItem(
     context: android.content.Context,
@@ -2835,12 +2837,21 @@ private suspend fun deleteMediaItem(
             android.provider.DocumentsContract.deleteDocument(resolver, uri)
         }.getOrDefault(false)
     }
-    // E233：老目录是"只读持久化"（E232 之前的授权口径）。删除前**尽力升级**为
-    // READ|WRITE：系统若还留着原授权的写位就直接升级成功，SAF 树删除即成立，
-    // 用户不必再开「所有文件访问」；不成功则走后面的直删/失败引导卡，无副作用。
-    upgradeTreeWrite(context, authorizedTrees)
     val meta = queryMediaFileMeta(resolver, uri)
-    if (meta != null && deleteViaAuthorizedTree(resolver, authorizedTrees, meta.first, meta.second)) {
+    // E233：Android 11+ 的 MediaProvider 对被删的非本应用媒体**必然**再弹一次系统
+    // 同意框（SAF `deleteDocument` 也会被它接管转成同意请求，模拟器实测）。用户裁定
+    // 只保留应用内一层确认，所以这里在缺少「所有文件访问」且文件不属于本应用时
+    // **不发起删除尝试**，直接交给失败引导卡（去开启后再删，全程无系统框）。
+    if (meta != null && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        val allFiles = runCatching { android.os.Environment.isExternalStorageManager() }
+            .getOrDefault(false)
+        if (!allFiles && meta.ownerPackage != context.packageName) return@withContext false
+    }
+    // 老目录是"只读持久化"（E232 之前的授权口径）。删除前**尽力升级**为 READ|WRITE：
+    // 系统若还留着原授权的写位就直接升级成功，SAF 树删除即成立，用户不必再开
+    // 「所有文件访问」；不成功则走后面的直删/失败引导卡，无副作用。
+    upgradeTreeWrite(context, authorizedTrees)
+    if (meta != null && deleteViaAuthorizedTree(resolver, authorizedTrees, meta.relativePath, meta.displayName)) {
         return@withContext true
     }
     runCatching { resolver.delete(uri, null, null) > 0 }.getOrDefault(false)
@@ -2895,18 +2906,28 @@ private fun openAllFilesAccessSettings(context: android.content.Context) {
     }
 }
 
-/** MediaStore 条目 → (相对目录, 显示名)；旧系统没有 RELATIVE_PATH 列时返回 null 走直接删除。 */
+/** MediaStore 条目的删除所需元数据（相对目录 / 显示名 / 属主包名）。 */
+private data class MediaFileMeta(
+    val relativePath: String,
+    val displayName: String,
+    /** `OWNER_PACKAGE_NAME`：本应用创建的文件为自身包名，其余多为 `com.android.shell` 等。 */
+    val ownerPackage: String?,
+)
+
+/** MediaStore 条目 → 删除元数据；旧系统没有 RELATIVE_PATH/OWNER 列时返回 null 走直接删除。 */
 private fun queryMediaFileMeta(
     resolver: android.content.ContentResolver,
     uri: android.net.Uri,
-): Pair<String, String>? = runCatching {
-    // RELATIVE_PATH 是 API 29+ 列；旧系统没有它，直接走 ContentResolver.delete。
+): MediaFileMeta? = runCatching {
+    // RELATIVE_PATH / OWNER_PACKAGE_NAME 是 API 29+ 列；旧系统没有它们，直接走
+    // ContentResolver.delete（那两档没有 MediaProvider 同意框，写权限即可）。
     if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q) return null
     resolver.query(
         uri,
         arrayOf(
             android.provider.MediaStore.MediaColumns.DISPLAY_NAME,
             android.provider.MediaStore.MediaColumns.RELATIVE_PATH,
+            android.provider.MediaStore.MediaColumns.OWNER_PACKAGE_NAME,
         ),
         null,
         null,
@@ -2915,7 +2936,10 @@ private fun queryMediaFileMeta(
         if (!cursor.moveToFirst()) return@use null
         val name = cursor.getString(0)?.takeIf { it.isNotBlank() } ?: return@use null
         val relative = cursor.getString(1)?.trim('/') ?: return@use null
-        relative to name
+        // 少数 OEM 的 MediaProvider 缺 OWNER_PACKAGE_NAME 列：读不到就按"未知属主"，
+        // 后续按非本应用处理（宁可走引导卡，也不弹系统同意框）。
+        val owner = runCatching { cursor.getString(2) }.getOrNull()
+        MediaFileMeta(relativePath = relative, displayName = name, ownerPackage = owner)
     }
 }.getOrNull()
 
