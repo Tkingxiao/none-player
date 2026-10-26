@@ -24,6 +24,7 @@ import com.noneplayer.kernel.api.PlaybackState
 import com.noneplayer.kernel.api.PlayerConnection
 import com.noneplayer.kernel.api.VideoPlayer
 import com.noneplayer.kernel.api.VideoPlayerFactory
+import com.noneplayer.kernel.api.subscribe
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -259,6 +260,18 @@ class PlaybackSession(
             combine(settings.autoplayNext, _player) { autoplay, player -> autoplay to player }
                 .collect { (autoplay, player) -> player?.setAutoplayNext(autoplay) }
         }
+        // E232：库页删掉了正在播的媒体 → 整条会话收口。
+        // 不这么做时引擎仍握着已删除文件的上一个句柄，画面/声音继续走，迷你条也停在
+        // 一条已经不存在的媒体上；用户再从迷你条点回去只能得到错误面板。
+        scope.launch {
+            events.subscribe<KernelEvent.MediaDeleted>().collect { deleted ->
+                val current = _queue.value.getOrNull(_index.value)
+                if (isPlayingItemDeleted(current, deleted.mediaId, deleted.uri)) {
+                    Log.i(TAG, "正在播放的媒体已被删除，停止会话: ${deleted.mediaId} ${deleted.uri}")
+                    stop()
+                }
+            }
+        }
         observeDecodingVideo()
     }
 
@@ -384,6 +397,34 @@ class PlaybackSession(
         }
     }
 
+    /**
+     * 队列内切集（自动连播 / ⏮⏭ / 选集）沿用**当前会话模式**，不按下一集的记忆重算。
+     *
+     * E232 用户裁定：音频模式下连播下一集不该自动回到视频画面——原来的
+     * [restoreAudioMode] 会把 `storedPreference = null` 解释成"这条视频默认视频"，
+     * 于是每换一集就静默退出仅听模式。纯音频条目仍由 [resolveAudioOnlyMode]
+     * 强制为仅听。
+     *
+     * 当前是仅听态时顺手把**新一集**的 per-media 记忆对齐为 true：用户下一次
+     * 单独打开这一集时仍落在仅听模式，不会出现"连播是音频、重进变视频"的割裂。
+     * 反向（当前视频态）不写 false——下一集自己记忆过的仅听偏好不该被这次经过擦掉。
+     */
+    private fun carryAudioModeTo(item: MediaItem) {
+        val target = resolveAudioOnlyMode(_audioOnly.value, item.kind == MediaKind.AUDIO)
+        val revision = ++audioModeRevision
+        _audioOnly.value = target
+        player?.setVideoTracksEnabled(!target)
+        if (!target || item.id.isEmpty()) return
+        scope.launch {
+            val key = mediaMemoryKey(item.sourceId, item.id)
+            // 写前再核一次条目：异步窗口里用户可能已经又切了一集
+            val current = _queue.value.getOrNull(_index.value)
+            if (revision == audioModeRevision && current?.id == item.id && current.uri == item.uri) {
+                settings.setAudioOnlyPreferred(key, true)
+            }
+        }
+    }
+
     private val _queue = MutableStateFlow<List<MediaItem>>(emptyList())
     val queue: StateFlow<List<MediaItem>> = _queue.asStateFlow()
 
@@ -457,7 +498,8 @@ class PlaybackSession(
                 .collect { idx ->
                     if (idx != _index.value && idx in _queue.value.indices) {
                         _index.value = idx
-                        restoreAudioMode(_queue.value[idx])
+                        // E232：连播/引擎推进沿用当前仅听模式（而不是按下一集的记忆重算）
+                        carryAudioModeTo(_queue.value[idx])
                         restoreSubtitle(_queue.value[idx])
                         // 引擎推进（自动连播 / 通知栏 ⏭）也广播给全仓库：
                         // 详情页等 UI 侧订阅方靠它把"正在看的条目"跟上队列，
@@ -733,7 +775,8 @@ class PlaybackSession(
         loadGeneration++
         if (_index.value != index) {
             _index.value = index
-            restoreAudioMode(_queue.value[index])
+            // E232：选集/⏮⏭ 同样沿用当前模式（音频模式不因切集退回视频）
+            carryAudioModeTo(_queue.value[index])
             restoreSubtitle(_queue.value[index])
         }
         _player.value?.selectQueueIndex(index)
@@ -906,6 +949,24 @@ internal fun resolveQueueStart(
     } else {
         listOf(item) to 0
     }
+}
+
+/**
+ * 删除事件是否命中**当前正在播的条目**（E232，纯函数便于单测）。
+ *
+ * id 与 uri 任一相等即算命中：库页删除时手上一定有 uri；id 用来兜住 MediaStore
+ * 重扫换号（删除请求发出与事件到达之间，来源可能已经刷新过列表）。空串一律不参与
+ * 匹配——深链条目可能没有 id，空 id 与空 id 相等会把"任意删除"变成"停播"。
+ */
+internal fun isPlayingItemDeleted(
+    current: MediaItem?,
+    deletedMediaId: String,
+    deletedUri: String,
+): Boolean {
+    if (current == null) return false
+    val idHit = deletedMediaId.isNotEmpty() && current.id == deletedMediaId
+    val uriHit = deletedUri.isNotEmpty() && current.uri == deletedUri
+    return idHit || uriHit
 }
 
 /**

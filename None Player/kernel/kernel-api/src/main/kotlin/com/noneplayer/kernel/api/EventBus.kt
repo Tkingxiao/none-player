@@ -30,6 +30,14 @@ sealed interface KernelEvent {
     /** 播放开始 */
     data class PlaybackStarted(val mediaId: String) : KernelEvent
 
+    /**
+     * E232：媒体文件已从设备删除（库页删除链路成功后广播）。
+     *
+     * 播放会话据此停掉"正在播的那一条"——否则引擎仍握着已删除文件的上一个句柄，
+     * 迷你条/通知会停在一条已经不存在的媒体上。事件只做通知，不携带完整条目。
+     */
+    data class MediaDeleted(val mediaId: String, val uri: String) : KernelEvent
+
     /** 插件完成安装 */
     data class PluginInstalled(val pluginId: String) : KernelEvent
 

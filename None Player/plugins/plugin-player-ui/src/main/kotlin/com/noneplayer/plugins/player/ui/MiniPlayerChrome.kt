@@ -60,7 +60,6 @@ import com.noneplayer.core.ui.npMotion
 import com.noneplayer.kernel.api.Navigator
 import com.noneplayer.kernel.ui.api.BottomChromeProvider
 import com.noneplayer.kernel.ui.api.LocalKernel
-import com.noneplayer.kernel.ui.api.LocalNpWindowInfo
 
 /**
  * 迷你播放条（设计稿 `.mini`）——常驻底部 Chrome 槽位的"正在播放"入口。
@@ -97,7 +96,6 @@ class MiniPlayerChrome : BottomChromeProvider {
         // 的底栏上。进度只留给两个叶子（时间文本 / 进度线）自己订。
         val summary by session.nowPlayingSummary.collectAsStateWithLifecycle()
         val audioOnly by session.audioOnly.collectAsStateWithLifecycle()
-        val desktopLike = LocalNpWindowInfo.current.isDesktopLike
 
         // 可见性读**会话占用的同一份真相**（右栏的 `isOccupied` 也是这两条）：`stop()`
         // 同步清队列与下标，而 summary 要经 combine→map→stateIn 若干次派发才变 null。
@@ -163,15 +161,18 @@ class MiniPlayerChrome : BottomChromeProvider {
                         onNext = { session.next() },
                         onClose = { session.stop() },
                         onAudioToggle = {
-                            val target = resolveAudioOnlyMode(!audioOnly, snapshot.item.kind == MediaKind.AUDIO)
-                            session.setAudioOnly(target)
-                            // A tablet restores the existing pane; a phone needs its video page.
-                            if (!PlayerPagePresence.active && (!desktopLike || target)) {
+                            // E232 用户裁定：耳机钮是**单向入口**——只负责进音频模式，
+                            // 不再在音频/视频之间来回切。此前重复点击会先把模式翻回视频、
+                            // 再跳进视频播放页，退出后再点又重新切换，读起来像按钮在打架。
+                            // 退出仅听模式的出口保留在音频页的「切回视频」。
+                            session.setAudioOnly(true)
+                            // A tablet restores the existing pane; a phone needs its audio page.
+                            if (!PlayerPagePresence.active) {
                                 navigator.navigate(
                                     "player?uri=${encode(snapshot.item.uri)}" +
                                         "&title=${encode(snapshot.title)}" +
                                         "&mime=${encode(snapshot.item.mimeType)}" +
-                                        "&id=${encode(snapshot.item.id)}&audio=${if (target) 1 else 0}",
+                                        "&id=${encode(snapshot.item.id)}&audio=1",
                                 )
                             }
                         },
@@ -270,17 +271,15 @@ private fun MiniPlayerRow(
                 MiniOverflowButton(
                     hasNext = snapshot.hasNext,
                     audioOnly = audioOnly,
-                    isAudioMedia = snapshot.item.kind == MediaKind.AUDIO,
                     onNext = onNext,
                     onAudioToggle = onAudioToggle,
                 )
             } else {
-                // 耳机钮 = 仅听模式切换（设计稿 #miniAudio）；按钮下缘 9sp accent 角标。
+                // 耳机钮 = 仅听模式入口（设计稿 #miniAudio）；按钮下缘 9sp accent 角标。
                 // [onAudioToggle] 为 null（音频页未接线）时整钮隐藏，避免语义重复的假入口。
                 if (onAudioToggle != null) {
                     AudioToggleButton(
                         audioOnly = audioOnly,
-                        isAudioMedia = snapshot.item.kind == MediaKind.AUDIO,
                         onClick = onAudioToggle,
                     )
                 }
@@ -307,39 +306,35 @@ private fun MiniPlayerRow(
 /**
  * 耳机钮（设计稿 `#miniAudio`）：按钮 + 下缘 9sp accent 角标。
  *
- * E129（审查 #8）：角标与读屏名称一律读**会话模式**（[audioOnly]），不读 `item.kind`。
- * "媒体是音频"与"当前处于仅听形态"是两个概念——按媒体类型给标签会承诺一个当前
- * 并不成立的状态（音频文件角标写着"音频"、点下去却是切到画面版式）。
+ * E232 用户裁定：**只进不出**——点击一律进入仅听模式/打开音频页，不再向视频态回切。
+ * 角标只在已处于仅听态时显示「音频」，作为当前状态的标记；视频态下不挂
+ * 「视频」字样（那会让这枚钮看起来是在承诺"切到视频"）。
  */
 @Composable
-private fun AudioToggleButton(audioOnly: Boolean, isAudioMedia: Boolean, onClick: () -> Unit) {
+private fun AudioToggleButton(audioOnly: Boolean, onClick: () -> Unit) {
     val ink = LocalNpInk.current
     Box {
         NpIconButton(
             icon = NpIcon.Headphones,
-            contentDescription = if (isAudioMedia) {
-                "打开音频播放"
-            } else if (audioOnly) {
-                "当前为仅听音频 · 切回视频画面"
-            } else {
-                "当前为视频画面 · 切到仅听音频"
-            },
+            contentDescription = if (audioOnly) "打开音频播放页" else "切到仅听音频",
             onClick = onClick,
             size = MINI_BUTTON,
             iconSize = 21.dp,
         )
-        Text(
-            text = if (audioOnly) "音频" else "视频",
-            style = NpTypography.labelSmall.copy(
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                lineHeight = 9.sp,
-            ),
-            color = ink.accent,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .offset(y = 3.dp),
-        )
+        if (audioOnly) {
+            Text(
+                text = "音频",
+                style = NpTypography.labelSmall.copy(
+                    fontSize = 9.sp,
+                    fontWeight = FontWeight.Bold,
+                    lineHeight = 9.sp,
+                ),
+                color = ink.accent,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .offset(y = 3.dp),
+            )
+        }
     }
 }
 
@@ -354,7 +349,6 @@ private fun AudioToggleButton(audioOnly: Boolean, isAudioMedia: Boolean, onClick
 private fun MiniOverflowButton(
     hasNext: Boolean,
     audioOnly: Boolean,
-    isAudioMedia: Boolean,
     onNext: () -> Unit,
     onAudioToggle: (() -> Unit)?,
 ) {
@@ -370,7 +364,7 @@ private fun MiniOverflowButton(
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             if (onAudioToggle != null) {
                 DropdownMenuItem(
-                    text = { Text(if (isAudioMedia) "打开音频播放" else if (audioOnly) "切回视频画面" else "切到仅听音频") },
+                    text = { Text(if (audioOnly) "打开音频播放页" else "切到仅听音频") },
                     onClick = {
                         open = false
                         onAudioToggle()
