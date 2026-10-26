@@ -220,8 +220,8 @@ private fun KernelSettingsScreen(
                 // 这三组此前整块缺失，而其中「默认播放倍速」的数据层（AppSettings.playbackSpeed）
                 // 早已被播放页使用——有存储、有消费、没有入口。现在逐项真接线：
                 //   switch 一律写 AppSettings，消费端（播放页/会话/服务）读取生效；
-                //   没有数据层的项（字幕语言 / 音频输出 / 双击动作）如实展示只读值，
-                //   不给一个点了没反应的假开关（02 报告：不引入假开关）。
+                //   E236：没有数据层、也读不出可靠真值的项（默认字幕语言 / 音频输出）
+                //   整行**撤下**——既不摆"即将支持"的占位承诺，也不摆不保证真值的假读数。
                 item(key = "playback-group") {
                     PlaybackSettingsGroup(gutter = gutter)
                 }
@@ -349,7 +349,7 @@ private val MOTION_LEVEL_LABELS = listOf("轻量", "平衡", "全效")
 private fun speedText(f: Float): String =
     "%.2fx".format(f).removeSuffix("0").removeSuffix(".")
 
-/** `.eyebrow`：播放（硬件解码优先 / 自动连播 / 默认倍速 / 默认字幕语言）。 */
+/** `.eyebrow`：播放（硬件解码优先 / 自动连播 / 默认倍速）。 */
 @Composable
 private fun PlaybackSettingsGroup(gutter: Dp) {
     val kernel = LocalKernel.current
@@ -400,18 +400,13 @@ private fun PlaybackSettingsGroup(gutter: Dp) {
                 }
             },
         )
-        // 字幕语言偏好尚无数据层（字幕按媒体记忆外挂轨）：如实展示只读值
-        NpSettingRow(
-            title = "默认字幕语言",
-            subtitle = "字幕按媒体单独记忆，此处偏好即将支持",
-            icon = NpIcon.Subtitle,
-            showDivider = false,
-            trailing = { ValueReadonly(text = "跟随系统") },
-        )
+        // E236：「默认字幕语言」只读行撤下——无数据层，且 media3 默认轨选择并不按系统
+        // 语言偏好；外挂字幕实际口径是"按媒体记忆 + 同目录同名自动挂载"。等真有语言
+        // 偏好数据层再回来（不摆"即将支持"的占位承诺）。
     }
 }
 
-/** `.eyebrow`：后台与屏幕（后台播放 / 屏幕常亮 / 音频输出）。 */
+/** `.eyebrow`：后台与屏幕（后台播放 / 屏幕常亮）。 */
 @Composable
 private fun BackgroundScreenSettingsGroup(gutter: Dp) {
     val kernel = LocalKernel.current
@@ -448,14 +443,9 @@ private fun BackgroundScreenSettingsGroup(gutter: Dp) {
                 )
             },
         )
-        // 音频输出：真实值来自 AudioManager（系统路由），展示只读
-        NpSettingRow(
-            title = "音频输出",
-            subtitle = "由系统媒体音量与路由决定",
-            icon = NpIcon.Sound,
-            showDivider = false,
-            trailing = { ValueReadonly(text = "系统默认") },
-        )
+        // E236：「音频输出」只读行撤下——输出设备由系统路由决定，应用侧没有可靠的
+        // "当前生效设备"读数（AudioManager 只能列候选设备，不能声明哪条在响）；
+        // 与其摆一个不保证真值的"系统默认"，不如等引擎诊断通道到位再回来。
     }
 }
 
@@ -580,19 +570,7 @@ private class SettingsMenuPositionProvider(
     }
 }
 
-/** 只读值（无数据层 / 由系统决定的项）：mono 值 + 无箭头，明确"不可点"。 */
-@Composable
-private fun ValueReadonly(text: String) {
-    Text(
-        text = text,
-        style = com.noneplayer.core.ui.NpMonoSmall,
-        color = LocalNpInk.current.muted,
-        maxLines = 1,
-    )
-}
-
-/**
- * 设计稿 1213「解码能力检测」→ 批次 7 扩为「解码诊断」面板（§12.3 余项）。
+/** 设计稿 1213「解码能力检测」→ 批次 7 扩为「解码诊断」面板（§12.3 余项）。
  *
  * 行值仍是不展开时的"硬解命中"摘要；**点按展开**能力矩阵：每个常见 mime 给出
  * `MediaCodecList.findDecoderForFormat` 的默认选择（与 FormatProbe 起播判定
