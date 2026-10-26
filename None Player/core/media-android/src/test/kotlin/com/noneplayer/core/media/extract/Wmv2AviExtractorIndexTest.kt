@@ -638,8 +638,8 @@ class Wmv2AviExtractorIndexTest {
         assertEquals(3, audio.metadataCount)
         assertEquals(450, video.totalData)
         assertEquals(3072, audio.totalData)
-        // 512 采样/块 × 1e6/8000 = 64000µs 递进
-        assertEquals(listOf(64000L, 128000L, 192000L), audio.times)
+        // 首块从 0 开始，后续每块 512 采样 × 1e6/8000 = 64000µs 递进
+        assertEquals(listOf(0L, 64000L, 128000L), audio.times)
         assertEquals(
             listOf(true, false, true, false, true, false),
             video.flags.map { it and C.BUFFER_FLAG_KEY_FRAME != 0 },
@@ -678,7 +678,7 @@ class Wmv2AviExtractorIndexTest {
         assertEquals(t2, video.times[videoBefore])
         assertTrue(video.flags[videoBefore] and C.BUFFER_FLAG_KEY_FRAME != 0)
         assertEquals(1, audio.metadataCount - audioBefore)
-        assertEquals(192000L, audio.times[audioBefore])
+        assertEquals(128000L, audio.times[audioBefore])
     }
 
     private fun assertNotNull(value: SeekMap?): SeekMap {

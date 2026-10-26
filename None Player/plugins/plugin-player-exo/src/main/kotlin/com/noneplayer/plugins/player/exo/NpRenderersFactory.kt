@@ -267,7 +267,10 @@ internal class DecoderFallbackAwareSelector(
     ): List<MediaCodecInfo> {
         val infos = delegate.getDecoderInfos(mimeType, requiresSecureDecoder, requiresTunnelingDecoder)
         val state = decoderFallbackState
-        if (!state.isArmed) return infos
+        // E241：选择器 API 本身拿不到 MediaItem，当前 mediaId 由 PlaybackService 的
+        // transition 回调同步进状态；有 id 时严格比对，单媒体空 id 依靠每次 transition
+        // 清理旧状态，不能把旧媒体过滤状态误套到新媒体。
+        if (!state.isArmedForCurrentMedia()) return infos
         val keptNames = state.filterCandidates(mimeType, infos.map { it.name }).toSet()
         return if (keptNames.size == infos.size) infos else infos.filter { it.name in keptNames }
     }

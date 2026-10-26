@@ -112,6 +112,8 @@ object CodecCapabilityProbe {
         frameRate: Double? = null,
         bitrate: Int? = null,
         profile: ProfileRequirement? = null,
+        bitDepth: Int? = null,
+        chromaSubsampling: String? = null,
         bitrateMode: BitrateMode? = null,
         requireSurface: Boolean = true,
     ): CapabilityDecision {
@@ -140,6 +142,8 @@ object CodecCapabilityProbe {
                 frameRate = frameRate,
                 bitrate = bitrate,
                 profile = profile,
+                bitDepth = bitDepth,
+                chromaSubsampling = chromaSubsampling,
                 requireSurface = requireSurface,
                 bitrateMode = bitrateMode,
             ),
@@ -151,11 +155,60 @@ object CodecCapabilityProbe {
         val mime = format.sampleMimeType.orEmpty()
         var profile: ProfileRequirement? = null
         var streamProfileUnknown = false
+        var bitDepth: Int? = format.colorInfo?.lumaBitdepth?.takeIf { it > 0 }
+        var chromaSubsampling: String? = null
         if (mime.equals(MIME_HEVC, ignoreCase = true)) {
             val verdict = format.initializationData.firstOrNull()?.let(HevcProfileParser::parse)
             if (verdict?.androidProfile != null) {
                 profile = ProfileRequirement(setOf(verdict.androidProfile), verdict.level)
+                if (bitDepth == null) {
+                    bitDepth = when (verdict.androidProfile) {
+                        CodecProfiles.HEVC_MAIN,
+                        CodecProfiles.HEVC_MAIN_STILL,
+                        -> 8
+
+                        CodecProfiles.HEVC_MAIN10,
+                        CodecProfiles.HEVC_MAIN10_HDR10,
+                        CodecProfiles.HEVC_MAIN10_HDR10_PLUS,
+                        -> 10
+
+                        else -> null
+                    }
+                }
             } else {
+                streamProfileUnknown = true
+            }
+        } else {
+            val codec = format.codecs
+            val parsedProfile = CodecStreamProfileParser.parse(mime, codec, format.initializationData)
+            if (parsedProfile != null) {
+                profile = ProfileRequirement(setOf(parsedProfile.profile), parsedProfile.level)
+                if (bitDepth == null) bitDepth = parsedProfile.bitDepth
+                chromaSubsampling = parsedProfile.chromaSubsampling
+            } else if (mime.equals("video/mp4v-es", ignoreCase = true)) {
+                val mpeg4Header = format.initializationData.firstOrNull()
+                val mpeg4 = mpeg4Header?.let(Mpeg4ProfileParser::parse)
+                when (mpeg4?.required) {
+                    Mpeg4ProfileParser.RequiredProfile.SIMPLE -> {
+                        profile = ProfileRequirement(
+                            setOf(MediaCodecInfo.CodecProfileLevel.MPEG4ProfileSimple),
+                        )
+                        if (bitDepth == null) bitDepth = 8
+                    }
+
+                    Mpeg4ProfileParser.RequiredProfile.ADVANCED_SIMPLE -> {
+                        profile = ProfileRequirement(
+                            setOf(MediaCodecInfo.CodecProfileLevel.MPEG4ProfileAdvancedSimple),
+                        )
+                        if (bitDepth == null) bitDepth = 8
+                    }
+
+                    Mpeg4ProfileParser.RequiredProfile.UNKNOWN -> streamProfileUnknown = true
+                    else -> Unit
+                }
+            } else if (mime.startsWith("video/", ignoreCase = true) &&
+                mime in setOf("video/avc", "video/x-vnd.on2.vp9", "video/av01")
+            ) {
                 streamProfileUnknown = true
             }
         }
@@ -166,6 +219,8 @@ object CodecCapabilityProbe {
             frameRate = format.frameRate.takeIf { it > 0f }?.toDouble(),
             bitrate = format.bitrate.takeIf { it > 0 },
             profile = profile,
+            bitDepth = bitDepth,
+            chromaSubsampling = chromaSubsampling,
             streamProfileUnknown = streamProfileUnknown,
         )
     }
@@ -281,6 +336,7 @@ object CodecCapabilityProbe {
             surfaceColorFormat = colorFormats.contains(MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface),
             bitrateModes = bitrateModes,
             colorFormats = colorFormats,
+            bitDepths = CodecProfiles.bitDepthsFor(mime, profileLevels),
         )
     }
 

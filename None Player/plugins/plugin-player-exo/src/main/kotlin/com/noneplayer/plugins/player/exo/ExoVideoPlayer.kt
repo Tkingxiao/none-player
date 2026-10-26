@@ -589,10 +589,11 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
                 // 就不会落到错误态，重试再失败才走下面的终态映射。
                 val plan = fallbackPlan(kind, parsed)
                 val mediaKey = _appliedMediaKey.value ?: loadingTargetKey
+                val trackKey = parsed.mime ?: parsed.rendererTrack.name
                 if (plan.action != DecoderFallbackAction.GIVE_UP &&
-                    decoderFallbackGate.canRetry(kind, mediaKey)
+                    decoderFallbackGate.canRetry(kind, mediaKey, trackKey)
                 ) {
-                    retryAfterDecoderFailure(plan, mediaKey)
+                    retryAfterDecoderFailure(plan, mediaKey, trackKey)
                     return
                 }
             }
@@ -914,20 +915,32 @@ class ExoVideoPlayer(context: Context) : VideoPlayer {
      *
      * 不做无限重试；解析不出 codec 名时只做"同媒体重试一次"，不臆造过滤条件。
      */
-    private fun retryAfterDecoderFailure(plan: DecoderFallbackPlan, mediaKey: String?) {
+    private fun retryAfterDecoderFailure(
+        plan: DecoderFallbackPlan,
+        mediaKey: String?,
+        trackKey: String?,
+    ) {
         val uri = currentMediaUri ?: return
-        decoderFallbackGate.markAttempted(mediaKey)
+        decoderFallbackGate.markAttempted(mediaKey, trackKey)
+        // 队列媒体的 MediaItem.mediaId 是选择器侧能拿到的身份；单媒体没有稳定 id 时
+        // 回落到 mediaKey，选择器会在服务侧未知 id 的情况下安全放行。
+        val selectorMediaId = currentMediaId.takeIf { it.isNotBlank() } ?: mediaKey
         when (plan.action) {
             DecoderFallbackAction.RETRY_WITHOUT_FAILED_CODEC -> {
                 val codecName = plan.codecName
                 val mime = plan.mime
                 if (codecName != null && mime != null) {
-                    decoderFallbackState.armExcludedCodec(mediaKey, mime, codecName)
+                    decoderFallbackState.armExcludedCodec(
+                        mediaKey,
+                        mime,
+                        codecName,
+                        selectorMediaId,
+                    )
                 }
             }
 
             DecoderFallbackAction.RETRY_WITH_SOFT_ONLY ->
-                decoderFallbackState.armSoftOnlyVideo(mediaKey, MP4V_VIDEO_MIME)
+                decoderFallbackState.armSoftOnlyVideo(mediaKey, MP4V_VIDEO_MIME, selectorMediaId)
 
             DecoderFallbackAction.GIVE_UP -> return
         }

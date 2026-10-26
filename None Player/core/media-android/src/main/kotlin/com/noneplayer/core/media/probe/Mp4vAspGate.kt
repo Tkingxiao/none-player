@@ -17,11 +17,23 @@ import androidx.media3.common.util.UnstableApi
  *  - 选中与并集都拿不到 = 无法判定（null）：探测侧按 fail-open 放行且结论不进缓存，
  *    改写侧保持平台链，绝不凭缺失信息拒绝播放。
  */
-internal object Mp4vAspGate {
+object Mp4vAspGate {
 
     private const val MIME_MP4V = "video/mp4v-es"
 
     private val cachedProfiles: List<Int> by lazy { queryDeviceProfiles() }
+
+    /** E241：平台运行期失败后，下一次 extractor 重建必须无条件改走专用 ASP mime。 */
+    @Volatile
+    private var forcedDedicatedDecoder = false
+
+    fun armForcedDedicatedDecoder() {
+        forcedDedicatedDecoder = true
+    }
+
+    fun clearForcedDedicatedDecoder() {
+        forcedDedicatedDecoder = false
+    }
 
     /** 设备上所有声明支持 mp4v 的解码器的 MPEG-4 profile 并集（查询失败为空表）。 */
     fun deviceProfiles(): List<Int> = cachedProfiles
@@ -45,6 +57,7 @@ internal object Mp4vAspGate {
 
     /** 三态判定：true=需要专用链，false=平台链可用，null=无法判定（调用方必须 fail-open）。 */
     internal fun needsDedicatedDecoder(header: ByteArray, videoFormat: Format?): Boolean? {
+        if (forcedDedicatedDecoder) return true
         val verdict = Mpeg4ProfileParser.parse(header)
         if (verdict.required != Mpeg4ProfileParser.RequiredProfile.ADVANCED_SIMPLE) return false
         val probeFormat = videoFormat ?: defaultMp4vFormat()

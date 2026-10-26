@@ -54,6 +54,13 @@ class ContainerSnifferTest {
     }
 
     @Test
+    fun `E244 avformat 容器按魔数识别`() {
+        assertEquals("video/x-nut", ContainerSniffer.sniff(text("NUTM....")))
+        assertEquals("video/x-pn-realvideo", ContainerSniffer.sniff(text(".RMF....")))
+        assertEquals("video/mpeg", ContainerSniffer.sniff(head(0, 0, 1, 0xBA)))
+    }
+
+    @Test
     fun `认不出的头返回 null`() {
         assertNull(ContainerSniffer.sniff(ByteArray(0)))
         assertNull(ContainerSniffer.sniff(head(1, 2, 3)))

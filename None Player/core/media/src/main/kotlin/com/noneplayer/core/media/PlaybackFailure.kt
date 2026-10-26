@@ -112,6 +112,25 @@ data class PlaybackFailure(
             retryable = false,
         )
 
+        /** 平台声明有解码器，但该具体码流的 profile/level/位深/尺寸要求不满足。 */
+        fun videoCapabilityUnsupported(
+            container: String?,
+            videoCodec: String?,
+            audioCodec: String?,
+            detail: String?,
+        ) = PlaybackFailure(
+            container = container,
+            videoCodec = videoCodec,
+            audioCodec = audioCodec,
+            reason = buildString {
+                append("该文件的编码档次或位深超出本设备解码器能力")
+                if (!detail.isNullOrBlank()) append("（").append(detail).append("）")
+                append("。")
+            },
+            category = PlaybackFailureCategory.VIDEO_DECODE,
+            retryable = false,
+        )
+
         /** 文件不可读（损坏 / 截断 / 权限） */
         fun unreadable(container: String? = null) = PlaybackFailure(
             container = container,

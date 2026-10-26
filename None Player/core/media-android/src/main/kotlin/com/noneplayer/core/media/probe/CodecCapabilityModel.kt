@@ -38,6 +38,8 @@ data class CodecCapabilitySnapshot(
                 append(type.mime).append(',')
                 append(type.profileLevels.joinToString("/") { "${it.profile}:${it.level}" }).append(',')
                 append(type.video?.cacheSignature() ?: "-").append(',')
+                append(type.bitDepths.sorted().joinToString("+")).append(',')
+                append(type.chromaSubsamplings.sorted().joinToString("+")).append(',')
                 append(type.bitrateModes.sorted().joinToString("+")).append(',')
                 append(type.maxInstances).append(',')
                 append(type.surfaceColorFormat).append(';')
@@ -90,6 +92,10 @@ data class CodecTypeCapability(
     val surfaceColorFormat: Boolean,
     val bitrateModes: Set<BitrateMode>,
     val colorFormats: List<Int>,
+    /** 从 profile 声明推导出的位深；空集表示平台未提供足够信息。 */
+    val bitDepths: Set<Int> = emptySet(),
+    /** 平台明确声明的色度格式；当前 Android API 常无法提供，空集保持 UNKNOWN。 */
+    val chromaSubsamplings: Set<String> = emptySet(),
 )
 
 data class ProfileLevel(val profile: Int, val level: Int)
@@ -130,6 +136,10 @@ data class CodecRequirements(
     val frameRate: Double? = null,
     val bitrate: Int? = null,
     val profile: ProfileRequirement? = null,
+    /** 码流明确声明的 luma bit depth；未知必须保持 null。 */
+    val bitDepth: Int? = null,
+    /** 码流明确声明的色度采样；未知必须保持 null。 */
+    val chromaSubsampling: String? = null,
     /** 码流头部读不出 profile（缺 csd、hvcC 损坏或非 Android 已定义档位）。 */
     val streamProfileUnknown: Boolean = false,
     val requireSurface: Boolean = false,
@@ -269,6 +279,34 @@ object CodecCapabilityDecider {
             }
         }
 
+        requirements.bitDepth?.let { required ->
+            when {
+                type.bitDepths.isEmpty() -> {
+                    unknown = true
+                    reasons += "bit depth unavailable"
+                }
+
+                required !in type.bitDepths -> return unsupported(
+                    codec.name,
+                    "bit depth $required not supported (${type.bitDepths.sorted().joinToString()})",
+                )
+            }
+        }
+
+        requirements.chromaSubsampling?.let { required ->
+            when {
+                type.chromaSubsamplings.isEmpty() -> {
+                    unknown = true
+                    reasons += "chroma subsampling unavailable"
+                }
+
+                required !in type.chromaSubsamplings -> return unsupported(
+                    codec.name,
+                    "chroma $required not supported (${type.chromaSubsamplings.joinToString()})",
+                )
+            }
+        }
+
         if (requirements.requireSurface && !type.surfaceColorFormat) {
             return unsupported(codec.name, "surface input not declared")
         }
@@ -350,6 +388,16 @@ object CodecProfiles {
     const val HEVC_MAIN10_HDR10 = 0x1000
     const val HEVC_MAIN10_HDR10_PLUS = 0x2000
 
+    // Android CodecProfileLevel values for AVC.  Kept here as raw constants so the
+    // pure decision model does not depend on a particular compile SDK.
+    const val AVC_BASELINE = 1
+    const val AVC_MAIN = 2
+    const val AVC_EXTENDED = 4
+    const val AVC_HIGH = 8
+    const val AVC_HIGH10 = 16
+    const val AVC_HIGH422 = 32
+    const val AVC_HIGH444 = 64
+
     fun matches(mime: String, required: Set<Int>, declared: Int): Boolean {
         if (declared in required) return true
         if (mime.equals("video/hevc", ignoreCase = true) && HEVC_MAIN10 in required) {
@@ -368,6 +416,39 @@ object CodecProfiles {
 
         else -> null
     }
+
+    /** 根据平台 profileLevels 推导可能的码流位深；无法推导时返回空集。 */
+    fun bitDepthsFor(mime: String, profileLevels: List<ProfileLevel>): Set<Int> =
+        profileLevels.flatMap { profile ->
+            when {
+                mime.equals("video/hevc", ignoreCase = true) -> when (profile.profile) {
+                    HEVC_MAIN, HEVC_MAIN_STILL -> listOf(8)
+                    HEVC_MAIN10, HEVC_MAIN10_HDR10, HEVC_MAIN10_HDR10_PLUS -> listOf(10)
+                    else -> emptyList()
+                }
+
+                mime.equals("video/avc", ignoreCase = true) -> when (profile.profile) {
+                    AVC_HIGH10, AVC_HIGH422, AVC_HIGH444 -> listOf(10)
+                    AVC_BASELINE, AVC_MAIN, AVC_EXTENDED, AVC_HIGH -> listOf(8)
+                    else -> emptyList()
+                }
+
+                mime.equals("video/x-vnd.on2.vp9", ignoreCase = true) -> when (profile.profile) {
+                    0, 1 -> listOf(8)
+                    2, 3 -> listOf(10, 12)
+                    else -> emptyList()
+                }
+
+                mime.equals("video/av01", ignoreCase = true) -> when (profile.profile) {
+                    0 -> listOf(8, 10, 12)
+                    1, 2 -> listOf(10, 12)
+                    else -> emptyList()
+                }
+
+                mime.equals("video/mp4v-es", ignoreCase = true) -> listOf(8)
+                else -> emptyList()
+            }
+        }.toSet()
 
     /** Main tier 码流可被同等级或更高的任一 tier 承接；High tier 码流要求解码器也声明 High tier。 */
     fun supports(required: CodecLevel, declared: CodecLevel): Boolean =

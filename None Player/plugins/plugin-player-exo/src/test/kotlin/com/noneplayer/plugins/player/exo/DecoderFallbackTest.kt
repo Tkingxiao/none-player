@@ -69,7 +69,7 @@ class DecoderFallbackTest {
         assertNull(parsed.codecName)
     }
 
-    // ---- ② 分类：只有 DECODER_INIT_FAILED / EXCEEDS_CAPABILITIES 可回退 ----
+    // ---- ② 分类：初始化、能力不足和视频运行期错误可回退 ----
 
     @Test
     fun decoderInitOnVideoIsVideoInit() {
@@ -127,13 +127,43 @@ class DecoderFallbackTest {
     }
 
     @Test
-    fun otherCodesAreNotRetryable() {
+    fun runtimeVideoDecodeFailureIsRetryable() {
         val parsed = parseDecoderFailureMessage(
-            "Decoder init failed: c2.android.avc.decoder, Format(1, video/avc, null, -1, null)",
+            "MediaCodecVideoRenderer error, index=0, format=Format(1, video/mp4v-es, null, -1, null)",
         )
         val kind = classifyDecoderFailure(PlaybackException.ERROR_CODE_DECODING_FAILED, parsed)
-        assertEquals(DecoderFailureKind.OTHER, kind)
+        assertEquals(DecoderFailureKind.VIDEO_DECODING_RUNTIME, kind)
+        assertTrue(shouldRetryDecoderFallback(kind, alreadyRetriedThisMedia = false))
+    }
+
+    @Test
+    fun runtimeVideoRendererMarkerIsEnoughWhenMimeWasDroppedAcrossBinder() {
+        val parsed = parseDecoderFailureMessage("MediaCodecVideoRenderer error, index=0")
+        assertEquals(DecoderRendererTrack.VIDEO, parsed.rendererTrack)
+        assertEquals(
+            DecoderFailureKind.VIDEO_DECODING_RUNTIME,
+            classifyDecoderFailure(PlaybackException.ERROR_CODE_DECODING_FAILED, parsed),
+        )
+    }
+
+    @Test
+    fun runtimeAudioDecodeFailureDoesNotTriggerVideoFallback() {
+        val parsed = parseDecoderFailureMessage(
+            "MediaCodecAudioRenderer error, index=0, format=Format(2, audio/mp4a-latm, null, -1, null)",
+        )
+        val kind = classifyDecoderFailure(PlaybackException.ERROR_CODE_DECODING_FAILED, parsed)
+        assertEquals(DecoderFailureKind.AUDIO_DECODING_RUNTIME, kind)
+        assertTrue(isAudioDecoderFailure(kind, parsed.mime))
         assertFalse(shouldRetryDecoderFallback(kind, alreadyRetriedThisMedia = false))
+    }
+
+    @Test
+    fun runtimeDecodeFailureWithoutTrackIdentityStaysConservative() {
+        val parsed = parseDecoderFailureMessage("decoder crashed")
+        assertEquals(
+            DecoderFailureKind.OTHER,
+            classifyDecoderFailure(PlaybackException.ERROR_CODE_DECODING_FAILED, parsed),
+        )
     }
 
     @Test
@@ -212,8 +242,16 @@ class DecoderFallbackTest {
     fun gateAllowsOneAttemptPerMedia() {
         val gate = DecoderFallbackGate()
         assertTrue(gate.canRetry(DecoderFailureKind.VIDEO_DECODER_INIT, "local:1"))
-        gate.markAttempted("local:1")
+        gate.markAttempted("local:1", "video/avc")
         assertFalse(gate.canRetry(DecoderFailureKind.VIDEO_DECODER_INIT, "local:1"))
+        // 不同视频轨拥有独立的一次回退机会。
+        assertTrue(gate.canRetry(DecoderFailureKind.VIDEO_DECODER_INIT, "local:1", "video/hevc"))
+        gate.markAttempted("local:1", "video/hevc")
+        assertFalse("同一视频轨不能因另一轨回退后再次重试", gate.canRetry(
+            DecoderFailureKind.VIDEO_DECODER_INIT,
+            "local:1",
+            "video/avc",
+        ))
         // 切到另一条媒体后复位
         gate.onMediaChanged()
         assertTrue(gate.canRetry(DecoderFailureKind.VIDEO_DECODER_INIT, "local:2"))
@@ -233,6 +271,7 @@ class DecoderFallbackTest {
     fun stateExposesArmedExclusionUntilCleared() {
         val state = DecoderFallbackState()
         assertFalse(state.isArmed)
+        state.onMediaItemChanged("local:1")
         state.armExcludedCodec("local:1", "video/avc", "OMX.qcom.video.decoder.avc")
         assertTrue(state.isArmed)
         assertEquals("OMX.qcom.video.decoder.avc", state.excludedCodecNameFor("video/avc"))
@@ -247,9 +286,11 @@ class DecoderFallbackTest {
     @Test
     fun stateSoftOnlyVideoAppliesToMp4vOnly() {
         val state = DecoderFallbackState()
+        state.onMediaItemChanged("local:1")
         state.armSoftOnlyVideo("local:1", "video/mp4v-es")
         assertTrue(state.isSoftOnlyVideo("video/mp4v-es"))
         assertFalse(state.isSoftOnlyVideo("video/avc"))
         assertFalse(state.isSoftOnlyVideo("audio/mpeg"))
+        state.clear()
     }
 }

@@ -293,6 +293,9 @@ class LegacyPlaybackTest {
     private fun play(asset: String, width: Int, height: Int, saveFrame: Boolean = false): Played {
         val context = instrumentation.targetContext
         val file = copyAsset(asset)
+        val fallbackGate = DecoderFallbackGate()
+        decoderFallbackState.clear()
+        decoderFallbackState.onMediaItemChanged(null)
         val playerThread = HandlerThread("legacy-player").apply { start() }
         val imageThread = HandlerThread("legacy-images").apply { start() }
         val playerHandler = Handler(playerThread.looper)
@@ -374,6 +377,37 @@ class LegacyPlaybackTest {
                 }
 
                 override fun onPlayerError(playbackError: PlaybackException) {
+                    // E241：该套件直接构造 ExoPlayer，不经过 PlaybackService/MediaController；
+                    // 用与服务侧相同的一次性回退路径验证 qpel 的运行期失败能切到 ASP 专用链。
+                    val parsed = parseDecoderFailureMessage(playbackError.message)
+                    val kind = classifyDecoderFailure(playbackError.errorCode, parsed)
+                    val plan = fallbackPlan(kind, parsed)
+                    val mediaKey = file.toURI().toString()
+                    val trackKey = parsed.mime ?: parsed.rendererTrack.name
+                    if (plan.action != DecoderFallbackAction.GIVE_UP &&
+                        fallbackGate.canRetry(kind, mediaKey, trackKey)
+                    ) {
+                        fallbackGate.markAttempted(mediaKey, trackKey)
+                        when (plan.action) {
+                            DecoderFallbackAction.RETRY_WITH_SOFT_ONLY ->
+                                decoderFallbackState.armSoftOnlyVideo(mediaKey, MP4V_VIDEO_MIME, null)
+
+                            DecoderFallbackAction.RETRY_WITHOUT_FAILED_CODEC -> {
+                                val mime = plan.mime
+                                val codec = plan.codecName
+                                if (mime != null && codec != null) {
+                                    decoderFallbackState.armExcludedCodec(mediaKey, mime, codec, null)
+                                }
+                            }
+
+                            DecoderFallbackAction.GIVE_UP -> Unit
+                        }
+                        val position = player.currentPosition.coerceAtLeast(0L)
+                        player.prepare()
+                        if (position > 0L) player.seekTo(position)
+                        player.play()
+                        return
+                    }
                     error.set(playbackError)
                     ended.countDown()
                 }
@@ -408,6 +442,8 @@ class LegacyPlaybackTest {
             val released = CountDownLatch(1)
             playerHandler.post {
                 playerRef.get()?.release()
+                decoderFallbackState.clear()
+                decoderFallbackState.onMediaItemChanged(null)
                 reader.close()
                 released.countDown()
             }

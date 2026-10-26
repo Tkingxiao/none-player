@@ -79,6 +79,7 @@ class NpCodecSelectorDecisionTest {
     @Test
     fun `soft only video mime hides platform candidates for that mime only`() {
         val state = DecoderFallbackState()
+        state.onMediaItemChanged("local:1")
         state.armSoftOnlyVideo("local:1", "video/mp4v-es")
         assertTrue(
             state.filterCandidates("video/mp4v-es", listOf("OMX.qcom.video.decoder.mpeg4")).isEmpty(),
@@ -88,11 +89,13 @@ class NpCodecSelectorDecisionTest {
             listOf("c2.android.avc.decoder"),
             state.filterCandidates("video/avc", listOf("c2.android.avc.decoder")),
         )
+        state.clear()
     }
 
     @Test
     fun `excluded codec is removed but other candidates are kept`() {
         val state = DecoderFallbackState()
+        state.onMediaItemChanged("local:1")
         state.armExcludedCodec("local:1", "video/hevc", "OMX.qcom.video.decoder.hevc")
         assertEquals(
             listOf("c2.android.hevc.decoder"),
@@ -106,6 +109,7 @@ class NpCodecSelectorDecisionTest {
     @Test
     fun `excluding the only candidate lets the extension renderer take over`() {
         val state = DecoderFallbackState()
+        state.onMediaItemChanged("local:1")
         state.armExcludedCodec("local:1", "video/avc", "OMX.qcom.video.decoder.avc")
         assertTrue(
             state.filterCandidates("video/avc", listOf("OMX.qcom.video.decoder.avc")).isEmpty(),
@@ -115,11 +119,57 @@ class NpCodecSelectorDecisionTest {
     @Test
     fun `cleared fallback state returns to pass through`() {
         val state = DecoderFallbackState()
+        state.onMediaItemChanged("local:1")
         state.armExcludedCodec("local:1", "video/avc", "OMX.qcom.video.decoder.avc")
         state.clear()
         assertEquals(
             listOf("OMX.qcom.video.decoder.avc"),
             state.filterCandidates("video/avc", listOf("OMX.qcom.video.decoder.avc")),
+        )
+    }
+
+    @Test
+    fun oldMediaFallbackStateDoesNotFilterCurrentMediaCandidates() {
+        val state = DecoderFallbackState()
+        state.onMediaItemChanged("media-new")
+        state.armExcludedCodec(
+            mediaKey = "source:old",
+            mime = "video/avc",
+            codecName = "OMX.qcom.video.decoder.avc",
+            selectorMediaId = "media-old",
+        )
+        val candidates = listOf("OMX.qcom.video.decoder.avc")
+        assertTrue(!state.isArmedForCurrentMedia())
+        assertEquals(candidates, state.filterCandidates("video/avc", candidates))
+    }
+
+    @Test
+    fun sameMediaFallbackStateStillFiltersAfterTransitionSnapshot() {
+        val state = DecoderFallbackState()
+        state.onMediaItemChanged("media-1")
+        state.armExcludedCodec(
+            mediaKey = "source:1",
+            mime = "video/avc",
+            codecName = "OMX.qcom.video.decoder.avc",
+            selectorMediaId = "media-1",
+        )
+        assertTrue(state.isArmedForCurrentMedia())
+        assertTrue(
+            state.filterCandidates("video/avc", listOf("OMX.qcom.video.decoder.avc")).isEmpty(),
+        )
+    }
+
+    @Test
+    fun singleMediaEmptyIdCanFilterUntilNextTransitionClearsIt() {
+        val state = DecoderFallbackState()
+        state.onMediaItemChanged(null)
+        state.armSoftOnlyVideo(mediaKey = null, mime = "video/mp4v-es", selectorMediaId = null)
+        assertTrue(state.isArmedForCurrentMedia())
+        assertTrue(state.filterCandidates("video/mp4v-es", listOf("OMX.qcom.video.decoder.mpeg4")).isEmpty())
+        state.onMediaItemChanged(null)
+        assertEquals(
+            listOf("OMX.qcom.video.decoder.mpeg4"),
+            state.filterCandidates("video/mp4v-es", listOf("OMX.qcom.video.decoder.mpeg4")),
         )
     }
 }

@@ -329,6 +329,8 @@ private fun CodecTypeCapability.toJson(): JSONObject = JSONObject().apply {
     put("surfaceColorFormat", surfaceColorFormat)
     put("bitrateModes", JSONArray(bitrateModes.map { it.name }))
     put("colorFormats", JSONArray(colorFormats))
+    put("bitDepths", JSONArray(bitDepths.sorted()))
+    put("chromaSubsamplings", JSONArray(chromaSubsamplings.sorted()))
 }
 
 private fun profileName(mime: String, profile: Int): String = when {

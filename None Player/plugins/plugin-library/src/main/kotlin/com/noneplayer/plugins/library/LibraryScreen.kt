@@ -2878,7 +2878,7 @@ private fun upgradeTreeWrite(context: android.content.Context, authorizedTrees: 
  * （那里能看/改存储权限），不伪造一个不存在的入口。
  */
 private fun openAllFilesAccessSettings(context: android.content.Context) {
-    val appUri = android.net.Uri.parse("package:${context.packageName}")
+    val appUri = "package:${context.packageName}".toUri()
     if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
         val opened = runCatching {
             context.startActivity(

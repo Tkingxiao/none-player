@@ -2,6 +2,7 @@ package com.noneplayer.plugins.player.exo
 
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
+import com.noneplayer.core.media.probe.Mp4vAspGate
 
 /**
  * A18：解码器初始化失败的一次性受控回退（客户端侧纯内核）。
@@ -25,14 +26,25 @@ internal const val MP4V_VIDEO_MIME: String = MimeTypes.VIDEO_MP4V
 internal data class ParsedDecoderFailure(
     val mime: String?,
     val codecName: String?,
+    /** mime 缺失时，用 renderer 名补足音视频轨判定。 */
+    val rendererTrack: DecoderRendererTrack = DecoderRendererTrack.UNKNOWN,
 )
 
-/** 解码失败的归类：只有视频的两类允许触发一次回退。 */
+/** media3 错误消息里可确认的 renderer 轨道。 */
+internal enum class DecoderRendererTrack {
+    VIDEO,
+    AUDIO,
+    UNKNOWN,
+}
+
+/** 解码失败的归类：视频初始化、能力不足和运行期错误允许触发一次回退。 */
 internal enum class DecoderFailureKind {
     VIDEO_DECODER_INIT,
     VIDEO_EXCEEDS_CAPABILITIES,
+    VIDEO_DECODING_RUNTIME,
     AUDIO_DECODER_INIT,
     AUDIO_EXCEEDS_CAPABILITIES,
+    AUDIO_DECODING_RUNTIME,
     OTHER,
 }
 
@@ -60,12 +72,14 @@ internal data class DecoderFallbackPlan(
 //   "Decoder init failed: [-10000], Format(1, video/mp4v-es, null, -1, null)"（无可用解码器）
 private val DECODER_INIT_PREFIX = "Decoder init failed: "
 private val TRACK_MIME_PATTERN = Regex("""\b(video|audio)/[A-Za-z0-9.+\-]+""")
+private val VIDEO_RENDERER_MARKER = "MediaCodecVideoRenderer"
+private val AUDIO_RENDERER_MARKER = "MediaCodecAudioRenderer"
 
 /**
  * 从错误 message 里容错解析失败轨的 mime 与平台 codec 名。
  *
- * 任何输入（null / 空串 / 无关文本 / 被截断的 message）都必须正常返回，绝不抛异常：
- * 解析不出时只做"同媒体重试一次"，不做更激进的误判。
+ * 任何输入（null / 空串 / 无关文本 / 被截断的 message）都必须正常返回，绝不抛异常；
+ * 只有可确认的轨道才允许按运行期失败做回退，不做更激进的误判。
  */
 internal fun parseDecoderFailureMessage(message: String?): ParsedDecoderFailure {
     if (message.isNullOrBlank()) return ParsedDecoderFailure(mime = null, codecName = null)
@@ -79,7 +93,14 @@ internal fun parseDecoderFailureMessage(message: String?): ParsedDecoderFailure 
     } else {
         null
     }
-    return ParsedDecoderFailure(mime = mime, codecName = codecName)
+    val rendererTrack = when {
+        mime?.startsWith("video/") == true || VIDEO_RENDERER_MARKER in message ->
+            DecoderRendererTrack.VIDEO
+        mime?.startsWith("audio/") == true || AUDIO_RENDERER_MARKER in message ->
+            DecoderRendererTrack.AUDIO
+        else -> DecoderRendererTrack.UNKNOWN
+    }
+    return ParsedDecoderFailure(mime = mime, codecName = codecName, rendererTrack = rendererTrack)
 }
 
 /** 是否属于 media3 的解码器家族错误（决定要不要走 A18 的错误面板归类）。 */
@@ -95,13 +116,17 @@ internal fun isDecoderFailureCode(errorCode: Int): Boolean = when (errorCode) {
 }
 
 /**
- * 归类解码失败。只有 `DECODER_INIT_FAILED` / `DECODING_FORMAT_EXCEEDS_CAPABILITIES`
- * 是 A18 明确要求"只重试一次"的两类；其余一律 [DecoderFailureKind.OTHER]。
+ * 归类解码失败。运行期 `DECODING_FAILED` 只有在 message/mime 能确认是视频轨时
+ * 才进入 E241 回退；未知轨道保持 [DecoderFailureKind.OTHER]，避免把音频故障误送进视频链。
  *
- * 解析不出 mime 时按视频处理（宁可多试一次也不误判成音频而放弃回退）。
+ * 初始化错误解析不出 mime 时沿用旧的保守视频归类；运行期错误则必须有视频 mime
+ * 或 `MediaCodecVideoRenderer` 标记，未知轨道不回退。
  */
 internal fun classifyDecoderFailure(errorCode: Int, parsed: ParsedDecoderFailure): DecoderFailureKind {
-    val audio = parsed.mime?.startsWith("audio/") == true
+    val audio = parsed.mime?.startsWith("audio/") == true ||
+        parsed.rendererTrack == DecoderRendererTrack.AUDIO
+    val video = parsed.mime?.startsWith("video/") == true ||
+        parsed.rendererTrack == DecoderRendererTrack.VIDEO
     return when (errorCode) {
         PlaybackException.ERROR_CODE_DECODER_INIT_FAILED ->
             if (audio) DecoderFailureKind.AUDIO_DECODER_INIT else DecoderFailureKind.VIDEO_DECODER_INIT
@@ -112,6 +137,12 @@ internal fun classifyDecoderFailure(errorCode: Int, parsed: ParsedDecoderFailure
             } else {
                 DecoderFailureKind.VIDEO_EXCEEDS_CAPABILITIES
             }
+
+        PlaybackException.ERROR_CODE_DECODING_FAILED -> when {
+            audio -> DecoderFailureKind.AUDIO_DECODING_RUNTIME
+            video -> DecoderFailureKind.VIDEO_DECODING_RUNTIME
+            else -> DecoderFailureKind.OTHER
+        }
 
         else -> DecoderFailureKind.OTHER
     }
@@ -126,6 +157,7 @@ internal fun classifyDecoderFailure(errorCode: Int, parsed: ParsedDecoderFailure
 internal fun isAudioDecoderFailure(kind: DecoderFailureKind, mime: String?): Boolean =
     kind == DecoderFailureKind.AUDIO_DECODER_INIT ||
         kind == DecoderFailureKind.AUDIO_EXCEEDS_CAPABILITIES ||
+        kind == DecoderFailureKind.AUDIO_DECODING_RUNTIME ||
         mime?.startsWith("audio/") == true
 
 /** 是否值得做一次回退：视频解码失败且本次媒体还没回退过。 */
@@ -135,13 +167,13 @@ internal fun shouldRetryDecoderFallback(
 ): Boolean {
     if (alreadyRetriedThisMedia) return false
     return kind == DecoderFailureKind.VIDEO_DECODER_INIT ||
-        kind == DecoderFailureKind.VIDEO_EXCEEDS_CAPABILITIES
+        kind == DecoderFailureKind.VIDEO_EXCEEDS_CAPABILITIES ||
+        kind == DecoderFailureKind.VIDEO_DECODING_RUNTIME
 }
 
 /** 根据归类决定回退动作；[MP4V_VIDEO_MIME] 一律走软解链。 */
 internal fun fallbackPlan(kind: DecoderFailureKind, parsed: ParsedDecoderFailure): DecoderFallbackPlan {
-    val retryable = kind == DecoderFailureKind.VIDEO_DECODER_INIT ||
-        kind == DecoderFailureKind.VIDEO_EXCEEDS_CAPABILITIES
+    val retryable = shouldRetryDecoderFallback(kind, alreadyRetriedThisMedia = false)
     if (!retryable) {
         return DecoderFallbackPlan(DecoderFallbackAction.GIVE_UP, parsed.mime, parsed.codecName)
     }
@@ -163,22 +195,30 @@ internal fun fallbackPlan(kind: DecoderFailureKind, parsed: ParsedDecoderFailure
 internal class DecoderFallbackGate {
     private var attempted: Boolean = false
     private var attemptedMediaKey: String? = null
+    private val attemptedTrackKeys = mutableSetOf<String?>()
 
     val hasAttempted: Boolean get() = attempted
 
-    fun canRetry(kind: DecoderFailureKind, mediaKey: String?): Boolean {
+    fun canRetry(kind: DecoderFailureKind, mediaKey: String?, trackKey: String? = null): Boolean {
         if (!shouldRetryDecoderFallback(kind, alreadyRetriedThisMedia = false)) return false
-        return !(attempted && attemptedMediaKey == mediaKey)
+        if (!attempted || attemptedMediaKey != mediaKey) return true
+        // 同一媒体的不同视频轨可以各自尝试一次；同一轨第二次错误必须终止，
+        // 否则运行期错误会在平台 codec 与扩展链之间无限来回重建。
+        if (trackKey == null) return false
+        return trackKey !in attemptedTrackKeys
     }
 
-    fun markAttempted(mediaKey: String?) {
+    fun markAttempted(mediaKey: String?, trackKey: String? = null) {
+        if (attemptedMediaKey != mediaKey) attemptedTrackKeys.clear()
         attempted = true
         attemptedMediaKey = mediaKey
+        attemptedTrackKeys += trackKey
     }
 
     fun onMediaChanged() {
         attempted = false
         attemptedMediaKey = null
+        attemptedTrackKeys.clear()
     }
 }
 
@@ -195,12 +235,36 @@ internal class DecoderFallbackGate {
 internal class DecoderFallbackState {
     private var armed: Boolean = false
     private var armedMediaKey: String? = null
+    private var armedSelectorMediaId: String? = null
+    private var currentSelectorMediaId: String? = null
     private var excludedMime: String? = null
     private var excludedCodecName: String? = null
     private var softOnlyMime: String? = null
 
     /** 是否有任何回退状态被武装；false 时过滤包装零开销直通。 */
     val isArmed: Boolean get() = armed
+
+    /** 由服务侧 transition 提供当前 MediaItem.mediaId；空 id 由 transition 边界清理。 */
+    fun onMediaItemChanged(mediaId: String?) {
+        val normalized = mediaId?.takeUnless { it.isBlank() }
+        // 单媒体 prepare 沿用 Media3 的空 mediaId，无法做身份比较；服务侧每次
+        // transition 都会调用这里并清掉旧状态，避免把上一条单媒体的过滤带到下一条。
+        if (normalized == null) {
+            currentSelectorMediaId = null
+            clear()
+            return
+        }
+        if (normalized == currentSelectorMediaId) return
+        currentSelectorMediaId = normalized
+        clear()
+    }
+
+    /** 过滤前校验状态属于服务侧当前媒体；单媒体空 id 由 transition 清理保证边界。 */
+    fun isArmedForCurrentMedia(): Boolean =
+        armed && (
+            currentSelectorMediaId == null && armedSelectorMediaId == null ||
+                armedSelectorMediaId == currentSelectorMediaId
+            )
 
     /** 状态是否属于这条媒体（媒体键校验，避免污染下一条）。 */
     fun isArmedFor(mediaKey: String?): Boolean = armed && armedMediaKey == mediaKey
@@ -221,25 +285,38 @@ internal class DecoderFallbackState {
      * - 排除 codec → 去掉该名字（若全被去掉，扩展渲染器接手）。
      */
     fun filterCandidates(mimeType: String, candidateNames: List<String>): List<String> {
-        if (!armed) return candidateNames
+        if (!isArmedForCurrentMedia()) return candidateNames
         if (softOnlyMime != null && softOnlyMime == mimeType) return emptyList()
         val excluded = excludedCodecNameFor(mimeType) ?: return candidateNames
         return candidateNames.filterNot { it == excluded }
     }
 
     /** 武装：排除指定平台的 codec。 */
-    fun armExcludedCodec(mediaKey: String?, mime: String?, codecName: String) {
+    fun armExcludedCodec(
+        mediaKey: String?,
+        mime: String?,
+        codecName: String,
+        selectorMediaId: String? = mediaKey,
+    ) {
+        Mp4vAspGate.clearForcedDedicatedDecoder()
         armed = true
         armedMediaKey = mediaKey
+        armedSelectorMediaId = selectorMediaId
         excludedMime = mime
         excludedCodecName = codecName
         softOnlyMime = null
     }
 
     /** 武装：该 mime 只走软解链（mp4v → nextlib / 专用 renderer）。 */
-    fun armSoftOnlyVideo(mediaKey: String?, mime: String) {
+    fun armSoftOnlyVideo(
+        mediaKey: String?,
+        mime: String,
+        selectorMediaId: String? = mediaKey,
+    ) {
+        if (mime == MP4V_VIDEO_MIME) Mp4vAspGate.armForcedDedicatedDecoder()
         armed = true
         armedMediaKey = mediaKey
+        armedSelectorMediaId = selectorMediaId
         excludedMime = null
         excludedCodecName = null
         softOnlyMime = mime
@@ -247,8 +324,10 @@ internal class DecoderFallbackState {
 
     /** 清空全部回退状态（切媒体 / 回退成功 / 释放时调用）。 */
     fun clear() {
+        Mp4vAspGate.clearForcedDedicatedDecoder()
         armed = false
         armedMediaKey = null
+        armedSelectorMediaId = null
         excludedMime = null
         excludedCodecName = null
         softOnlyMime = null

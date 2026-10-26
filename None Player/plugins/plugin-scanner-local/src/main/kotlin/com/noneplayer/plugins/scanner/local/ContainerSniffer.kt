@@ -52,6 +52,12 @@ internal object ContainerSniffer {
         }
         val magic4 = head.decodeToString(0, 4) // 入口 26 行已保证 head.size >= 4
         return when {
+            // E244：avformat 容器的无扩展名入口，必须与 NpFfmpegExtractor 的 magic 同源。
+            magic4 == "NUTM" -> "video/x-nut"
+            magic4 == ".RMF" -> "video/x-pn-realvideo"
+            head.size >= 4 &&
+                head[0] == 0.toByte() && head[1] == 0.toByte() && head[2] == 1.toByte() &&
+                (head[3] == 0xBA.toByte() || head[3] == 0xBB.toByte()) -> "video/mpeg"
             magic4 == "OggS" -> "audio/ogg"
             magic4 == "fLaC" -> "audio/flac"
             magic4 == "FLV\u0001" -> "video/x-flv"

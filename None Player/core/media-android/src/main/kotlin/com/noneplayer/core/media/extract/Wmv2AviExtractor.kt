@@ -673,16 +673,16 @@ class Wmv2AviExtractor : Extractor {
             val data = superData[streamIx] ?: break
             val c = cursors[pick]++
             val stream = streams[streamIx]
-            val scale = stream.scale.coerceAtLeast(1L)
-            val rate = stream.rate.coerceAtLeast(1L)
             val timeUs: Long = if (stream.videoMime != null || stream.blockAlign <= 0) {
                 val n = ordinals[streamIx]
                 ordinals[streamIx] = n + 1
-                n * 1_000_000L * scale / rate
+                streamTicksToUs(stream, n.toLong())
             } else {
-                val total = audioBytes[streamIx] + data.size[c]
-                audioBytes[streamIx] = total
-                total / stream.blockAlign * 1_000_000L * scale / rate
+                // 音频 chunk 的时间戳是 chunk 起点；消费完本块后再推进累计字节。
+                // 首个样本因此从 0 开始，而不是错误地从一个 chunk 时长开始。
+                val startBytes = audioBytes[streamIx]
+                audioBytes[streamIx] = startBytes + data.size[c].toLong()
+                streamTicksToUs(stream, startBytes / stream.blockAlign)
             }
             samples.add(streamIx, data.offset[c], data.size[c], timeUs, !data.delta[c])
             merged++
@@ -790,24 +790,21 @@ class Wmv2AviExtractor : Extractor {
             val audioChunk = kind == AviChunk.Kind.AUDIO
             if (isVideo && !videoChunk) continue
             if (!isVideo && !audioChunk) continue
-            val scale = stream.scale.coerceAtLeast(1L)
-            val rate = stream.rate.coerceAtLeast(1L)
             val chunkBytes = entries.size[i].coerceAtLeast(0).toLong()
             val timeUs = if (isVideo) {
                 val n = ordinal[streamIndex]
                 ordinal[streamIndex] = n + 1
-                n * 1_000_000L * scale / rate
+                streamTicksToUs(stream, n.toLong())
             } else if (stream.blockAlign > 0) {
-                // strh 的 scale/rate 是采样时钟：tick 数 = 累计字节 / nBlockAlign
-                //（本夹具 scale=1/rate=44100，blockAlign=4；直乘字节会快 4 倍，音频
-                //  时钟错乱 → AudioSink 停摆。与 FFmpeg avidec 的字节折块同源。）
-                val total = audioBytes[streamIndex] + chunkBytes
-                audioBytes[streamIndex] = total
-                total / stream.blockAlign * 1_000_000L * scale / rate
+                // strh 的 scale/rate 是采样时钟：先用累计字节计算当前 chunk 起点，
+                // 再累加本 chunk，避免首样本凭空跳过一块音频。
+                val startBytes = audioBytes[streamIndex]
+                audioBytes[streamIndex] = startBytes + chunkBytes
+                streamTicksToUs(stream, startBytes / stream.blockAlign)
             } else {
                 val n = ordinal[streamIndex]
                 ordinal[streamIndex] = n + 1
-                n * 1_000_000L * scale / rate
+                streamTicksToUs(stream, n.toLong())
             }
             val key = entries.flags[i] and KEYFRAME != 0L || (isVideo && !videoSeen)
             if (isVideo) videoSeen = true
@@ -904,7 +901,7 @@ class Wmv2AviExtractor : Extractor {
 
     private fun streamDurationUs(stream: StreamInfo): Long {
         val rate = stream.rate
-        if (rate <= 0) return 0L
+        if (rate <= 0 || stream.scale <= 0) return 0L
         // strh.dwLength 按 scale/rate 时钟计（视频=帧、音频=采样），有的话直接用
         if (stream.length > 0) return stream.length * 1_000_000L * stream.scale.coerceAtLeast(1L) / rate
         var count = 0
@@ -921,7 +918,29 @@ class Wmv2AviExtractor : Extractor {
         } else {
             count.toLong()
         }
-        return n * 1_000_000L * stream.scale.coerceAtLeast(1L) / rate
+        return streamTicksToUs(stream, n)
+    }
+
+    /** AVI 时钟换算：非法时钟返回 TIME_UNSET，不把损坏的 0 修成 1。 */
+    private fun streamTicksToUs(stream: StreamInfo, ticks: Long): Long {
+        if (stream.scale <= 0L || stream.rate <= 0L) return C.TIME_UNSET
+        if (ticks <= 0L) return 0L
+        val factor = if (stream.scale <= Long.MAX_VALUE / 1_000_000L) {
+            stream.scale * 1_000_000L
+        } else {
+            return java.math.BigInteger.valueOf(ticks)
+                .multiply(java.math.BigInteger.valueOf(stream.scale))
+                .multiply(java.math.BigInteger.valueOf(1_000_000L))
+                .divide(java.math.BigInteger.valueOf(stream.rate))
+                .coerceAtMost(java.math.BigInteger.valueOf(Long.MAX_VALUE))
+                .toLong()
+        }
+        if (ticks <= Long.MAX_VALUE / factor) return ticks * factor / stream.rate
+        return java.math.BigInteger.valueOf(ticks)
+            .multiply(java.math.BigInteger.valueOf(factor))
+            .divide(java.math.BigInteger.valueOf(stream.rate))
+            .coerceAtMost(java.math.BigInteger.valueOf(Long.MAX_VALUE))
+            .toLong()
     }
 
     /** 某条流的最大样本字节数（emit 估 maxInputSize 用；一遍平铺列） */

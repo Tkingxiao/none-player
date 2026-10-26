@@ -51,6 +51,19 @@ class PlaybackFailureTest {
     }
 
     @Test
+    fun `具体能力不足属于不可重试的视频解码失败`() {
+        val failure = PlaybackFailure.videoCapabilityUnsupported(
+            container = "MP4",
+            videoCodec = "H.265 (HEVC)",
+            audioCodec = "AAC",
+            detail = "bit depth 10 not supported",
+        )
+        assertEquals(PlaybackFailureCategory.VIDEO_DECODE, failure.category)
+        assertFalse(failure.retryable)
+        assertTrue(failure.reason.contains("bit depth 10"))
+    }
+
+    @Test
     fun `容器名映射：已知扩展名与未知扩展名`() {
         assertEquals("AVI", MediaNames.containerName("file:///a/b/x.avi"))
         assertEquals("Matroska (MKV)", MediaNames.containerName("content://x/y.mkv"))

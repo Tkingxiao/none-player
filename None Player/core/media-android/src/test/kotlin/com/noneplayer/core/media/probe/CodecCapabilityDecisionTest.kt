@@ -61,6 +61,7 @@ class CodecCapabilityDecisionTest {
         maxInstances: Int = 1,
         surface: Boolean = false,
         bitrateModes: Set<BitrateMode> = emptySet(),
+        bitDepths: Set<Int> = CodecProfiles.bitDepthsFor(mime, profileLevels),
     ) = CodecTypeCapability(
         mime = mime,
         profileLevels = profileLevels,
@@ -69,6 +70,7 @@ class CodecCapabilityDecisionTest {
         surfaceColorFormat = surface,
         bitrateModes = bitrateModes,
         colorFormats = if (surface) listOf(0x7F000789) else emptyList(),
+        bitDepths = bitDepths,
     )
 
     private fun codec(
@@ -97,6 +99,7 @@ class CodecCapabilityDecisionTest {
         requireSurface: Boolean = false,
         bitrateMode: BitrateMode? = null,
         minInstances: Int? = null,
+        bitDepth: Int? = null,
     ) = CodecRequirements(
         mime = mime,
         width = width,
@@ -108,6 +111,7 @@ class CodecCapabilityDecisionTest {
         requireSurface = requireSurface,
         bitrateMode = bitrateMode,
         minInstances = minInstances,
+        bitDepth = bitDepth,
     )
 
     private fun evaluate(
@@ -150,6 +154,65 @@ class CodecCapabilityDecisionTest {
         val decision = evaluate(codec = codec(type = type(profileLevels = emptyList())))
         assertEquals(UNKNOWN, decision.verdict)
         assertTrue(decision.reasons.single().contains("profileLevels"))
+    }
+
+    @Test
+    fun `ten bit stream is rejected by an eight bit decoder`() {
+        val eightBit = codec(
+            type = type(
+                profileLevels = listOf(ProfileLevel(CodecProfiles.HEVC_MAIN, hevcMainTierLevel51)),
+                bitDepths = setOf(8),
+            ),
+        )
+        assertEquals(
+            UNSUPPORTED,
+            evaluate(eightBit, requirements(bitDepth = 10, profile = null)).verdict,
+        )
+    }
+
+    @Test
+    fun `missing bit depth declaration is unknown`() {
+        val decision = evaluate(
+            codec = codec(type = type(bitDepths = emptySet())),
+            requirements = requirements(bitDepth = 10, profile = null),
+        )
+        assertEquals(UNKNOWN, decision.verdict)
+    }
+
+    @Test
+    fun `avc codec string distinguishes high ten from high eight`() {
+        val parsed = CodecStreamProfileParser.parse(
+            mime = avc,
+            codecs = "avc1.6E0032",
+            initializationData = emptyList(),
+        )
+        assertEquals(CodecProfiles.AVC_HIGH10, parsed?.profile)
+        assertEquals(10, parsed?.bitDepth)
+        assertEquals(5.0, parsed?.level?.rank)
+    }
+
+    @Test
+    fun `vp9 and av1 codec strings retain explicit bit depth`() {
+        val vp9 = CodecStreamProfileParser.parse(
+            "video/x-vnd.on2.vp9",
+            "vp09.02.10.10.00",
+            emptyList(),
+        )
+        assertEquals(
+            10,
+            vp9?.bitDepth,
+        )
+        assertEquals("4:2:0", vp9?.chromaSubsampling)
+        assertEquals(
+            10,
+            CodecStreamProfileParser.parse("video/av01", "av01.0.08M.10", emptyList())?.bitDepth,
+        )
+    }
+
+    @Test
+    fun `truncated codec descriptions remain unknown`() {
+        assertEquals(null, CodecStreamProfileParser.parse(avc, "avc1.6E", emptyList()))
+        assertEquals(null, CodecStreamProfileParser.parse("video/av01", "av01.0.08M", emptyList()))
     }
 
     @Test

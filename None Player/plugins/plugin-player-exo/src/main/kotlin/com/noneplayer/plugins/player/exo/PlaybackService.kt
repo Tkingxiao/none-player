@@ -9,6 +9,7 @@ import androidx.core.net.toUri
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.cache.Cache
@@ -95,6 +96,10 @@ class PlaybackService : MediaSessionService() {
      * 用于把 [syncPreloadQueue] 变成**增量**同步——见该方法内注释。
      */
     private var preloadedWindow: List<MediaItem> = emptyList()
+
+    /** 服务侧直建 ExoPlayer（含预载/通知链）也必须接住运行期视频解码失败。 */
+    private val serviceDecoderFallbackGate = DecoderFallbackGate()
+    private var serviceDecoderMediaId: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -195,6 +200,14 @@ class PlaybackService : MediaSessionService() {
         // 通知/锁屏的点击落点跟随当前媒体：noneplayer://player?uri=…&id=… 经 E2 深链回播放页
         player.addListener(object : Player.Listener {
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                // E241：选择器拿不到 Player/MediaItem，只能由会话侧把当前 id 原子同步给
+                // 进程级回退状态；同 id 的重建保留已 arm 的过滤，真正切集才清空。
+                val currentMediaId = mediaItem?.mediaId?.takeUnless { it.isBlank() }
+                if (currentMediaId != serviceDecoderMediaId) {
+                    serviceDecoderMediaId = currentMediaId
+                    serviceDecoderFallbackGate.onMediaChanged()
+                }
+                decoderFallbackState.onMediaItemChanged(currentMediaId)
                 NpPerf.sessionMark(
                     "transition reason=$reason uri=${mediaItem?.localConfiguration?.uri?.lastPathSegment}",
                 )
@@ -214,6 +227,11 @@ class PlaybackService : MediaSessionService() {
                 runCatching { syncPreloadQueue(player) }
             }
 
+            override fun onPlayerError(error: PlaybackException) {
+                if (retryServiceDecoderFailure(player, error)) return
+                Log.w(SERVICE_LOG_TAG, "播放服务解码失败：${error.errorCodeName} ${error.message}")
+            }
+
             /** 队列整体被替换（setMediaItems）时也要重新喂预载 */
             override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
                 runCatching { syncPreloadQueue(player) }
@@ -227,6 +245,48 @@ class PlaybackService : MediaSessionService() {
                 NpPerf.sessionMark("first frame rendered")
             }
         })
+        // 监听器安装在播放器创建之后；若服务重建时播放器已带媒体，补一次当前身份。
+        decoderFallbackState.onMediaItemChanged(player.currentMediaItem?.mediaId)
+    }
+
+    /**
+     * 服务侧播放器的运行期解码回退（E241）。
+     *
+     * UI 侧 MediaController 只收到 Binder 后的错误；但预载/专项测试可能直接持有
+     * 服务播放器。回退状态必须在 renderer 再次查询候选之前武装，并且同一媒体/轨道
+     * 只允许一次，避免 `prepare()` 在平台 codec 与扩展链之间无限重建。
+     */
+    private fun retryServiceDecoderFailure(player: ExoPlayer, error: PlaybackException): Boolean {
+        if (!isDecoderFailureCode(error.errorCode)) return false
+        val parsed = parseDecoderFailureMessage(error.message)
+        val kind = classifyDecoderFailure(error.errorCode, parsed)
+        val plan = fallbackPlan(kind, parsed)
+        if (plan.action == DecoderFallbackAction.GIVE_UP) return false
+        val mediaId = player.currentMediaItem?.mediaId?.takeUnless { it.isBlank() }
+        val mediaKey = mediaId ?: player.currentMediaItem?.localConfiguration?.uri?.toString()
+        val trackKey = parsed.mime ?: parsed.rendererTrack.name
+        if (!serviceDecoderFallbackGate.canRetry(kind, mediaKey, trackKey)) return false
+
+        serviceDecoderFallbackGate.markAttempted(mediaKey, trackKey)
+        when (plan.action) {
+            DecoderFallbackAction.RETRY_WITH_SOFT_ONLY ->
+                decoderFallbackState.armSoftOnlyVideo(mediaKey, MP4V_VIDEO_MIME, mediaId)
+
+            DecoderFallbackAction.RETRY_WITHOUT_FAILED_CODEC -> {
+                val mime = plan.mime
+                val codec = plan.codecName
+                if (mime == null || codec == null) return false
+                decoderFallbackState.armExcludedCodec(mediaKey, mime, codec, mediaId)
+            }
+
+            DecoderFallbackAction.GIVE_UP -> return false
+        }
+        val position = player.currentPosition.coerceAtLeast(0L)
+        player.prepare()
+        if (position > 0L) player.seekTo(position)
+        if (player.playWhenReady) player.play()
+        Log.w(SERVICE_LOG_TAG, "运行期视频解码失败，已回退一次 mime=${plan.mime} codec=${plan.codecName}")
+        return true
     }
 
     /**
@@ -539,6 +599,10 @@ class PlaybackService : MediaSessionService() {
             release()
         }
         mediaSession = null
+        decoderFallbackState.clear()
+        decoderFallbackState.onMediaItemChanged(null)
+        serviceDecoderFallbackGate.onMediaChanged()
+        serviceDecoderMediaId = null
         super.onDestroy()
     }
 }

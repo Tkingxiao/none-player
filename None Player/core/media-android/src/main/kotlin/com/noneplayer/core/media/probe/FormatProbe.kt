@@ -326,6 +326,8 @@ object FormatProbe {
             currentCoroutineContext().ensureActive()
             val sniffed = try {
                 extractor.sniff(input)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (_: Throwable) {
                 sniffThrew = true
                 false
@@ -355,13 +357,16 @@ object FormatProbe {
 
         val output = ProbeOutput()
         try {
-            matched.init(output)
-        } catch (_: Throwable) {
-            // 解封装器初始化失败（I/O、SAF 失效…）：瞬态，不缓存
-            return ProbeOutcome.transient(
-                Result.Unplayable(PlaybackFailure.unreadable(containerName)),
-            )
-        }
+            try {
+                matched.init(output)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // 解封装器初始化失败（I/O、SAF 失效…）：瞬态，不缓存
+                return ProbeOutcome.transient(
+                    Result.Unplayable(PlaybackFailure.unreadable(containerName)),
+                )
+            }
         // MediaStore 的 content:// 地址没有扩展名：容器名以"谁认领了它"为准
         val effectiveContainer = containerFromExtractor(matched) ?: containerName
 
@@ -381,6 +386,8 @@ object FormatProbe {
             }
             val result = try {
                 matched.read(input, holder)
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
             } catch (_: Throwable) {
                 // 解复用中途失败（含部分编码未映射的容器）：轨道信息可能只拿到一半，
                 // 有视频轨照常判定，没有则按"编码无法识别"给原因
@@ -417,7 +424,6 @@ object FormatProbe {
                 output.hasEnoughForProfileCheck()
             ) break
         }
-        matched.release()
         android.util.Log.d(
             "FormatProbe",
             "matched=${matched.javaClass.simpleName} ch=seekable expectedMime=$expectedMime expectVideo=$expectVideo " +
@@ -437,6 +443,9 @@ object FormatProbe {
             ProbeOutcome(outcome.result, ProbeVerdict.NON_DETERMINISTIC)
         } else {
             outcome
+        }
+        } finally {
+            matched?.let { extractor -> runCatching { extractor.release() } }
         }
     }
 
@@ -464,6 +473,8 @@ object FormatProbe {
                 currentCoroutineContext().ensureActive()
                 val sniffed = try {
                     extractor.sniff(input)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (_: Throwable) {
                     sniffThrew = true
                     false
@@ -493,13 +504,16 @@ object FormatProbe {
 
             val output = ProbeOutput()
             try {
-                matched.init(output)
-            } catch (_: Throwable) {
-                // 解封装器初始化失败（I/O、SAF 失效…）：瞬态，不缓存
-                return ProbeOutcome.transient(
-                    Result.Unplayable(PlaybackFailure.unreadable(containerName)),
-                )
-            }
+                try {
+                    matched.init(output)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (_: Throwable) {
+                    // 解封装器初始化失败（I/O、SAF 失效…）：瞬态，不缓存
+                    return ProbeOutcome.transient(
+                        Result.Unplayable(PlaybackFailure.unreadable(containerName)),
+                    )
+                }
             // MediaStore 的 content:// 地址没有扩展名：容器名以"谁认领了它"为准
             val effectiveContainer = containerFromExtractor(matched) ?: containerName
 
@@ -511,6 +525,8 @@ object FormatProbe {
                 currentCoroutineContext().ensureActive()
                 val result = try {
                     matched.read(input, holder)
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
                 } catch (_: Throwable) {
                     // 解复用中途失败（含部分编码未映射的容器）：轨道信息可能只拿到一半，
                     // 有视频轨照常判定，没有则按"编码无法识别"给原因
@@ -551,7 +567,6 @@ object FormatProbe {
                     output.hasEnoughForProfileCheck()
                 ) break
             }
-            matched.release()
             android.util.Log.d(
                 "FormatProbe",
                 "matched=${matched.javaClass.simpleName} expectedMime=$expectedMime expectVideo=$expectVideo " +
@@ -572,6 +587,9 @@ object FormatProbe {
                 ProbeOutcome(outcome.result, ProbeVerdict.NON_DETERMINISTIC)
             } else {
                 outcome
+            }
+            } finally {
+                matched?.let { extractor -> runCatching { extractor.release() } }
             }
         } finally {
             runCatching { dataSource.close() }
@@ -802,7 +820,15 @@ object FormatProbe {
             }
             val audioLayout = audio?.channelCount?.takeIf { it > 0 }?.let(::audioLayoutName)
             val platformVideoQuery = platformVideoDecoderQuery(video)
-            val platformVideo = platformVideoQuery == true
+            // E242：平台 mime 查询只说明“有候选”，还要对当前 Format 的 profile/level/
+            // 位深重新求交。UNKNOWN 放行但不缓存；只有明确 UNSUPPORTED 才摘掉平台链。
+            val platformCapability = if (platformVideoQuery == true) {
+                runCatching { CodecCapabilityProbe.decoderDecision(video) }.getOrNull()
+            } else {
+                null
+            }
+            val platformCapabilityUnsupported = platformCapability?.verdict == CapabilityVerdict.UNSUPPORTED
+            val platformVideo = platformVideoQuery == true && !platformCapabilityUnsupported
             val ffmpegVideo = ffmpegSupports(video.sampleMimeType)
             val bitmapVideo = bitmapRendererSupports(video.sampleMimeType)
             val legacyVideo = legacySupports(video.sampleMimeType)
@@ -824,6 +850,18 @@ object FormatProbe {
                 // A17：平台查询异常时「没有解码器」可能只是没查到，不能冒充确定不支持
                 return if (platformVideoQuery == null) {
                     ProbeOutcome.transient(Result.Unknown)
+                } else if (platformCapabilityUnsupported) {
+                    ProbeOutcome(
+                        Result.Unplayable(
+                            PlaybackFailure.videoCapabilityUnsupported(
+                                container = containerName,
+                                videoCodec = videoName,
+                                audioCodec = audioName,
+                                detail = platformCapability?.reasons?.joinToString("; "),
+                            ),
+                        ),
+                        ProbeVerdict.VIDEO_CODEC_UNSUPPORTED,
+                    )
                 } else {
                     ProbeOutcome(
                         Result.Unplayable(
@@ -835,7 +873,9 @@ object FormatProbe {
             }
             // §12.9.4：有解码器，但档次可能不被设备解码器支持（mp4v ASP vs Simple-only）
             profileMismatch(video, containerName, videoName, audioName)?.let { return it }
-            val queryFailed = platformVideoQuery == null || (audio != null && audioQuery == null)
+            val queryFailed = platformVideoQuery == null ||
+                platformCapability?.verdict == CapabilityVerdict.UNKNOWN ||
+                (audio != null && audioQuery == null)
             return ProbeOutcome(
                 Result.Playable(
                     container = containerName,

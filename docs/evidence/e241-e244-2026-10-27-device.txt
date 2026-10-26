@@ -1,0 +1,33 @@
+# E241–E244 真机取证（2026-10-27）
+
+## 设备 / 安装
+
+- 设备：`60dd2f94`，Xiaomi 23043RP34C / pipa，Android 14（SDK 34），HyperOS `OS2.0.20.0.UMZCNXM`。
+- 应用：`com.noneplayer.app` debug APK；测试包：`com.noneplayer.plugins.player.exo.test`、`com.noneplayer.core.media.android.test`。
+- 安装：因旧包签名不一致，先完整卸载旧 `com.noneplayer.app`，再安装本轮 APK；`dumpsys package` 读数 `lastUpdateTime=2026-10-27 00:17:35`，确认不是旧包。
+- 取证命令均显式使用 `adb -s 60dd2f94`，未使用多设备 `connectedDebugAndroidTest`。
+
+## E241 运行期视频解码回退
+
+命令：
+
+```text
+adb -s 60dd2f94 shell am instrument -w -r -e class com.noneplayer.plugins.player.exo.LegacyPlaybackTest com.noneplayer.plugins.player.exo.test/androidx.test.runner.AndroidJUnitRunner
+```
+
+结果：`OK (8 tests)`，耗时 `22.991s`，`INSTRUMENTATION_CODE: -1`。其中此前在 E240 失败的 `qpelRendersFramesInSyncWithAudio` 本轮通过；`wmv2PictureSample`、H.264/WMV2 与 H.264/MJPEG 切换、平台 Xvid、MJPEG 位图渲染也全部通过。未见测试进程 FATAL。
+
+专项重测：`qpelRendersFramesInSyncWithAudio` 单项 `OK (1 test)`，耗时 `5.124s`。
+
+结论：高通 pipa 上平台 `video/mp4v-es` 运行期失败后，测试侧一次性 arm ASP 专用链并重新 prepare，qpel 能出画并完成音画同步断言；不再是“平台认领后失败、扩展链没有机会接手”。
+
+## E242 能力探测与 MPEG-4 profile
+
+- `CodecCapabilitySnapshotTest`：3 项通过；导出快照 `codec-capability-snapshot.json`，设备字段为 Xiaomi 23043RP34C / SDK 34，`codecs=72`，`errors=0`。快照原文件留在本机临时目录，不把大 JSON 入库。
+- `Mpeg4ProfileProbeTest`：`OK (3 tests)`，耗时 `0.379s`；Simple/Other 与 Advanced Simple/QPel 解析、FormatProbe 对 qpel 拒绝/普通片段接受均通过。
+- `QpelCodecProbeTest`：`OK (3 tests)`，耗时 `1.707s`；显式组件探测、默认选择基线、MPEG-4 decoder 枚举均通过。
+
+## E243–E244 边界
+
+- 本轮未宣称 B 帧/VBR MP3、>4 GiB OpenDML 实体文件及 NUT/RM/PS 各格式首帧/推进/seek/片尾已完成；这些仍需各自夹具和设备证据。
+- 未覆盖 MTK/三星设备；平台厂商像素格式的出画判定继续采用 renderer counter，ImageReader 仅用于 CPU/软解路径像素闸。
