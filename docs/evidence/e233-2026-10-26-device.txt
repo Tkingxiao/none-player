@@ -43,6 +43,17 @@ D. 旧 API 写存储权限（代码口径，未在旧 API 设备实测）
 稳定性：两机 `adb logcat -d` 检索全程 0 条 FATAL EXCEPTION。
 门禁：test 158 套件 / 1098 项 / 0 失败 / 1 跳过、lint 15 份 0 issue、
 release 29,224,711 B / debug 66,222,573 B。
+
+E. 附：隐藏目录 walk 复核（为 E231 观察项取证）
+  - 模拟器建 `/sdcard/Movies/.e233-hidden/secret.mp4` → 应用内「重新扫描」→
+    `ScanTrace: hidden walk done dirs=1 entries=0 …`（与真机 E231 同读数）；
+  - 读码定位：`shouldDescendDirectory(name, inheritedHidden)` 对普通授权根下的
+    `.xxx/` 返回 false（E198 裁定「隐藏目录仅用户显式选择时遍历」），
+    `treeRootEntersHiddenPath` 才放行"整支显式选中"；
+  - 结论：E231 的 `entries=0` 是设计口径而非 walk 缺陷；`queryHiddenDocuments`
+    注释中"目录一律下钻"的旧表述已订正。隐藏根显式授权（→ 隐藏项 saf- 删除）
+    未复测（SAF 选择器隐藏目录入口未走通）。
+
 边界：
   - 程序集为无 all-files 时**有意不发起**删除（否则系统同意框必然出现，违背 E232
     "只保留应用一层确认"的裁定）；代价是必须先授权才能删，授权后全程无系统框；

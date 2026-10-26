@@ -1633,10 +1633,14 @@ class LocalMediaSource(
      * 收进 `.xxx/` 目录，库里便一条都看不见。而 SAF（`DocumentsContract`）的 children
      * 查询**不跳过隐藏项**（同一次实测里 `.nphidden` 与 `.thumbnails` 都照常返回）。
      *
-     * 于是沿用户授权的每个 tree 递归：**目录一律下钻**（隐藏目录可能藏在非隐藏目录之下，
-     * 如 `Movies/Series/.hidden`），**只收"路径中含 `.` 前缀分段"的文件**——非隐藏文件
-     * 仍以 MediaStore 为唯一来源，绝不重复采集。返回项的 uri 是 document URI，引擎直接
-     * 可播（media3 走 ContentResolver）；tree 的持久化读授权已覆盖其全部子孙。
+     * 下钻范围按 **E198 用户裁定「隐藏目录仅用户显式选择时遍历」** 收窄，判定在
+     * [shouldDescendDirectory] / [treeRootEntersHiddenPath]：授权树根本身在隐藏路径里
+     * （docId 含 `.` 前缀分段）→ 允许继续下钻与收件（"用户显式选择"的那条路）；
+     * 普通授权根（如 `Movies`）→ 其下的隐藏子目录**不下钻**（`.e233-hidden/` 实测
+     * `hidden walk done dirs=1 entries=0` 即此口径），非隐藏子目录照常下钻。
+     * 只收"路径中含 `.` 前缀分段"的文件——非隐藏文件仍以 MediaStore 为唯一来源，
+     * 绝不重复采集。返回项的 uri 是 document URI，引擎直接可播（media3 走
+     * ContentResolver）；tree 的持久化读授权已覆盖其全部子孙。
      *
      * 遍历有 [HIDDEN_WALK_BUDGET] 硬预算：目录树里混进 `node_modules`/`.git` 这类巨型结构
      * 时，不把一次扫描拖成分钟级；超预算即停（fail-open，宁可少收也不卡死）。
