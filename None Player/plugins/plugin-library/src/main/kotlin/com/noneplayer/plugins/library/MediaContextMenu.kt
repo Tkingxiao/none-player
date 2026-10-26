@@ -327,6 +327,108 @@ internal fun DeleteConfirmDialog(
     }
 }
 
+/**
+ * E233：删除失败后的**权限引导卡**（应用风格，替代原来的系统二次确认兜底）。
+ *
+ * 删除已改成"丢给系统无确认框"的直连路径，缺权限时必须给用户一条明确出路：
+ * 开启「所有文件访问」后回来重试。卡只说明缺什么、去哪里开，不提供"改用系统
+ * 确认框"的分叉——那是 E232 已裁定撤掉的东西。
+ */
+@Composable
+internal fun DeleteFailureDialog(
+    onDismiss: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+        ),
+    ) {
+        BackHandler { onDismiss() }
+        val ink = LocalNpInk.current
+        val shape = RoundedCornerShape(20.dp)
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(ink.scrim)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = 28.dp)
+                    .widthIn(max = 320.dp)
+                    .fillMaxWidth()
+                    .clip(shape)
+                    .background(ink.surface)
+                    .border(1.dp, ink.border, shape)
+                    .clickable(
+                        interactionSource = remember { MutableInteractionSource() },
+                        indication = null,
+                        onClick = {},
+                    )
+                    .padding(horizontal = 18.dp, vertical = 18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(46.dp)
+                        .background(ink.accentSoft, CircleShape),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = NpIcon.Lock,
+                        contentDescription = null,
+                        tint = ink.accent,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+                Text(
+                    text = "删除失败",
+                    style = NpTypography.titleSmall,
+                    color = ink.fg,
+                    modifier = Modifier.padding(top = 12.dp),
+                )
+                Text(
+                    text = "删除设备文件需要「所有文件访问」权限，或该文件所在目录的写入授权。开启后回来重试即可，也可以在系统文件管理里删除。",
+                    style = NpTypography.bodySmall,
+                    color = ink.muted,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
+                Row(
+                    modifier = Modifier
+                        .padding(top = 16.dp)
+                        .fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    DeleteDialogButton(
+                        text = "取消",
+                        container = ink.surface2,
+                        content = ink.fg,
+                        onClick = onDismiss,
+                        modifier = Modifier.weight(1f),
+                    )
+                    DeleteDialogButton(
+                        text = "去开启",
+                        container = ink.accent,
+                        content = Color.White,
+                        onClick = onOpenSettings,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun DeleteConfirmCard(
     item: MediaItem,

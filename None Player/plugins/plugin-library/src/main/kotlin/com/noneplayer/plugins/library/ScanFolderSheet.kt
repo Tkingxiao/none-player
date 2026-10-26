@@ -368,12 +368,13 @@ internal fun describeScanFolder(treeUriStr: String): Pair<String, String> {
     return name to pretty
 }
 
-/** 释放 SAF 持久化授权（未持有/已撤销时静默） */
+/** 释放 SAF 持久化授权（未持有/已撤销时静默）；E233 起按 READ|WRITE 释放（与持久化口径一致） */
 internal fun releasePersistedTree(context: Context, uriStr: String) {
     runCatching {
         context.contentResolver.releasePersistableUriPermission(
             uriStr.toUri(),
-            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
         )
     }
 }

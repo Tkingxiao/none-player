@@ -464,10 +464,13 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
         if (uri != null) {
             // E64 修复：与 LocalScannerSettings 同根因——take 侧补齐与 release 侧
             // （LocalMediaSource.removeScanFolder）一致的 SecurityException 捕获。
+            // E233：目录授权按 READ|WRITE 持久化——删除（E232 去掉系统确认后）需要
+            // 目录写授权才能在 SAF 树里直接删文档；只读授权会让删除只能失败提示。
             val granted = runCatching {
                 context.contentResolver.takePersistableUriPermission(
                     uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                        android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                 )
             }.isSuccess
             if (granted) {
@@ -520,25 +523,27 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
     // `MediaStore.createDeleteRequest`，Android 11+ 会再弹一次系统确认框——那套
     // UI/样式与播放器无关，用户明确要求去掉、只保留应用自己的确认。
     // 删除按能力顺序尝试：SAF 授权树写入（有写授权时）→ ContentResolver 直接删除
-    // （文件属主 / 已授予「所有文件访问」）。都不行就如实提示，不再借系统弹框。
+    // （文件属主 / 已授予「所有文件访问」）。都不行就弹**应用自己的**权限引导卡
+    // （E233），不再借系统弹框。
     // 结果无论成败都做一次重扫（增量对比，没变则零写盘）。
     var pendingDelete by remember { mutableStateOf<MediaItem?>(null) }
+    // E233：删除失败不再只有一句 toast——应用风格小卡说明缺什么权限，并给
+    // "去开启「所有文件访问」"的唯一出路（开启后回来重试）。
+    var deleteFailureVisible by remember { mutableStateOf(false) }
     val requestDelete: (MediaItem) -> Unit = { item ->
         scope.launch {
             val trees = settings.scanFolderUris.first()
             val ok = withContext(Dispatchers.IO) {
                 deleteMediaItem(context, item, trees)
             }
-            android.widget.Toast.makeText(
-                context,
-                if (ok) "已删除" else "删除失败：请在系统设置中开启「所有文件访问」后重试",
-                android.widget.Toast.LENGTH_LONG,
-            ).show()
             if (ok) {
+                android.widget.Toast.makeText(context, "已删除", android.widget.Toast.LENGTH_SHORT).show()
                 // E232：让播放会话停掉"正在播的那一条"——引擎握着的旧句柄不会因为
                 // 文件消失而自动停，迷你条/通知也会残留一条不存在的媒体。
                 eventBus.publish(KernelEvent.MediaDeleted(item.id, item.uri))
                 scanAll()
+            } else {
+                deleteFailureVisible = true
             }
         }
     }
@@ -1087,6 +1092,16 @@ fun LibraryScreen(navigator: Navigator, forcedView: LibraryView) {
                     pendingDelete = null
                     haptics.performHaptic(NpHaptic.Warning)
                     requestDelete(item)
+                },
+            )
+        }
+        // E233：删除失败的权限引导卡（应用风格，替代原来的系统二次确认兜底）
+        if (deleteFailureVisible) {
+            DeleteFailureDialog(
+                onDismiss = { deleteFailureVisible = false },
+                onOpenSettings = {
+                    deleteFailureVisible = false
+                    openAllFilesAccessSettings(context)
                 },
             )
         }
@@ -2798,6 +2813,16 @@ private fun rememberSortedMediaItems(
  * 两步都没权限就返回 false，由调用方 toast 告知——不再用 `createDeleteRequest`
  * 换一次与播放器无关的系统确认框。
  */
+/**
+ * E232/E233：删除一个媒体文件（**不再走系统二次确认**）。
+ *
+ * 能力顺序：
+ * ① 尽力把老目录授权升级为 READ|WRITE，然后按 `RELATIVE_PATH + DISPLAY_NAME`
+ *    在授权树里找到文档并 `deleteDocument`（有新写授权时可行）；
+ * ② `ContentResolver.delete` 直接删（文件属主、或已授予「所有文件访问」）。
+ * 两步都没权限就返回 false，由调用方弹**应用风格**的权限引导卡——不再用
+ * `createDeleteRequest` 换一次与播放器无关的系统确认框。
+ */
 private suspend fun deleteMediaItem(
     context: android.content.Context,
     item: MediaItem,
@@ -2810,11 +2835,64 @@ private suspend fun deleteMediaItem(
             android.provider.DocumentsContract.deleteDocument(resolver, uri)
         }.getOrDefault(false)
     }
+    // E233：老目录是"只读持久化"（E232 之前的授权口径）。删除前**尽力升级**为
+    // READ|WRITE：系统若还留着原授权的写位就直接升级成功，SAF 树删除即成立，
+    // 用户不必再开「所有文件访问」；不成功则走后面的直删/失败引导卡，无副作用。
+    upgradeTreeWrite(context, authorizedTrees)
     val meta = queryMediaFileMeta(resolver, uri)
     if (meta != null && deleteViaAuthorizedTree(resolver, authorizedTrees, meta.first, meta.second)) {
         return@withContext true
     }
     runCatching { resolver.delete(uri, null, null) > 0 }.getOrDefault(false)
+}
+
+/** E233：把已持久化的目录授权尽力升级为 READ|WRITE（失败静默——只是少一条删除出路）。 */
+private fun upgradeTreeWrite(context: android.content.Context, authorizedTrees: List<String>) {
+    val resolver = context.contentResolver
+    authorizedTrees.forEach { tree ->
+        val uri = runCatching { tree.toUri() }.getOrNull() ?: return@forEach
+        runCatching {
+            resolver.takePersistableUriPermission(
+                uri,
+                android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+            )
+        }
+    }
+}
+
+/**
+ * E233：打开「所有文件访问」系统设置页（删除失败引导卡的出路）。
+ * API 30+ 直达本应用页面，打不开退到总表；API 26–29 没有该权限，退到应用详情页
+ * （那里能看/改存储权限），不伪造一个不存在的入口。
+ */
+private fun openAllFilesAccessSettings(context: android.content.Context) {
+    val appUri = android.net.Uri.parse("package:${context.packageName}")
+    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+        val opened = runCatching {
+            context.startActivity(
+                android.content.Intent(
+                    android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                    appUri,
+                ),
+            )
+        }.isSuccess
+        if (opened) return
+        runCatching {
+            context.startActivity(
+                android.content.Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION),
+            )
+        }
+    } else {
+        runCatching {
+            context.startActivity(
+                android.content.Intent(
+                    android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    appUri,
+                ),
+            )
+        }
+    }
 }
 
 /** MediaStore 条目 → (相对目录, 显示名)；旧系统没有 RELATIVE_PATH 列时返回 null 走直接删除。 */
@@ -2886,7 +2964,7 @@ private fun deleteViaAuthorizedTree(
 }
 
 /** 视频相对路径落在授权树里的剩余目录段；不在树内返回 null（同播放页字幕查找口径）。 */
-private fun treeRelativeSegments(treeRoot: String, relativePath: String): List<String>? {
+internal fun treeRelativeSegments(treeRoot: String, relativePath: String): List<String>? {
     val tree = treeRoot.trim('/')
     val target = relativePath.trim('/')
     if (tree.isEmpty()) return target.split('/').filter { it.isNotEmpty() }

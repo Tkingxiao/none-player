@@ -1247,7 +1247,8 @@ class LocalMediaSource(
         runCatching {
             context.contentResolver.releasePersistableUriPermission(
                 uri.toUri(),
-                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                // E233：与持久化口径一致（READ|WRITE 一起释放）
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
             )
         }
         if (remaining.isEmpty()) {

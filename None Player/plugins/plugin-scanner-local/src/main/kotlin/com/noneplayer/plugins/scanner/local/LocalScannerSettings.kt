@@ -79,10 +79,12 @@ class LocalScannerSettings(private val source: LocalMediaSource) : SettingsProvi
                 // E64 修复：take 侧此前无 try/catch，而对称的 release
                 // （LocalMediaSource.removeScanFolder）早已用 runCatching 包裹——
                 // 非持久化授权或达到系统每应用 128 个授权上限时会抛 SecurityException。
+                // E233：READ|WRITE 同持久化（删除需要在 SAF 树里有写授权）。
                 val granted = runCatching {
                     context.contentResolver.takePersistableUriPermission(
                         uri,
-                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                            android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
                     )
                 }.isSuccess
                 if (granted) {
