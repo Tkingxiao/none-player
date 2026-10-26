@@ -55,8 +55,14 @@ D. 处置口径（测试侧改了什么、为什么这样改）
 E. 模拟器回归（同包对照）
   - emulator-5554 装同一测试 APK：`OK (8 tests)`，24.218s（末轮 22.429s）——修复未放宽任何模拟器侧断言。
 
+F. 真机整批复跑（同包，`am instrument -w` 不加 -e class 过滤）
+  - **Tests run: 15, Failures: 1**——唯一红项仍是 `qpelRendersFramesInSyncWithAudio`（C 段缺口）；
+  - 即 `NpFfmpegVideoRendererTest`（软解渲染/能力）与 `SubtitleQueueTest`（3 分钟字幕队列）
+    在真机 60dd2f94 全过——原「core + SubtitleQueue 只有模拟器读数」的欠账一并收口。
+
 稳定性：两机本轮 `logcat` 0 条应用 FATAL EXCEPTION（崩溃只出现在修复前的旧 APK 上）。
 边界：
-  - 只覆盖 LegacyPlaybackTest 一个类（8 项）；core 11 项 + SubtitleQueueTest 4 项仍只有模拟器读数；
+  - ~~只覆盖 LegacyPlaybackTest 一个类（core 11 项 + SubtitleQueueTest 4 项仍只有模拟器读数）~~
+    → 已由 F 段整批复跑覆盖（本模块 androidTest 全量 15 项）；
   - 真机只有这一台（高通 pipa），MTK / 三星等同类厂商格式未覆盖；
   - qpel 一项在真机仍红，按 C 段留账，**未**用断言放宽掩盖。
