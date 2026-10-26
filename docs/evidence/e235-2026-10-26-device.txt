@@ -1,0 +1,32 @@
+E235 设备取证（2026-10-26）——章节入口三件套
+设备：60dd2f94（Xiaomi 平板 23043RP34C / 1800×2880 @400dpi）
+安装：E235 release APK 覆盖安装 Success；`lastUpdateTime=2026-10-26 19:13:15`（E-D15 核对）。
+夹具：/sdcard/Movies/E233/np-chapters.mp4（90s、**30 章**，每章 3s，FFMETADATA
+`[CHAPTER]` + `-map_metadata 1 -codec copy` 写入；id=1000015531）；测试后整目录删除。
+流程：深链 `?audio=0&fs=1` 起播后 `keyevent 127` 暂停，保证 uiautomator 可 idle。
+
+A. 面板「上一章 / 下一章」
+  打开 ⋯ → 章节（30）子页：返回行 + **上一章 / 下一章** + 章节列表；
+  1) 起始 position=0（第01章）→ 点「下一章」→ position=**3000**（第02章起点）；
+  2) 滚到深处后（见 C）position=54000（第19章）→ 点「上一章」→ position=**51000**（第18章起点）。
+
+B. 进度条章节刻度点按吸附
+  进度条语义节点 `播放进度` bounds=[482,1680][2258,1790]（宽 1776px）；
+  在 61% 处点按（名义 54900ms）→ `dumpsys media_session` position=**54000**
+  ——吸附到第19章起点（12dp≈30px 吸附半径内，偏差 900ms < 1521ms 阈值）；
+  拖动路径不吸附（未造"拖到 54.9s 得 54.9s"的对照读数，纯函数 `chapterSnapPositionMs`
+  的"远离刻度不吸附/近刻度吸附"由单测钉住）。
+
+C. 打开面板自动滚到当前章
+  先经 B 吸附落到 54s（第19章）→ 重新打开章节子页，列表首行即 **19. 第19章**
+  （dump：19→25 章在视口，前 18 章不在）——`LazyColumn.scrollToItem(current)` 生效；
+  3 章小片时该行本就可见，故用 30 章夹具取读数。
+
+D. 稳定性与其它形态
+  全程 0 条 FATAL EXCEPTION。竖屏/内嵌两处底栏共用 `PlayerBottomControls.chapterStartsMs`
+  传入同一条 NpSeekBar 实现（内嵌侧订阅 `player.chapters` 随片切换刷新；右栏读数未单独
+  截图——同组件同参数，风险面在"订阅点是否存在"，由编译与设备回读的章节菜单存在性覆盖）。
+
+边界：
+  - 刻度视觉（4dp 半高细线）未做逐倍率截图对照；吸附半径取 12dp，未做 8/16dp 手感对照；
+  - 章节数极多（数百）时 LazyColumn 组合上限沿用既有 A25 口径（max 320dp 视口），未做长片实测。
