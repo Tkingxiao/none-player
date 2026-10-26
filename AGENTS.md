@@ -448,7 +448,8 @@ adb -s <dev> shell "cat /data/local/tmp/ui.xml" | tr '<' '\n' | grep 'text="目�
 - 迷你条耳机钮是**单向入口**（E232 裁定，只进音频）；退出仅听走音频页「切回视频」，
   别再给耳机钮加"切回视频"的反向语义。
 - 删除只有**一层应用内确认**（E232 裁定，无 `createDeleteRequest` 系统框）；直连删除依赖
-  「所有文件访问」或 SAF 写授权，无权限时是失败提示，不是漏实现。
+  「所有文件访问」或 SAF 写授权，失败时弹**应用风格引导卡**（E233，去开启 all-files），
+  不是漏实现；新授权目录按 READ|WRITE 持久化。
 - 音频模式队列内切集沿用当前模式（E232）：`carryAudioModeTo` 是唯一落点，
   别再在 `observeEngineIndex`/`selectQueueIndex` 里按下一集记忆重算。
 - 附录 A（任务文档末节）列了全部"明确不做"，开任务前先查，防止重开已裁定项。
