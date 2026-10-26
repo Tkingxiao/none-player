@@ -49,7 +49,8 @@ class FsEpisodesLazyTest {
         compose.waitForIdle()
 
         compose.onNodeWithText("选集（200）").assertExists()
-        compose.onNodeWithText("1. 第 1 集").assertExists()
-        compose.onNodeWithText("200. 第 200 集").assertDoesNotExist()
+        // E232：行内序号改成独立等宽列（"01"），标题不再拼 "1. " 前缀
+        compose.onNodeWithText("第 1 集").assertExists()
+        compose.onNodeWithText("第 200 集").assertDoesNotExist()
     }
 }

@@ -251,6 +251,17 @@ internal fun GestureHintPill(text: String?, modifier: Modifier = Modifier) {
 }
 
 /**
+ * 锁定徽标随窗口尺寸的缩放系数（E232：平板/大分辨率设备上 32dp 圆太小）。
+ *
+ * 以 360dp 的短边为基准 1.0，短边每增 360dp 加一档，封顶 1.8——平板竖屏
+ * （800dp）得到约 2.2 → 夹到 1.8，视觉圆 32→57.6dp、命中槽 44→79.2dp，
+ * 手指在平板中部长距离移动后仍然好按；手机横竖屏都维持原尺寸。
+ * 纯函数便于 JVM 单测（dp 已归一化密度，不需要再乘 density）。
+ */
+internal fun lockBadgeScale(shortestWindowDp: Int): Float =
+    (shortestWindowDp.coerceAtLeast(0) / 360f).coerceIn(1f, 1.8f)
+
+/**
  * 锁定态徽标（§4.2 🔒 / 批次 2「锁屏锁定键」）：锁定后舞台上**唯一**可点元素。
  *
  * **随控制层显隐**（本轮修正）：锁定瞬间亮起作反馈，随后按同一节拍自动隐去；
@@ -264,6 +275,9 @@ internal fun StageLockBadgeHost(
     modifier: Modifier = Modifier,
     locked: Boolean = true,
 ) {
+    // E232：按窗口短边缩放——平板/大屏上固定 32dp 的圆与 16dp 图标明显偏小。
+    val configuration = androidx.compose.ui.platform.LocalConfiguration.current
+    val scale = lockBadgeScale(minOf(configuration.screenWidthDp, configuration.screenHeightDp))
     // 独立成组件的另一个原因：舞台嵌在 Column 里时，直接调 AnimatedVisibility 会解析到
     // ColumnScope 的重载而编译不过；这里没有隐式接收者，落到顶层重载。
     AnimatedVisibility(
@@ -272,24 +286,25 @@ internal fun StageLockBadgeHost(
         exit = fadeOut(animationSpec = tween(npDuration(Motion.Field), easing = NpEasing.SilkExit)),
         modifier = modifier,
     ) {
-        StageLockBadge(onUnlock = onUnlock, locked = locked)
+        StageLockBadge(onUnlock = onUnlock, locked = locked, scale = scale)
     }
 }
 
-/** 44dp 玻璃圆「解锁」钮本体（外观与按压反馈） */
+/** 玻璃圆「解锁」钮本体（外观与按压反馈）；尺寸随 [lockBadgeScale] 缩放。 */
 @Composable
 private fun StageLockBadge(
     onUnlock: () -> Unit,
     modifier: Modifier = Modifier,
     locked: Boolean = true,
+    scale: Float = 1f,
 ) {
     Box(
-        modifier = modifier.npTouchTarget(44.dp),
+        modifier = modifier.npTouchTarget(44.dp * scale),
         contentAlignment = Alignment.Center,
     ) {
         Box(
             modifier = Modifier
-                .size(32.dp)
+                .size(32.dp * scale)
                 .clip(CircleShape)
                 .background(Color.Black.copy(alpha = 0.45f))
                 .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape)
@@ -300,7 +315,7 @@ private fun StageLockBadge(
                 imageVector = if (locked) NpIcon.Lock else NpIcon.LockOpen,
                 contentDescription = if (locked) "解锁" else "锁屏",
                 tint = Color.White,
-                modifier = Modifier.size(16.dp),
+                modifier = Modifier.size(16.dp * scale),
             )
         }
     }

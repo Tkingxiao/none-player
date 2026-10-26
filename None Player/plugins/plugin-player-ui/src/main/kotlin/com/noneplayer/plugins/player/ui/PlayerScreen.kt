@@ -279,7 +279,7 @@ private enum class OrientationLock(val requestedOrientation: Int) {
     FollowSensor(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED),
 
     /**
-     * 用户点「全屏」：请求横向，直到显式退出。
+     * 用户点「全屏」且视频是横屏：请求横向，直到显式退出。
      *
      * 请求**不等于生效**：系统有权不转屏，转不过去时把应用信箱化成屏幕中间一条
      * 横向小带（平板 1600x2560 上实测退化成 1600x1200，画面凭空小一圈、上下全黑，
@@ -288,8 +288,39 @@ private enum class OrientationLock(val requestedOrientation: Int) {
      */
     Landscape(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE),
 
+    /**
+     * 用户点「全屏」且视频是竖屏：锁竖屏全屏（E232）。
+     *
+     * 与 [Portrait] 的区别是**它不会被"窗口已竖"自动清除**——竖屏全屏本身就是
+     * 一个持续的全屏形态；[Portrait] 只是退出全屏时的一次性转向请求。
+     */
+    PortraitFullscreen(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT),
+
     /** 用户点「退出全屏」：锁竖向，窗口转竖后立刻交还 [FollowSensor] */
     Portrait(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT),
+}
+
+/** 全屏按钮该选哪一档方向（E232：竖屏视频进竖屏全屏，横屏视频进横屏全屏）。 */
+internal enum class FullscreenOrientation { LANDSCAPE, PORTRAIT }
+
+/**
+ * 全屏方向决策（E232，纯函数便于单测）。
+ *
+ * 优先用播放器已经量出的真实画面比例；起播探测尚未返回时退回媒体条目的
+ * 像素宽高（MediaStore 扫描时就有）；两者都没有才按横屏处理——宁可先给
+ * 传统横屏全屏，也不要把一部横屏片强行锁进竖屏版式。
+ */
+internal fun resolveFullscreenOrientation(
+    videoAspectRatio: Float,
+    width: Int,
+    height: Int,
+): FullscreenOrientation {
+    val ratio = when {
+        videoAspectRatio.isFinite() && videoAspectRatio > 0f -> videoAspectRatio
+        width > 0 && height > 0 -> width.toFloat() / height
+        else -> return FullscreenOrientation.LANDSCAPE
+    }
+    return if (ratio < 1f) FullscreenOrientation.PORTRAIT else FullscreenOrientation.LANDSCAPE
 }
 
 /**
@@ -320,6 +351,31 @@ private suspend fun awaitLandscapeApplied(
         delay(ORIENTATION_CONFIRM_POLL_MS)
     }
     return landscapeApplied(activity)
+}
+
+/**
+ * E232：竖屏请求是否真的换来了竖向**窗口**。
+ *
+ * 只看窗口配置，不掺物理屏幕方向：桌面自由窗口里窗口本来就是竖的，
+ * 拿 `defaultDisplay` 的物理朝向判断会把"已经成功的竖屏全屏"误判成失败。
+ * [landscapeApplied] 额外核对物理屏幕是历史原因（平板信箱化），竖屏不需要那一道。
+ */
+private fun portraitApplied(activity: ComponentActivity): Boolean {
+    val configuration = activity.resources.configuration
+    return configuration.screenHeightDp >= configuration.screenWidthDp
+}
+
+/** E232：轮询到竖向窗口落地；超时返回最后一次判定结果。 */
+private suspend fun awaitPortraitApplied(
+    activity: ComponentActivity,
+    timeoutMs: Long = ORIENTATION_CONFIRM_TIMEOUT_MS,
+): Boolean {
+    val deadline = SystemClock.elapsedRealtime() + timeoutMs
+    while (SystemClock.elapsedRealtime() < deadline) {
+        if (portraitApplied(activity)) return true
+        delay(ORIENTATION_CONFIRM_POLL_MS)
+    }
+    return portraitApplied(activity)
 }
 
 /** 系统「自动旋转」开关是否关着——决定被驳回时该给用户哪句可操作提示。 */
@@ -411,8 +467,9 @@ private class PlayerStageActions(
  * - 倍速 / 外挂字幕（srt/vtt/ass）一键切换；
  * - B 站式控制层：上下渐变 scrim + 点按切换 + 自动隐藏（拖动进度条时不隐藏）+ 沉浸式系统栏；
  * - 进度条擦洗：拖动中暂停并按关键帧预览（CLOSEST_SYNC），松手精确定位（EXACT）；
- * - 全屏 ≡ 窗口横向：进入播放页不预设方向（E48），点「全屏」锁横向、
- *   把设备横过来也进横向；退出全屏只短暂锁竖向把窗口转过去，随即交还传感器；
+ * - 全屏按视频方向分两种（E232）：横屏/未知比例进传统横屏全屏（请求横向），
+ *   竖屏视频进竖屏全屏（请求竖向、整页沉浸）；进入播放页不预设方向（E48），
+ *   把设备横过来也进横向全屏；退出全屏只短暂锁竖向把窗口转过去，随即交还传感器；
  * - 动态挂载 PlaybackOverlay 覆盖层（字幕/弹幕插件零侵入接入）。
  */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -749,40 +806,52 @@ fun PlayerScreen(
         ?: (resolvedMimeType ?: headerMimeType).substringAfter('/', "").uppercase()
             .takeIf { it.isNotBlank() }
 
-    // ---- 方向与全屏（E48）----
-    // 单一真相：**全屏 ≡ 窗口为横向**，不再有独立的 isFullscreen UI 状态。
-    // 于是三件事同时成立且无需任何抑制标志位协调：
-    //   进入播放页 = 当前持机姿态（竖持即竖屏，不再被视频宽高比强行转横）；
-    //   手动点"全屏" = 锁横向；
-    //   把手机/平板横过来 = 窗口转横向 = 全屏自动成立。
-    // 旧写法（比例驱动自动全屏 + autoFullscreenSuppressed 竞态闩）正是
-    // "点视频直接横屏、返回时先转竖屏再退出界面"的根因。
+    // ---- 方向与全屏（E48 / E232）----
+    // 全屏有两种形态，状态单一真相是 [orientationLock]（用户意图） + 窗口方向：
+    //   ① 窗口横向 → 横向全屏（原有语义，平板横持 / 手机横过来都自动成立）；
+    //   ② 用户对竖屏视频点「全屏」→ [OrientationLock.PortraitFullscreen]
+    //      （请求竖向并保持，窗口仍是竖的，但版式换成整页沉浸）。
+    // 不再有"全屏 ≡ 窗口横向"这一条：竖屏视频也应该有全屏可看。
     val activity = context as? ComponentActivity
     // A14：小窗态要早于方向/版式判定声明——方向 effect 与小窗分支都读它。
     var inPipMode by remember(activity) { mutableStateOf(activity?.isInPictureInPictureMode == true) }
     val configuration = LocalConfiguration.current
     val windowIsPortrait = configuration.screenHeightDp >= configuration.screenWidthDp
     // E48 余项 / §13.4：形态分派走 LocalNpWindowInfo（全局唯一判定层）。
-    // **全屏 ≡ 窗口横向**，类 PC（平板横屏 / 桌面自由窗口）不另起一种"嵌入"版式：
-    // 它同样是横向窗口，画面一样铺满可用区域。形态差异只留在两处——系统栏是否
-    // 沉浸隐藏（[isImmersive]）、控制层是否自动隐藏（见下方 autoHide 分支）。
-    // 旧写法把类 PC 排除在全屏之外、再套一层 760dp 限宽列：平板横屏里 16:9 只渲染到
-    // 窗口面积的 53%，且这一版式里根本没有全屏入口，用户没有任何办法把画面放大。
+    // 横向窗口（手机横置 + 平板横屏 / 桌面自由窗口）一律是横向全屏；竖屏全屏由
+    // [OrientationLock.PortraitFullscreen] 单独表达，普通竖窗仍是"上视频 + 下信息区"。
     val windowInfo = LocalNpWindowInfo.current
     val isDesktopLike = windowInfo.isDesktopLike
-    val isFullscreen = !windowIsPortrait
-    // **全屏 ≡ 沉浸**（2026-10-07 用户裁定：假全屏整组删除）：横向窗口一律隐藏系统栏，
-    // 不再有"横窗版式 + 系统栏可见"的中间态。竖窗（手机竖持 / 平板竖持 / 窗口化）
-    // 是普通的竖屏播放页，不叫全屏，也就没有"看得见小白条的全屏"。
-    // A28 曾建议平板/类 PC 横窗保留状态栏；2026-10-23 复核仍选择本裁定（不区分形态）。
-    val isImmersive = isFullscreen
     var orientationLock by rememberSaveable { mutableStateOf(OrientationLock.FollowSensor) }
-    // 本次 Landscape 请求的确认窗时长（热态 1.2s / 冷启深链 4s，见 ORIENTATION_CONFIRM_COLD_START_MS）。
+    val isPortraitFullscreen = orientationLock == OrientationLock.PortraitFullscreen && windowIsPortrait
+    val isFullscreen = !windowIsPortrait || isPortraitFullscreen
+    // **全屏 ≡ 沉浸**（2026-10-07 用户裁定：假全屏整组删除）：横向窗口与竖屏全屏
+    // 一律隐藏系统栏。普通竖窗（手机竖持 / 平板竖持 / 窗口化）不是全屏，
+    // 保留系统栏与顶部常驻 playerbar。
+    val isImmersive = isFullscreen
+    // 本次方向请求的确认窗时长（热态 1.2s / 冷启深链 4s，见 ORIENTATION_CONFIRM_COLD_START_MS）。
     // remember 而非 saveable：跨进程恢复后不再有"冷启"语义，回默认窗即可。
     var orientationConfirmMs by remember { mutableStateOf(ORIENTATION_CONFIRM_TIMEOUT_MS) }
 
+    /**
+     * 进入全屏（E232）：**按视频方向选**横屏或竖屏全屏。
+     * 竖屏视频（画面比例 < 1）进竖屏全屏；横屏/方形/未知比例进传统横屏全屏。
+     */
     fun setFullscreen(fullscreen: Boolean, confirmMs: Long = ORIENTATION_CONFIRM_TIMEOUT_MS) {
-        orientationLock = if (fullscreen) OrientationLock.Landscape else OrientationLock.Portrait
+        orientationLock = if (fullscreen) {
+            when (
+                resolveFullscreenOrientation(
+                    videoAspectRatio = videoAspectRatio,
+                    width = currentItem?.width ?: 0,
+                    height = currentItem?.height ?: 0,
+                )
+            ) {
+                FullscreenOrientation.PORTRAIT -> OrientationLock.PortraitFullscreen
+                FullscreenOrientation.LANDSCAPE -> OrientationLock.Landscape
+            }
+        } else {
+            OrientationLock.Portrait
+        }
         orientationConfirmMs = confirmMs
     }
 
@@ -806,6 +875,14 @@ fun PlayerScreen(
                 else "系统未允许横屏，把设备横过来即可全屏",
             )
         }
+        // E232：竖屏全屏同样要核实——手机横持时请求 PORTRAIT 若被系统驳回，
+        // 不能把窗口悄悄留在横向却声称"正在竖屏全屏"。
+        if (orientationLock == OrientationLock.PortraitFullscreen &&
+            !awaitPortraitApplied(act, orientationConfirmMs)
+        ) {
+            orientationLock = OrientationLock.FollowSensor
+            toast.show("系统未允许竖屏全屏")
+        }
     }
     // 手动退出全屏：锁竖屏把窗口转过去，到位后立刻交还传感器——
     // 锁不留存量，否则"退出全屏后再把设备横过来"不会再进全屏
@@ -823,7 +900,8 @@ fun PlayerScreen(
     // 但这一下是用户要的全屏，整屏归本页——否则转横的瞬间播放页就被退掉、
     // 画面缩进右栏，读起来就是"点全屏没反应"（2026-10-15 真机实报）。
     DisposableEffect(orientationLock) {
-        val fullscreenIntent = orientationLock == OrientationLock.Landscape
+        val fullscreenIntent = orientationLock == OrientationLock.Landscape ||
+            orientationLock == OrientationLock.PortraitFullscreen
         NpFormHandoff.noteStageFullscreen(fullscreenIntent)
         onDispose { NpFormHandoff.noteStageFullscreen(false) }
     }
@@ -854,13 +932,17 @@ fun PlayerScreen(
         if (inPipMode) return@LaunchedEffect // A14：小窗窗口是竖的，别把横屏锁清掉
         if (!isFullscreen) orientationLock = OrientationLock.FollowSensor
     }
-    // fs=1（详情「全屏观看」/ 右栏 ⛶）：落地即全屏——竖窗先请求横向，
-    // 横窗（平板自然方向）本来就是全屏，无需请求。
+    // fs=1（详情「全屏观看」/ 右栏 ⛶）：落地即全屏——按视频方向选横屏或竖屏全屏。
     // 冷启时请求发出在首帧之前，确认窗给冷启长档（ORIENTATION_CONFIRM_COLD_START_MS），
     // 否则 1.2s 窗在转屏完成前过期、请求被撤销，深链在竖屏自然方向设备上永远进不了全屏。
-    LaunchedEffect(immersiveEntry, inPipMode) {
-        if (!inPipMode && immersiveEntry && windowIsPortrait) {
-            setFullscreen(true, ORIENTATION_CONFIRM_COLD_START_MS)
+    // E232：等**装载完成**再判方向（画面比例 / 条目宽高此时才可信）；只执行一次。
+    var immersiveEntryApplied by remember { mutableStateOf(false) }
+    LaunchedEffect(immersiveEntry, mediaOpened, inPipMode) {
+        if (!inPipMode && immersiveEntry && mediaOpened && !immersiveEntryApplied) {
+            immersiveEntryApplied = true
+            if (orientationLock == OrientationLock.FollowSensor) {
+                setFullscreen(true, ORIENTATION_CONFIRM_COLD_START_MS)
+            }
         }
     }
 
@@ -881,12 +963,16 @@ fun PlayerScreen(
      * 有全屏可退 → 退全屏留在播放页；否则 → 离开播放页。
      */
     fun exitFullscreenOrLeave() {
-        if (orientationLock != OrientationLock.Landscape) {
-            returnToBrowsePane()
-            return
+        when (orientationLock) {
+            // 竖屏全屏：退出全屏留在播放页（窗口本来就是竖的，转竖请求只是收口）
+            OrientationLock.PortraitFullscreen -> setFullscreen(false)
+            OrientationLock.Landscape -> {
+                // 用户点过「全屏」：这一次返回用于退出全屏（请求竖向，成功与否都不吞掉下次返回）
+                setFullscreen(false)
+            }
+            // 横向来自设备姿态或系统（FollowSensor），没有"用户点出来的全屏"可退 → 离开
+            else -> returnToBrowsePane()
         }
-        // 用户点过「全屏」：这一次返回用于退出全屏（请求竖向，成功与否都不吞掉下次返回）
-        setFullscreen(false)
     }
 
     /**
@@ -978,6 +1064,8 @@ fun PlayerScreen(
     fun toggleFullscreen() {
         when {
             !isFullscreen -> setFullscreen(true)
+            // E232：竖屏全屏的出口就是"退全屏"，不带走用户，也不回浏览态
+            isPortraitFullscreen -> requestExitFullscreen()
             isDesktopLike -> exitFullscreenOrLeave()
             else -> requestExitFullscreen()
         }
@@ -1938,8 +2026,12 @@ fun PlayerScreen(
         // 否则竖屏播放页会立刻被拆掉，用户看见的是首页。
         if (NpFormHandoff.holdsPlayer()) return@LaunchedEffect
         // 这一下横向是用户点「全屏」要来的（平板竖屏点全屏）：留在本页铺满，
-        // 不退页、也不把画面交还右栏。
-        if (orientationLock == OrientationLock.Landscape) return@LaunchedEffect
+        // 不退页、也不把画面交还右栏。E232：竖屏全屏同样是"用户要的全屏"。
+        if (orientationLock == OrientationLock.Landscape ||
+            orientationLock == OrientationLock.PortraitFullscreen
+        ) {
+            return@LaunchedEffect
+        }
         // 类 PC 档的视频界面是"左栏剧集页 + 右栏画面"。竖屏点卡片进来时媒体库并没有
         // 详情页状态（那一档压根不进详情页），交还前请它把左栏落到正在播的这条上。
         currentItem?.let { NpDetailRequest.request(it) }
@@ -2216,6 +2308,10 @@ fun PlayerScreen(
                 // 253 寄存器 / 18256 码元，ART 校验器直接 VerifyError 拒绝加载
                 // （详见 [PlayerStageState] 的拆分说明）。
                 @Composable fun FullscreenForm() {
+                // E232：横向全屏与竖屏全屏共用这一套覆盖式控制层，只按容器方向调整
+                // 底栏——竖屏宽度放不下"传输三键 + 四个功能键"，改走竖屏常态的
+                // "播放键作 leading + 单行"配方（选集/选项仍在顶栏，画面全屏）。
+                val portraitFullscreen = windowIsPortrait
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -2386,8 +2482,29 @@ fun PlayerScreen(
                     PlayerBottomControls(
                         visible = controlsVisible && !inPipMode && !stageLocked,
                         applyInsets = true,
-                        showTransport = true,
-                        leadingActions = null,
+                        showTransport = !portraitFullscreen,
+                        leadingActions = if (portraitFullscreen) {
+                            {
+                                // 竖屏全屏没有信息区，播放/暂停留在底栏左端（与竖屏常态同一位）
+                                IconButton(
+                                    onClick = ::togglePlay,
+                                    modifier = Modifier.size(36.dp),
+                                ) {
+                                    if (state == PlaybackState.Playing) {
+                                        PauseGlyph(tint = Color.White, barWidth = 3.dp, barHeight = 14.dp)
+                                    } else {
+                                        Icon(
+                                            imageVector = Icons.Filled.PlayArrow,
+                                            contentDescription = "播放",
+                                            tint = Color.White,
+                                            modifier = Modifier.size(22.dp),
+                                        )
+                                    }
+                                }
+                            }
+                        } else {
+                            null
+                        },
                         positionMs = positionState,
                         durationMs = durationMs,
                         bufferedPositionMs = bufferedState,
@@ -2445,7 +2562,13 @@ fun PlayerScreen(
                         // 用激活色表达"当前正处全屏"——形状恒定（展开框=全屏），状态靠颜色读，
                         // 图标承诺与实际动作不再互相打架。
                         fullscreenIcon = NpIcon.Expand,
-                        fullscreenLabel = if (isDesktopLike) "返回浏览" else "退出全屏",
+                        fullscreenLabel = if (isPortraitFullscreen) {
+                            "退出全屏"
+                        } else if (isDesktopLike) {
+                            "返回浏览"
+                        } else {
+                            "退出全屏"
+                        },
                         onSpeedAnchor = { speedAnchor = it },
                         onSubtitleAnchor = { subtitleAnchor = it },
                         onSeekBarAnchor = { seekBarAnchor = it },
@@ -3131,6 +3254,8 @@ fun PlayerScreen(
                 visible = visible,
                 queue = queue,
                 currentIndex = queueIndex,
+                title = if (audioOnly) "播放列表" else "选集",
+                durationFor = ::queueDuration,
                 onSelect = { index ->
                     session.selectQueueIndex(index)
                     episodePanelVisible = false
