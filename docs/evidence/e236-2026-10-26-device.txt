@@ -1,0 +1,30 @@
+E236 设备取证（2026-10-26）——设置页占位只读行撤下 + 音调契约核对
+设备：60dd2f94（Xiaomi 平板 23043RP34C / 1800×2880 @400dpi）
+安装：E236 release APK 覆盖安装 Success；`lastUpdateTime=2026-10-26 19:31:05`。
+
+A. 设置页「播放 / 后台与屏幕」两组行清单（撤下后）
+  真机 dump（设置 Tab 顶部三组）：
+  - 播放组保留：硬件解码优先 / 自动连播 / **默认播放倍速**；「默认字幕语言」**不在**；
+  - 后台与屏幕组保留：**后台播放** / **播放时保持屏幕常亮**；「音频输出」**不在**；
+  - 无空行/残断分隔线（行本身被删，非置空）。
+  截图 settings-after.png。
+
+B. 撤下理由（读数与代码口径）
+  - 默认字幕语言：无数据层；且 media3 `DefaultTrackSelector` 默认 text 轨选择不按
+    系统语言偏好打分（外挂字幕的真实口径是"按媒体记忆 + 同目录同名自动挂载"）——
+    "跟随系统"是不保证真值的展示，"即将支持"是占位承诺，两者都不留。
+  - 音频输出：AudioManager 只能列候选输出设备，不能声明"哪条在响"；没有可靠
+    真值可读，故不摆"系统默认"。
+  - `ValueReadonly` 私有组件随两行删除（无其它使用点），相关分组 eyebrow 注释同步收窄。
+
+C. 「变速保持音调」契约核对（任务文档同条目另一子项）
+  经查为**既有实现**（E147）：`PlaybackService` 显式
+  `.setEnableAudioOutputPlaybackParameters(false)`，倍速走 SonicAudioProcessor
+  默认路径（变速不变调，与声道数无关——真机 6ch 音轨曾因 AudioTrack 原生倍速抛
+  IllegalArgumentException 被回滚到 1.0x）；UI 侧两处说明（竖窗/仅听 `SpeedChoiceRow`
+  的"变速保持音调"caption、全屏 `FsSpeedMenuContent` 同文案）与实际口径一致。
+  **契约记为成立**；边界：未做音频波形/基频测量的听感对照（变速正确性由
+  `SessionKeysTest` 档位表与真机倍速读数覆盖，音高不变属 Sonic 默认语义）。
+
+稳定性：设备 `adb logcat -d` 检索 0 条 FATAL EXCEPTION。
+边界：设置页其余组（手势/外观/解码诊断）未逐行复核；仅屏摄了撤下后的两组清单。
